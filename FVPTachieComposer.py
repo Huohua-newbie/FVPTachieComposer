@@ -489,7 +489,11 @@ class HZCGUI:
 		self.current_preview_images = []  # 当前预览的图像列表（PIL）
 		self.current_preview_index = 0	# 当前显示的帧索引
 		self.current_part_info = None	 # 当前选择的部件信息
+		self.current_part_frame_idx = 0  # 当前选择的部件帧索引
 		self.current_composed_image = None  # 当前合成的图像（PIL）
+		self.role_images = {}  # 存储角色头像的PhotoImage对象
+		self.thumb_buttons = []  # 存储缩略图按钮引用
+		self.thumb_images = []   # 存储缩略图PhotoImage防止被垃圾回收
 
 		# 创建菜单
 		menubar = tk.Menu(root)
@@ -510,7 +514,7 @@ class HZCGUI:
 		main_pane.pack(fill=tk.BOTH, expand=True)
 
 		# 左侧：角色树（带滚动条）
-		left_frame = ttk.Frame(main_pane, width=250)
+		left_frame = ttk.Frame(main_pane, width=320)
 		main_pane.add(left_frame, weight=1)
 		ttk.Label(left_frame, text="角色列表").pack(anchor=tk.W)
 
@@ -526,7 +530,7 @@ class HZCGUI:
 		self.tree = ttk.Treeview(tree_container, columns=("type",), show="tree",
 								 yscrollcommand=tree_scrollbar.set)
 		self.tree.heading("#0", text="名称")
-		self.tree.column("#0", width=200)  # 留出滚动条空间
+		self.tree.column("#0", width=350)  # 增加宽度以适应150x150头像和滚动条
 		self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
 		# 关联滚动条
@@ -536,7 +540,7 @@ class HZCGUI:
 
 		# 中间：预览与合成控制区
 		mid_frame = ttk.Frame(main_pane)
-		main_pane.add(mid_frame, weight=2)
+		main_pane.add(mid_frame, weight=4)
 
 		# 底图预览区域
 		base_preview_frame = ttk.LabelFrame(mid_frame, text="底图预览")
@@ -558,16 +562,36 @@ class HZCGUI:
 		part_preview_frame = ttk.LabelFrame(mid_frame, text="部件预览")
 		part_preview_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-		# 部件选择行
-		select_row = ttk.Frame(part_preview_frame)
-		select_row.pack(fill=tk.X, pady=5)
-		ttk.Label(select_row, text="选择表情部件:").pack(side=tk.LEFT)
-		self.part_var = tk.StringVar()
-		self.part_combo = ttk.Combobox(select_row, textvariable=self.part_var, state="readonly", width=30)
-		self.part_combo.pack(side=tk.LEFT, padx=5)
-		self.part_combo.bind("<<ComboboxSelected>>", self.on_part_select)
+		# 部件缩略图滚动区域（横向）
+		thumb_scroll_frame = ttk.Frame(part_preview_frame)
+		thumb_scroll_frame.pack(fill=tk.X, pady=5)
+		
+		# 横向滚动条
+		thumb_scrollbar = ttk.Scrollbar(thumb_scroll_frame, orient=tk.HORIZONTAL)
+		thumb_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+		
+		# 缩略图画布（支持横向滚动）
+		self.thumb_canvas = tk.Canvas(thumb_scroll_frame, height=120, 
+									  xscrollcommand=thumb_scrollbar.set)
+		self.thumb_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True)
+		thumb_scrollbar.config(command=self.thumb_canvas.xview)
+		
+		# 缩略图容器
+		self.thumb_container = ttk.Frame(self.thumb_canvas)
+		self.thumb_canvas.create_window((0, 0), window=self.thumb_container, anchor=tk.NW)
+		self.thumb_container.bind("<Configure>", 
+			lambda e: self.thumb_canvas.configure(scrollregion=self.thumb_canvas.bbox("all")))
+		
+		# 鼠标滚轮支持（横向滚动）
+		def _on_mousewheel(event):
+			self.thumb_canvas.xview_scroll(int(-1*(event.delta/120)), "units")
+		self.thumb_canvas.bind("<MouseWheel>", _on_mousewheel)
+		
+		# 存储缩略图相关数据
+		self.thumb_buttons = []  # 存储缩略图按钮引用
+		self.thumb_images = []   # 存储缩略图PhotoImage防止GC
 
-		# 部件预览图像
+		# 部件预览图像（选中的大图）
 		self.part_preview_label = ttk.Label(part_preview_frame)
 		self.part_preview_label.pack(pady=5)
 
@@ -581,7 +605,7 @@ class HZCGUI:
 
 		# 右侧：合成结果预览区
 		right_frame = ttk.Frame(main_pane)
-		main_pane.add(right_frame, weight=2)
+		main_pane.add(right_frame, weight=4)
 
 		compose_result_frame = ttk.LabelFrame(right_frame, text="合成预览结果")
 		compose_result_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -604,19 +628,53 @@ class HZCGUI:
 	def show_help(self):
 		"""显示使用说明"""
 		help_text = """
-使用说明：
-0. 实际上，这个小工具可以打开的文件不局限于立绘文件，虽然最开始研发的目的是立绘合成。
-1. 点击菜单“文件”->“打开 BIN 文件”，选择一个 .bin 文件。
-2. 解析完成后，左侧树形列表按角色显示所有底图 HZC 文件。
-3. 点击底图文件，中间区域会显示底图预览，下方部件下拉框会列出对应的表情部件帧。
-4. 选择部件帧后，可点击“预览部件”查看部件单独图像。
-5. 点击“合成预览”可在右侧查看合成效果。
-6. 如需保存当前合成图，点击“保存合成图”。
-7. 如需批量保存该底图的所有表情差分，点击“合成所有差分”，选择保存目录后自动生成所有帧的合成图。
-
-注意：合成所有差分时，将使用部件文件的所有帧进行合成，并保存为 PNG 文件。
+			使用说明：
+			0. 实际上，这个小工具可以打开的文件不局限于立绘文件，虽然最开始研发的目的是立绘合成。
+			1. 点击菜单“文件”->“打开 BIN 文件”，选择一个 .bin 文件。
+			2. 解析完成后，左侧树形列表按角色显示所有底图 HZC 文件。
+			3. 点击底图文件，中间区域会显示底图预览，下方部件下拉框会列出对应的表情部件帧。
+			4. 选择部件帧后，可点击“预览部件”查看部件单独图像。
+			5. 点击“合成预览”可在右侧查看合成效果。
+			6. 如需保存当前合成图，点击“保存合成图”。
+			7. 如需批量保存该底图的所有表情差分，点击“合成所有差分”，选择保存目录后自动生成所有帧的合成图。
+			
+			注意：合成所有差分时，将使用部件文件的所有帧进行合成，并保存为 PNG 文件。
 		"""
 		messagebox.showinfo("使用说明", help_text)
+
+	def extract_role_avatar(self, role_name, role_infos):
+		"""提取角色的第一个底图作为头像"""
+		# 找到第一个非表情的底图文件
+		base_info = None
+		for info in role_infos:
+			if info['type'] == 'hzc' and not info['filename'].endswith('_表情'):
+				base_info = info
+				break
+		
+		if not base_info:
+			return None
+		
+		try:
+			with open(self.input_file, 'rb') as f:
+				f.seek(base_info['offset'])
+				data = f.read(base_info['size'])
+			
+			header_info = {
+				'image_type': base_info.get('image_type', 0),
+				'width': base_info.get('width', 0),
+				'height': base_info.get('height', 0),
+				'frame_count': base_info.get('frame_count', 1)
+			}
+			images = hzc_data_to_pil_list(data, header_info)
+			if images:
+				# 缩放到50x50作为头像（适合Treeview列宽）
+				avatar = images[0].copy()
+				avatar.thumbnail((50, 50), Image.Resampling.LANCZOS)
+				photo = ImageTk.PhotoImage(avatar)
+				return photo
+		except Exception as e:
+			print(f"提取角色 {role_name} 头像失败: {e}")
+		return None
 
 	def open_file(self):
 		file_path = filedialog.askopenfilename(
@@ -637,28 +695,62 @@ class HZCGUI:
 			self.status.config(text="就绪")
 			return
 
-		# 按角色分类
+		# 按角色和服装分类（三级结构：角色 -> 服装 -> 动作）
 		self.role_dict.clear()
+		self.hierarchical_dict = {}  # 新的层级字典: {role: {outfit: [infos]}}
+		
 		for info in self.file_infos:
 			if info['type'] != 'hzc':
 				continue
 			parts = info['filename'].split('_')
 			if len(parts) >= 2 and parts[0] == 'CHR':
 				role = parts[1]
+				# 解析服装和动作信息
+				# 文件名格式示例: CHR_つかさ_夏制服_喜_通常
+				# parts[0]=CHR, parts[1]=角色名, parts[2]=服装, parts[3]=表情类型, parts[4]=动作版本
+				if len(parts) >= 4:
+					outfit = parts[3]  # 服装类型（如：夏制服、夏私服、水着）
+				else:
+					outfit = "默认"
 			else:
 				role = "其他"
+				outfit = "其他"
+			
 			self.role_dict.setdefault(role, []).append(info)
+			self.hierarchical_dict.setdefault(role, {}).setdefault(outfit, []).append(info)
 
-		# 更新树
+		# 更新树（三级层级结构：角色 -> 服装 -> 动作）
 		self.tree.delete(*self.tree.get_children())
-		for role, infos in sorted(self.role_dict.items()):
-			role_node = self.tree.insert("", "end", text=role, open=True)
-			for info in sorted(infos, key=lambda x: x['filename']):
-				# 判断是否为表情部件
-				if not info['filename'].endswith('_表情'):
-					
-					node_text = info['filename']
-					self.tree.insert(role_node, "end", text=node_text, values=(info['type'],), iid=info['filename'])
+		self.role_images.clear()  # 清空旧头像
+		
+		for role, outfits in sorted(self.hierarchical_dict.items()):
+			# 第一级：角色名称（带头像）
+			all_role_infos = []
+			for outfit_infos in outfits.values():
+				all_role_infos.extend(outfit_infos)
+			
+			avatar = self.extract_role_avatar(role, all_role_infos)
+			if avatar:
+				self.role_images[role] = avatar  # 保存引用防止被GC
+				role_node = self.tree.insert("", "end", text=role, image=avatar, open=False)
+			else:
+				role_node = self.tree.insert("", "end", text=role, open=False)
+			
+			# 第二级：服装类型
+			for outfit, infos in sorted(outfits.items()):
+				outfit_node = self.tree.insert(role_node, "end", text=outfit, open=False)
+				
+				# 第三级：具体动作文件（不包含表情文件）
+				for info in sorted(infos, key=lambda x: x['filename']):
+					if not info['filename'].endswith('_表情'):
+						# 提取动作名称（去掉CHR_角色_表情_服装_前缀）
+						parts = info['filename'].split('_')
+						if len(parts) >= 5:
+							action_name = parts[4]  # 例如: 通常、L等
+						else:
+							action_name = info['filename']
+						
+						self.tree.insert(outfit_node, "end", text=action_name, values=(info['type'],), iid=info['filename'])
 
 		self.status.config(text=f"加载完成，共 {len(self.file_infos)} 个文件")
 		self.clear_preview()
@@ -672,8 +764,6 @@ class HZCGUI:
 		self.next_btn.config(state=tk.DISABLED)
 		self.current_preview_images = []
 		self.current_preview_index = 0
-		self.part_combo.set('')
-		self.part_combo.config(values=[])
 		self.preview_part_btn.config(state=tk.DISABLED)
 		self.compose_btn.config(state=tk.DISABLED)
 		self.part_preview_label.config(image='')
@@ -681,6 +771,10 @@ class HZCGUI:
 		self.compose_img_label.config(image='')
 		self.compose_img_label.image = None
 		self.current_composed_image = None
+		self.current_part_info = None
+		self.current_part_frame_idx = 0
+		# 清空缩略图
+		self.clear_thumbnails()
 
 	def on_tree_select(self, event):
 		selected = self.tree.selection()
@@ -728,7 +822,7 @@ class HZCGUI:
 			self.prev_btn.config(state=tk.DISABLED)
 			self.next_btn.config(state=tk.DISABLED)
 
-		self.update_part_combo(info)
+		self.update_part_thumbnails(info)
 
 	def show_current_frame(self):
 		if not self.current_preview_images:
@@ -751,41 +845,101 @@ class HZCGUI:
 			self.current_preview_index += 1
 			self.show_current_frame()
 
-	def update_part_combo(self, base_info):
-		"""根据当前选中的底图，找出对应的表情部件文件，填充下拉框"""
+	def clear_thumbnails(self):
+		"""清空缩略图列表"""
+		for btn_frame, btn, label in self.thumb_buttons:
+			btn_frame.destroy()
+		self.thumb_buttons.clear()
+		self.thumb_images.clear()
+		self.thumb_canvas.xview_moveto(0)
+
+	def update_part_thumbnails(self, base_info):
+		"""根据当前选中的底图，更新部件缩略图列表"""
+		self.clear_thumbnails()
+		
 		part_filename = base_info['filename'] + "_表情"
 		part_info = next((i for i in self.file_infos if i['filename'] == part_filename and i['type'] == 'hzc'), None)
 		if not part_info:
-			self.part_combo.set('')
-			self.part_combo.config(values=[])
 			self.preview_part_btn.config(state=tk.DISABLED)
 			self.compose_btn.config(state=tk.DISABLED)
 			return
 
-		frame_count = part_info.get('frame_count', 1)
-		items = [f"{part_filename} - 帧 {i}" for i in range(frame_count)]
-		self.part_combo.config(values=items)
-		self.part_combo.set(items[0] if items else '')
+		# 读取部件数据生成缩略图
+		try:
+			with open(self.input_file, 'rb') as f:
+				f.seek(part_info['offset'])
+				part_data = f.read(part_info['size'])
+		except Exception as e:
+			print(f"读取部件文件失败: {e}")
+			return
+
+		part_header = {
+			'image_type': part_info.get('image_type', 0),
+			'width': part_info.get('width', 0),
+			'height': part_info.get('height', 0),
+			'frame_count': part_info.get('frame_count', 1)
+		}
+		part_imgs = hzc_data_to_pil_list(part_data, part_header)
+		if not part_imgs:
+			return
+
+		frame_count = len(part_imgs)
+		self.current_part_info = part_info
+		
+		# 创建缩略图按钮（横向排列）
+		for idx, part_img in enumerate(part_imgs):
+			# 缩放到合适大小（100x100以内）
+			thumb = part_img.copy()
+			thumb.thumbnail((100, 100), Image.Resampling.LANCZOS)
+			photo = ImageTk.PhotoImage(thumb)
+			self.thumb_images.append(photo)
+			
+			# 创建带边框的按钮
+			btn_frame = ttk.Frame(self.thumb_container, relief=tk.RIDGE, borderwidth=2)
+			btn_frame.pack(side=tk.LEFT, padx=3, pady=3)
+			
+			btn = ttk.Label(btn_frame, image=photo)
+			btn.pack()
+			
+			# 帧编号标签
+			label = ttk.Label(btn_frame, text=f"{idx}", font=("", 8))
+			label.pack()
+			
+			# 绑定点击事件
+			btn.bind("<Button-1>", lambda e, i=idx: self.on_thumbnail_click(i))
+			btn_frame.bind("<Button-1>", lambda e, i=idx: self.on_thumbnail_click(i))
+			label.bind("<Button-1>", lambda e, i=idx: self.on_thumbnail_click(i))
+			
+			self.thumb_buttons.append((btn_frame, btn, label))
+		
+		# 默认选中第一帧
+		self.on_thumbnail_click(0)
 		self.preview_part_btn.config(state=tk.NORMAL)
 		self.compose_btn.config(state=tk.NORMAL)
-		self.current_part_info = part_info
 
-	def on_part_select(self, event):
-		pass  # 可留空，选择后即可预览或合成
+	def on_thumbnail_click(self, frame_idx):
+		"""点击缩略图时的处理"""
+		self.current_part_frame_idx = frame_idx
+		
+		# 更新选中状态（高亮）
+		for idx, (btn_frame, btn, label) in enumerate(self.thumb_buttons):
+			if idx == frame_idx:
+				btn_frame.config(relief=tk.SUNKEN, borderwidth=3)
+				label.config(foreground="blue")
+			else:
+				btn_frame.config(relief=tk.RIDGE, borderwidth=2)
+				label.config(foreground="black")
+		
+		# 自动预览选中的部件帧并合成预览
+		self.preview_part()
+		self.compose_preview()
 
 	def preview_part(self):
 		"""预览当前选中的部件帧"""
 		if not hasattr(self, 'current_part_info') or not self.current_part_info:
 			return
 		part_info = self.current_part_info
-		part_selection = self.part_combo.get()
-		if not part_selection:
-			return
-		try:
-			frame_str = part_selection.split(' - 帧 ')[-1]
-			frame_idx = int(frame_str)
-		except:
-			frame_idx = 0
+		frame_idx = self.current_part_frame_idx
 
 		try:
 			with open(self.input_file, 'rb') as f:
@@ -826,14 +980,8 @@ class HZCGUI:
 			return
 
 		part_info = self.current_part_info
-		part_selection = self.part_combo.get()
-		if not part_selection:
-			return
-		try:
-			frame_str = part_selection.split(' - 帧 ')[-1]
-			frame_idx = int(frame_str)
-		except:
-			frame_idx = 0
+		# 获取当前选中的帧索引（从缩略图）
+		frame_idx = self.current_part_frame_idx
 
 		# 读取底图
 		try:
