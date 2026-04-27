@@ -5,6 +5,7 @@ import struct
 import zlib
 from PIL import Image, ImageTk
 import os
+import ctypes
 
 
 
@@ -477,10 +478,192 @@ def compose_preview(base_img, part_img, offset_x, offset_y):
 
 # ---------- GUI 主类 ----------
 class HZCGUI:
+	def _build_custom_title_bar(self):
+		"""自绘窗口标题栏，彻底替代系统标题栏"""
+		self._drag_start_x = 0
+		self._drag_start_y = 0
+		self._is_maximized = False
+
+		title_bar = tk.Frame(self.root, bg=self.theme_colors["panel_alt"], height=36, bd=0, highlightthickness=0)
+		title_bar.pack(fill=tk.X, side=tk.TOP)
+		title_bar.pack_propagate(False)
+		self.title_bar = title_bar
+
+		title_label = tk.Label(
+			title_bar,
+			text="FVP Tachie Composer",
+			bg=self.theme_colors["panel_alt"],
+			fg=self.theme_colors["fg"],
+			font=("Segoe UI Semibold", 10)
+		)
+		title_label.pack(side=tk.LEFT, padx=12)
+
+		# 允许拖拽窗口（标题栏和标题文本）
+		for widget in (title_bar, title_label):
+			widget.bind("<ButtonPress-1>", self._start_window_drag)
+			widget.bind("<B1-Motion>", self._on_window_drag)
+			widget.bind("<Double-Button-1>", self._toggle_maximize_restore)
+
+		btn_wrap = tk.Frame(title_bar, bg=self.theme_colors["panel_alt"], bd=0, highlightthickness=0)
+		btn_wrap.pack(side=tk.RIGHT, fill=tk.Y)
+
+		btn_style = {
+			"bg": self.theme_colors["panel_alt"],
+			"fg": self.theme_colors["fg"],
+			"bd": 0,
+			"highlightthickness": 0,
+			"font": ("Segoe UI", 10),
+			"width": 4,
+			"activebackground": "#323a4e",
+			"activeforeground": "#ffffff",
+			"cursor": "hand2",
+		}
+		close_style = dict(btn_style)
+		close_style["activebackground"] = "#c24040"
+
+		self.btn_min = tk.Button(btn_wrap, text="—", command=self._minimize_window, **btn_style)
+		self.btn_min.pack(side=tk.LEFT, fill=tk.Y)
+		self.btn_max = tk.Button(btn_wrap, text="□", command=self._toggle_maximize_restore, **btn_style)
+		self.btn_max.pack(side=tk.LEFT, fill=tk.Y)
+		self.btn_close = tk.Button(btn_wrap, text="✕", command=self.root.destroy, **close_style)
+		self.btn_close.pack(side=tk.LEFT, fill=tk.Y)
+
+	def _start_window_drag(self, event):
+		if self._is_maximized:
+			return
+		self._drag_start_x = event.x_root - self.root.winfo_x()
+		self._drag_start_y = event.y_root - self.root.winfo_y()
+
+	def _on_window_drag(self, event):
+		if self._is_maximized:
+			return
+		x = event.x_root - self._drag_start_x
+		y = event.y_root - self._drag_start_y
+		self.root.geometry(f"+{x}+{y}")
+
+	def _toggle_maximize_restore(self, event=None):
+		try:
+			if self._is_maximized:
+				self.root.state("normal")
+				self.btn_max.config(text="□")
+				self._is_maximized = False
+			else:
+				self.root.state("zoomed")
+				self.btn_max.config(text="❐")
+				self._is_maximized = True
+		except tk.TclError:
+			# 某些环境不支持 zoomed，退化为原始状态
+			self.root.state("normal")
+			self._is_maximized = False
+
+	def _minimize_window(self):
+		# 无边框窗口最小化需要临时恢复系统装饰
+		self.root.overrideredirect(False)
+		self.root.iconify()
+		self.root.bind("<Map>", self._restore_borderless_after_map, add="+")
+
+	def _restore_borderless_after_map(self, event=None):
+		self.root.unbind("<Map>")
+		self.root.overrideredirect(True)
+		if self._is_maximized:
+			self.root.state("zoomed")
+		else:
+			self.root.state("normal")
+
+	def _enable_dark_title_bar(self):
+		"""使用 Windows DWM API 尝试启用暗色标题栏"""
+		if os.name != "nt":
+			return
+		try:
+			hwnd = self.root.winfo_id()
+			value = ctypes.c_int(1)
+			# Windows 10/11 常用暗色标题栏属性
+			DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+			ctypes.windll.dwmapi.DwmSetWindowAttribute(
+				ctypes.c_void_p(hwnd),
+				ctypes.c_uint(DWMWA_USE_IMMERSIVE_DARK_MODE),
+				ctypes.byref(value),
+				ctypes.sizeof(value),
+			)
+		except Exception:
+			# 仅外观增强失败，不影响功能
+			pass
+
+	def _configure_styles(self):
+		"""配置更现代化的 ttk 样式"""
+		style = ttk.Style()
+		try:
+			style.theme_use("clam")
+		except tk.TclError:
+			pass
+
+		# 现代暗色风格
+		bg = "#161a22"
+		panel = "#1f2430"
+		panel_alt = "#252c3b"
+		fg = "#ecf0fa"
+		muted = "#aab3c9"
+		accent = "#5f88ff"
+		accent_hover = "#7ca0ff"
+		border = "#333c52"
+		self.theme_colors = {
+			"bg": bg,
+			"panel": panel,
+			"panel_alt": panel_alt,
+			"fg": fg,
+			"muted": muted,
+			"accent": accent,
+			"accent_hover": accent_hover,
+			"border": border
+		}
+
+		self.root.configure(bg=bg)
+		style.configure(".", background=bg, foreground=fg)
+		style.configure("TFrame", background=bg)
+		style.configure("Card.TFrame", background=panel)
+		style.configure("Toolbar.TFrame", background=panel_alt)
+		style.configure("TLabel", background=bg, foreground=fg, font=("Segoe UI", 10))
+		style.configure("Muted.TLabel", background=panel_alt, foreground=muted, font=("Segoe UI", 9))
+		style.configure("Header.TLabel", background=panel_alt, foreground=fg, font=("Segoe UI Semibold", 11))
+		style.configure(
+			"TLabelframe",
+			background=panel,
+			bordercolor=border,
+			lightcolor=border,
+			darkcolor=border,
+			borderwidth=1,
+			relief="solid"
+		)
+		style.configure("TLabelframe.Label", background=panel, foreground=fg, font=("Segoe UI Semibold", 10))
+		style.configure("TButton", font=("Segoe UI", 10), padding=(12, 7), relief="flat", borderwidth=0)
+		style.map(
+			"TButton",
+			background=[("active", "#2e3648"), ("pressed", "#38425a"), ("disabled", "#2b3140")],
+			foreground=[("disabled", "#7f89a3")]
+		)
+		style.configure("Accent.TButton", background=accent, foreground="white", padding=(14, 7))
+		style.map(
+			"Accent.TButton",
+			background=[("active", accent_hover), ("pressed", accent_hover), ("disabled", "#4d5f92")],
+			foreground=[("disabled", "#dbe3fa")]
+		)
+		style.configure("Treeview", background="#1b202b", fieldbackground="#1b202b", foreground=fg, rowheight=60, borderwidth=0)
+		style.configure("Treeview.Heading", background=panel_alt, foreground=fg, font=("Segoe UI Semibold", 10))
+		style.map("Treeview", background=[("selected", "#3a4668")], foreground=[("selected", "#ffffff")])
+		style.configure("Horizontal.TScrollbar", background=panel_alt)
+		style.configure("Vertical.TScrollbar", background=panel_alt)
+		style.configure("Status.TLabel", background=panel_alt, foreground=muted, padding=(10, 6))
+		style.configure("TPanedwindow", background=bg, sashthickness=6)
+
 	def __init__(self, root):
 		self.root = root
 		self.root.title("FVP引擎 立绘查看与合成工具")
-		self.root.geometry("1600x900")  
+		self.root.geometry("1600x900")
+		self.root.minsize(1280, 760)
+		self._configure_styles()
+		self.root.update_idletasks()
+		# 回到标准窗口模式（性能更稳定）
+		self._enable_dark_title_bar()
 
 		# 变量
 		self.input_file = None
@@ -492,35 +675,41 @@ class HZCGUI:
 		self.current_part_frame_idx = 0  # 当前选择的部件帧索引
 		self.current_composed_image = None  # 当前合成的图像（PIL）
 		self.role_images = {}  # 存储角色头像的PhotoImage对象
+		self.outfit_images = {}  # 存储服装头像的PhotoImage对象
 		self.thumb_buttons = []  # 存储缩略图按钮引用
 		self.thumb_images = []   # 存储缩略图PhotoImage防止被垃圾回收
 
-		# 创建菜单
-		menubar = tk.Menu(root)
-		file_menu = tk.Menu(menubar, tearoff=0)
-		file_menu.add_command(label="打开 BIN 文件", command=self.open_file)
-		file_menu.add_separator()
-		file_menu.add_command(label="退出", command=root.quit)
-		menubar.add_cascade(label="文件", menu=file_menu)
+		# 顶部工具栏
+		toolbar = ttk.Frame(root, style="Toolbar.TFrame", padding=(12, 8))
+		toolbar.pack(fill=tk.X)
+		ttk.Label(toolbar, text="FVP Tachie Composer", style="Header.TLabel").pack(side=tk.LEFT)
+		ttk.Label(toolbar, text="打开 BIN -> 选择底图 -> 选择差分帧 -> 合成/导出", style="Muted.TLabel").pack(side=tk.LEFT, padx=(12, 0))
+		ttk.Button(toolbar, text="打开 BIN", command=self.open_file, style="Accent.TButton").pack(side=tk.RIGHT, padx=(6, 0))
+		ttk.Button(toolbar, text="使用说明", command=self.show_help).pack(side=tk.RIGHT)
 
-		help_menu = tk.Menu(menubar, tearoff=0)
-		help_menu.add_command(label="使用说明", command=self.show_help)
-		menubar.add_cascade(label="帮助", menu=help_menu)
-
-		root.config(menu=menubar)
+		# 主布局容器
+		body = ttk.Frame(root, padding=(10, 10, 10, 6))
+		body.pack(fill=tk.BOTH, expand=True)
 
 		# 主布局：三栏
-		main_pane = ttk.PanedWindow(root, orient=tk.HORIZONTAL)
+		main_pane = tk.PanedWindow(
+			body,
+			orient=tk.HORIZONTAL,
+			bg=self.theme_colors["bg"],
+			sashwidth=6,
+			sashrelief=tk.FLAT,
+			bd=0
+		)
 		main_pane.pack(fill=tk.BOTH, expand=True)
 
 		# 左侧：角色树（带滚动条）
-		left_frame = ttk.Frame(main_pane, width=320)
-		main_pane.add(left_frame, weight=1)
-		ttk.Label(left_frame, text="角色列表").pack(anchor=tk.W)
+		left_frame = ttk.Frame(main_pane, style="Card.TFrame", width=170, padding=(10, 10))
+		main_pane.add(left_frame, minsize=150, stretch="always")
+		ttk.Label(left_frame, text="角色列表", style="Header.TLabel").pack(anchor=tk.W)
 
 		# 创建带滚动条的树视图容器
-		tree_container = ttk.Frame(left_frame)
-		tree_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+		tree_container = ttk.Frame(left_frame, style="Card.TFrame")
+		tree_container.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
 		# 垂直滚动条
 		tree_scrollbar = ttk.Scrollbar(tree_container)
@@ -530,7 +719,7 @@ class HZCGUI:
 		self.tree = ttk.Treeview(tree_container, columns=("type",), show="tree",
 								 yscrollcommand=tree_scrollbar.set)
 		self.tree.heading("#0", text="名称")
-		self.tree.column("#0", width=350)  # 增加宽度以适应150x150头像和滚动条
+		self.tree.column("#0", width=160)
 		self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
 		# 关联滚动条
@@ -539,15 +728,16 @@ class HZCGUI:
 		self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
 
 		# 中间：预览与合成控制区
-		mid_frame = ttk.Frame(main_pane)
-		main_pane.add(mid_frame, weight=4)
+		mid_frame = ttk.Frame(main_pane, style="Card.TFrame", padding=(10, 10))
+		main_pane.add(mid_frame, minsize=420, stretch="always")
 
 		# 底图预览区域
-		base_preview_frame = ttk.LabelFrame(mid_frame, text="底图预览")
-		base_preview_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+		base_preview_frame = ttk.LabelFrame(mid_frame, text="底图预览", padding=(10, 10))
+		base_preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+		self.base_preview_frame = base_preview_frame
 
 		self.preview_label = ttk.Label(base_preview_frame, text="请选择一个底图文件")
-		self.preview_label.pack(pady=10)
+		self.preview_label.pack(pady=(4, 10))
 
 		self.frame_control = ttk.Frame(base_preview_frame)
 		self.frame_control.pack()
@@ -559,19 +749,20 @@ class HZCGUI:
 		self.next_btn.pack(side=tk.LEFT, padx=5)
 
 		# 部件预览区域
-		part_preview_frame = ttk.LabelFrame(mid_frame, text="部件预览")
-		part_preview_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+		part_preview_frame = ttk.LabelFrame(mid_frame, text="部件预览", padding=(10, 10))
+		part_preview_frame.pack(fill=tk.BOTH, expand=True)
+		self.part_preview_frame = part_preview_frame
 
 		# 部件缩略图滚动区域（横向）
 		thumb_scroll_frame = ttk.Frame(part_preview_frame)
-		thumb_scroll_frame.pack(fill=tk.X, pady=5)
+		thumb_scroll_frame.pack(fill=tk.X, pady=(2, 8))
 		
 		# 横向滚动条
 		thumb_scrollbar = ttk.Scrollbar(thumb_scroll_frame, orient=tk.HORIZONTAL)
 		thumb_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
 		
 		# 缩略图画布（支持横向滚动）
-		self.thumb_canvas = tk.Canvas(thumb_scroll_frame, height=120, 
+		self.thumb_canvas = tk.Canvas(thumb_scroll_frame, height=120, bg="#1b202b", highlightthickness=0,
 									  xscrollcommand=thumb_scrollbar.set)
 		self.thumb_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True)
 		thumb_scrollbar.config(command=self.thumb_canvas.xview)
@@ -591,24 +782,19 @@ class HZCGUI:
 		self.thumb_buttons = []  # 存储缩略图按钮引用
 		self.thumb_images = []   # 存储缩略图PhotoImage防止GC
 
-		# 部件预览图像（选中的大图）
-		self.part_preview_label = ttk.Label(part_preview_frame)
-		self.part_preview_label.pack(pady=5)
-
 		# 操作按钮行
 		btn_row = ttk.Frame(part_preview_frame)
 		btn_row.pack(fill=tk.X, pady=5)
-		self.preview_part_btn = ttk.Button(btn_row, text="预览部件", command=self.preview_part, state=tk.DISABLED)
-		self.preview_part_btn.pack(side=tk.LEFT, padx=5)
-		self.compose_btn = ttk.Button(btn_row, text="合成预览", command=self.compose_preview, state=tk.DISABLED)
-		self.compose_btn.pack(side=tk.LEFT, padx=5)
+		self.compose_btn = ttk.Button(btn_row, text="合成预览", command=self.compose_preview, state=tk.DISABLED, style="Accent.TButton")
+		self.compose_btn.pack(side=tk.LEFT)
 
 		# 右侧：合成结果预览区
-		right_frame = ttk.Frame(main_pane)
-		main_pane.add(right_frame, weight=4)
+		right_frame = ttk.Frame(main_pane, style="Card.TFrame", padding=(10, 10))
+		main_pane.add(right_frame, minsize=420, stretch="always")
 
-		compose_result_frame = ttk.LabelFrame(right_frame, text="合成预览结果")
-		compose_result_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+		compose_result_frame = ttk.LabelFrame(right_frame, text="合成预览结果", padding=(10, 10))
+		compose_result_frame.pack(fill=tk.BOTH, expand=True)
+		self.compose_result_frame = compose_result_frame
 
 		self.compose_img_label = ttk.Label(compose_result_frame)
 		self.compose_img_label.pack(pady=10)
@@ -616,30 +802,51 @@ class HZCGUI:
 		# 保存按钮行
 		save_row = ttk.Frame(compose_result_frame)
 		save_row.pack(fill=tk.X, pady=5)
-		save_btn = ttk.Button(save_row, text="保存合成图", command=self.save_composed)
-		save_btn.pack(side=tk.LEFT, padx=5)
-		compose_all_btn = ttk.Button(save_row, text="合成所有差分", command=self.compose_all_diffs)
-		compose_all_btn.pack(side=tk.LEFT, padx=5)
+		save_btn = ttk.Button(save_row, text="保存当前图", command=self.save_composed)
+		save_btn.pack(side=tk.LEFT, padx=(0, 6))
+		compose_all_btn = ttk.Button(save_row, text="批量合成并导出", command=self.compose_all_diffs, style="Accent.TButton")
+		compose_all_btn.pack(side=tk.LEFT)
 
 		# 状态栏
-		self.status = ttk.Label(root, text="就绪", relief=tk.SUNKEN, anchor=tk.W)
+		self.status = ttk.Label(root, text="就绪", anchor=tk.W, style="Status.TLabel")
 		self.status.pack(side=tk.BOTTOM, fill=tk.X)
+		self.root.after(150, self.open_file)
+
+	def _fit_image_for_widget(self, image, widget, fallback_size=(320, 320), margin=20, fixed_max_size=None):
+		"""按控件当前可视尺寸缩放图片，避免超出显示区域"""
+		if fixed_max_size is not None:
+			max_w, max_h = fixed_max_size
+		else:
+			widget.update_idletasks()
+			max_w = widget.winfo_width() - margin
+			max_h = widget.winfo_height() - margin
+			if max_w <= 1 or max_h <= 1:
+				max_w, max_h = fallback_size
+		max_w = max(64, max_w)
+		max_h = max(64, max_h)
+		resized = image.copy()
+		resized.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
+		return resized
 
 	def show_help(self):
 		"""显示使用说明"""
-		help_text = """
-			使用说明：
-			0. 实际上，这个小工具可以打开的文件不局限于立绘文件，虽然最开始研发的目的是立绘合成。
-			1. 点击菜单“文件”->“打开 BIN 文件”，选择一个 .bin 文件。
-			2. 解析完成后，左侧树形列表按角色显示所有底图 HZC 文件。
-			3. 点击底图文件，中间区域会显示底图预览，下方部件下拉框会列出对应的表情部件帧。
-			4. 选择部件帧后，可点击“预览部件”查看部件单独图像。
-			5. 点击“合成预览”可在右侧查看合成效果。
-			6. 如需保存当前合成图，点击“保存合成图”。
-			7. 如需批量保存该底图的所有表情差分，点击“合成所有差分”，选择保存目录后自动生成所有帧的合成图。
-			
-			注意：合成所有差分时，将使用部件文件的所有帧进行合成，并保存为 PNG 文件。
-		"""
+		help_text = (
+			"FVPTachieComposer 使用说明\n\n"
+			"【快速开始】\n"
+			"1. 程序启动后会自动弹出 BIN 文件选择框。\n"
+			"2. 选择 .bin 后，左侧会显示角色 -> 分类 -> 动作层级。\n"
+			"3. 点击任意底图，即可在中间看到底图预览。\n\n"
+			"【表情与合成】\n"
+			"1. 底图被选中后，会自动加载对应“_表情”部件帧。\n"
+			"2. 点击任意缩略图，会自动预览该部件并生成合成结果。\n"
+			"3. 若需刷新右侧结果，可手动点击“合成预览”。\n\n"
+			"【导出】\n"
+			"1. 保存当前图：导出当前右侧显示的合成结果。\n"
+			"2. 批量合成并导出：按当前底图对应的所有表情帧批量生成 PNG。\n\n"
+			"【说明】\n"
+			"- 本工具不仅可用于立绘，也可查看包内其他可识别图像资源。\n"
+			"- 若某文件解析失败，通常是资源格式异常或数据不完整。"
+		)
 		messagebox.showinfo("使用说明", help_text)
 
 	def extract_role_avatar(self, role_name, role_infos):
@@ -722,6 +929,7 @@ class HZCGUI:
 		# 更新树（三级层级结构：角色 -> 服装 -> 动作）
 		self.tree.delete(*self.tree.get_children())
 		self.role_images.clear()  # 清空旧头像
+		self.outfit_images.clear()  # 清空旧服装头像
 		
 		for role, outfits in sorted(self.hierarchical_dict.items()):
 			# 第一级：角色名称（带头像）
@@ -738,7 +946,13 @@ class HZCGUI:
 			
 			# 第二级：服装类型
 			for outfit, infos in sorted(outfits.items()):
-				outfit_node = self.tree.insert(role_node, "end", text=outfit, open=False)
+				outfit_avatar = self.extract_role_avatar(f"{role}_{outfit}", infos)
+				outfit_key = f"{role}::{outfit}"
+				if outfit_avatar:
+					self.outfit_images[outfit_key] = outfit_avatar  # 保存引用防止被GC
+					outfit_node = self.tree.insert(role_node, "end", text=outfit, image=outfit_avatar, open=False)
+				else:
+					outfit_node = self.tree.insert(role_node, "end", text=outfit, open=False)
 				
 				# 第三级：具体动作文件（不包含表情文件）
 				for info in sorted(infos, key=lambda x: x['filename']):
@@ -764,10 +978,7 @@ class HZCGUI:
 		self.next_btn.config(state=tk.DISABLED)
 		self.current_preview_images = []
 		self.current_preview_index = 0
-		self.preview_part_btn.config(state=tk.DISABLED)
 		self.compose_btn.config(state=tk.DISABLED)
-		self.part_preview_label.config(image='')
-		self.part_preview_label.image = None
 		self.compose_img_label.config(image='')
 		self.compose_img_label.image = None
 		self.current_composed_image = None
@@ -828,9 +1039,14 @@ class HZCGUI:
 		if not self.current_preview_images:
 			return
 		img = self.current_preview_images[self.current_preview_index]
-		# 缩放以适应预览区域（最大宽度350）
-		img.thumbnail((350, 350))
-		photo = ImageTk.PhotoImage(img)
+		# 底图预览使用固定上限，避免点击切换时容器被反向撑大
+		display_img = self._fit_image_for_widget(
+			img,
+			self.base_preview_frame,
+			fallback_size=(430, 430),
+			fixed_max_size=(520, 420)
+		)
+		photo = ImageTk.PhotoImage(display_img)
 		self.preview_label.config(image=photo, text='')
 		self.preview_label.image = photo
 		self.frame_label.config(text=f"帧 {self.current_preview_index+1}/{len(self.current_preview_images)}")
@@ -860,7 +1076,6 @@ class HZCGUI:
 		part_filename = base_info['filename'] + "_表情"
 		part_info = next((i for i in self.file_infos if i['filename'] == part_filename and i['type'] == 'hzc'), None)
 		if not part_info:
-			self.preview_part_btn.config(state=tk.DISABLED)
 			self.compose_btn.config(state=tk.DISABLED)
 			return
 
@@ -914,7 +1129,6 @@ class HZCGUI:
 		
 		# 默认选中第一帧
 		self.on_thumbnail_click(0)
-		self.preview_part_btn.config(state=tk.NORMAL)
 		self.compose_btn.config(state=tk.NORMAL)
 
 	def on_thumbnail_click(self, frame_idx):
@@ -930,8 +1144,7 @@ class HZCGUI:
 				btn_frame.config(relief=tk.RIDGE, borderwidth=2)
 				label.config(foreground="black")
 		
-		# 自动预览选中的部件帧并合成预览
-		self.preview_part()
+		# 点击缩略图后仅在右侧更新合成结果
 		self.compose_preview()
 
 	def preview_part(self):
@@ -961,8 +1174,8 @@ class HZCGUI:
 			return
 		part_img = part_imgs[frame_idx]
 
-		part_img.thumbnail((300, 300))
-		photo = ImageTk.PhotoImage(part_img)
+		display_img = self._fit_image_for_widget(part_img, self.part_preview_frame, fallback_size=(360, 260))
+		photo = ImageTk.PhotoImage(display_img)
 		self.part_preview_label.config(image=photo)
 		self.part_preview_label.image = photo
 
@@ -1031,8 +1244,7 @@ class HZCGUI:
 		self.current_composed_image = composed.copy()  # 保存原图用于保存
 
 		# 缩放显示在右侧
-		display_img = composed.copy()
-		display_img.thumbnail((500, 500))
+		display_img = self._fit_image_for_widget(composed, self.compose_result_frame, fallback_size=(560, 560))
 		photo = ImageTk.PhotoImage(display_img)
 		self.compose_img_label.config(image=photo)
 		self.compose_img_label.image = photo
