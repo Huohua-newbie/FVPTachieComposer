@@ -919,12 +919,14 @@ class HZCGUI:
 					outfit = parts[3]  # 服装类型（如：夏制服、夏私服、水着）
 				else:
 					outfit = "默认"
+				self.role_dict.setdefault(role, []).append(info)
+				self.hierarchical_dict.setdefault(role, {}).setdefault(outfit, []).append(info)
 			else:
-				role = "其他"
-				outfit = "其他"
-			
-			self.role_dict.setdefault(role, []).append(info)
-			self.hierarchical_dict.setdefault(role, {}).setdefault(outfit, []).append(info)
+				# 非标准命名（不以 CHR_ 开头，如 "ネコ"）：使用文件名本身作为角色名
+				role = info['filename']
+				outfit = "默认"
+				self.role_dict.setdefault(role, []).append(info)
+				self.hierarchical_dict.setdefault(role, {}).setdefault(outfit, []).append(info)
 
 		# 更新树（三级层级结构：角色 -> 服装 -> 动作）
 		self.tree.delete(*self.tree.get_children())
