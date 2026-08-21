@@ -71,14 +71,15 @@ class ComposerApp:
 
     def _apply_theme(self):
         p = self.page
+        sb = ft.ScrollbarTheme(thumb_visibility=True, track_visibility=False)
         if self.is_dark:
-            p.theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True)
-            p.dark_theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True)
+            p.theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb)
+            p.dark_theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb)
             p.theme_mode = ft.ThemeMode.DARK
             p.bgcolor = ft.Colors.SURFACE_CONTAINER_LOWEST
         else:
-            p.theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True)
-            p.dark_theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True)
+            p.theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True, scrollbar_theme=sb)
+            p.dark_theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True, scrollbar_theme=sb)
             p.theme_mode = ft.ThemeMode.LIGHT
             p.bgcolor = ft.Colors.SURFACE_CONTAINER_LOWEST
 
@@ -246,14 +247,18 @@ class ComposerApp:
             expand=True,
         )
 
-        self.thumb_list = ft.ListView(
-            spacing=8, horizontal=True, height=140,
-            auto_scroll=False, scroll=ft.ScrollMode.AUTO,
+        self.thumb_row = ft.Row(
+            spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            scroll=ft.ScrollMode.AUTO, wrap=False,
         )
-        self.thumb_list.visible = False
+        self.thumb_scroll = ft.Container(
+            content=self.thumb_row,
+            height=140,
+        )
+        self.thumb_scroll.visible = False
 
         part_area = ft.Stack(
-            [self.part_hint, self.thumb_list],
+            [self.part_hint, self.thumb_scroll],
             expand=True,
             fit=ft.StackFit.EXPAND,
         )
@@ -463,8 +468,8 @@ class ComposerApp:
         self.result_hint.visible = True
         self.frame_label.value = ""
         self.frame_nav_holder.visible = False
-        self.thumb_list.controls.clear()
-        self.thumb_list.visible = False
+        self.thumb_row.controls.clear()
+        self.thumb_scroll.visible = False
         self.part_hint.visible = True
         self.part_count.value = ""
         self.save_btn.disabled = True
@@ -533,6 +538,26 @@ class ComposerApp:
         self.role_thumb_cache[role] = widget
         return widget
 
+    def _make_mini_thumb(self, info, size=24):
+        key = f"mini_{info['filename']}_{size}"
+        if key in self.role_thumb_cache:
+            return self.role_thumb_cache[key]
+        try:
+            imgs = self._read_pil_list(info)
+            if imgs:
+                img = imgs[0]
+                w, h = img.size
+                s = min(1.0, size / max(w, h))
+                thumb = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.Resampling.LANCZOS)
+                widget = ft.Image(src=_img_bytes(thumb), width=size, height=size, fit=ft.BoxFit.CONTAIN)
+                self.role_thumb_cache[key] = widget
+                return widget
+        except Exception:
+            pass
+        fallback = ft.Icon(ft.Icons.IMAGE_OUTLINED, size=14, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.role_thumb_cache[key] = fallback
+        return fallback
+
     def _outfit_tile(self, outfit, infos):
         state = {"open": False}
         chevron = ft.Icon(ft.Icons.CHEVRON_RIGHT, size=14, color=ft.Colors.ON_SURFACE_VARIANT)
@@ -542,7 +567,8 @@ class ComposerApp:
             if info["filename"].endswith("_表情"):
                 continue
             parts = info["filename"].split("_")
-            name = parts[4] if len(parts) >= 5 else info["filename"]
+            name = parts[2] if parts[0] == "CHR" and len(parts) >= 3 else (
+                parts[4] if len(parts) >= 5 else info["filename"])
             body.controls.append(self._action_tile(name, info))
 
         def toggle(e):
@@ -551,8 +577,11 @@ class ComposerApp:
             chevron.name = ft.Icons.EXPAND_MORE if state["open"] else ft.Icons.CHEVRON_RIGHT
             self.page.update()
 
+        thumb_info = next((i for i in infos if not i["filename"].endswith("_表情")), None)
+        thumb_widget = self._make_mini_thumb(thumb_info, 24) if thumb_info else ft.Icon(ft.Icons.FOLDER, size=18, color=ft.Colors.SECONDARY)
+
         header = ft.ListTile(
-            leading=ft.Icon(ft.Icons.FOLDER, size=18, color=ft.Colors.SECONDARY),
+            leading=thumb_widget,
             title=ft.Text(outfit, size=12,
                           max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
             trailing=chevron,
@@ -564,15 +593,15 @@ class ComposerApp:
 
     def _action_tile(self, name, info):
         selected = info["filename"] == self.selected_filename
+        thumb_widget = self._make_mini_thumb(info, 20)
 
         c = ft.ListTile(
-            leading=ft.Icon(ft.Icons.IMAGE_OUTLINED, size=16,
-                            color=ft.Colors.PRIMARY if selected else ft.Colors.ON_SURFACE_VARIANT),
+            leading=thumb_widget,
             title=ft.Text(name, size=12,
                           color=ft.Colors.ON_SURFACE if selected else ft.Colors.ON_SURFACE_VARIANT,
                           max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
             on_click=lambda e: self._select_action(info, c),
-            content_padding=ft.Padding.only(left=48, right=4, top=0, bottom=0),
+            content_padding=ft.Padding.only(left=52, right=4, top=0, bottom=0),
             dense=True,
             selected=selected,
         )
@@ -650,8 +679,8 @@ class ComposerApp:
         self.part_info = None
         self.part_imgs = []
         self.thumb_refs = []
-        self.thumb_list.controls.clear()
-        self.thumb_list.visible = False
+        self.thumb_row.controls.clear()
+        self.thumb_scroll.visible = False
         self.part_hint.visible = True
         self.part_count.value = ""
         self.save_btn.disabled = True
@@ -680,9 +709,9 @@ class ComposerApp:
         self.part_imgs = imgs
         self.part_count.value = f"{len(imgs)} 帧"
         for idx, img in enumerate(imgs):
-            self.thumb_list.controls.append(self._make_thumb(img, idx))
+            self.thumb_row.controls.append(self._make_thumb(img, idx))
         self.part_hint.visible = False
-        self.thumb_list.visible = True
+        self.thumb_scroll.visible = True
         self.page.update()
         self._pick_part(0)
 
