@@ -51,6 +51,8 @@ class ComposerApp:
         self.composed_img = None
         self.thumb_refs = []
 
+        self.file_picker = ft.FilePicker()
+        self.page.services = [self.file_picker]
         self._setup_page()
         self._build()
 
@@ -388,23 +390,17 @@ class ComposerApp:
     # ── Open BIN ────────────────────────────────────────────
 
     async def _open_bin(self, e):
-        fp = ft.FilePicker()
-        self.page.services.append(fp)
-        self.page.update()
         try:
-            result = await fp.pick_files(
+            result = await self.file_picker.pick_files(
                 dialog_title="选择 BIN 文件",
                 allowed_extensions=["bin"],
                 allow_multiple=False,
             )
-        finally:
-            try:
-                self.page.services.remove(fp)
-            except ValueError:
-                pass
-        if not result or not result.files:
+        except Exception:
             return
-        path = result.files[0].path
+        if not result:
+            return
+        path = result[0].path
         if not path:
             return
         await self._load_bin(path)
@@ -716,21 +712,15 @@ class ComposerApp:
             self._snack("请先选择底图并合成", error=True)
             return
         name = f"{self.selected_info['filename']}_diff_{self.part_idx:03d}.png"
-        fp = ft.FilePicker()
-        self.page.services.append(fp)
-        self.page.update()
         try:
-            result = await fp.save_file(dialog_title="保存当前合成图像", file_name=name)
-        finally:
-            try:
-                self.page.services.remove(fp)
-            except ValueError:
-                pass
-        if not result or not result.path:
+            result = await self.file_picker.save_file(dialog_title="保存当前合成图像", file_name=name)
+        except Exception:
+            return
+        if not result:
             return
         try:
-            self.composed_img.save(result.path, "PNG")
-            self._snack(f"已保存: {Path(result.path).name}")
+            self.composed_img.save(result, "PNG")
+            self._snack(f"已保存: {Path(result).name}")
         except Exception as ex:
             self._snack(f"保存失败: {ex}", error=True)
 
@@ -738,19 +728,13 @@ class ComposerApp:
         if not self.part_info or not self.selected_info or not self.part_imgs:
             self._snack("请先选择底图并合成", error=True)
             return
-        fp = ft.FilePicker()
-        self.page.services.append(fp)
-        self.page.update()
         try:
-            result = await fp.get_directory_path(dialog_title="选择导出目录")
-        finally:
-            try:
-                self.page.services.remove(fp)
-            except ValueError:
-                pass
-        if not result or not result.path:
+            result = await self.file_picker.get_directory_path(dialog_title="选择导出目录")
+        except Exception:
             return
-        save_dir = result.path
+        if not result:
+            return
+        save_dir = result
         self._set_status("正在批量导出…")
 
         def work():
