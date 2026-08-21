@@ -53,7 +53,9 @@ class ComposerApp:
         self.role_thumb_cache = {}
 
         self.file_picker = ft.FilePicker()
+        self.snack_bar = ft.SnackBar(ft.Text("", size=12))
         self.page.services = [self.file_picker]
+        self.page.overlay.append(self.snack_bar)
         self._setup_page()
         self._build()
 
@@ -387,12 +389,10 @@ class ComposerApp:
     # ── Status ──────────────────────────────────────────────
 
     def _snack(self, msg, error=False):
-        self.page.open(
-            ft.SnackBar(
-                ft.Text(msg, size=12),
-                bgcolor=ft.Colors.ERROR_CONTAINER if error else ft.Colors.PRIMARY_CONTAINER,
-            )
-        )
+        self.snack_bar.bgcolor = ft.Colors.ERROR_CONTAINER if error else ft.Colors.PRIMARY_CONTAINER
+        self.snack_bar.content = ft.Text(msg, size=12)
+        self.snack_bar.open = True
+        self.page.update()
 
     def _set_status(self, text):
         self.status_text.value = text
@@ -520,7 +520,7 @@ class ComposerApp:
                     imgs = self._read_pil_list(info)
                     if imgs:
                         img = imgs[0]
-                        widget = _make_thumb_widget(img, 36)
+                        widget = _make_thumb_widget(img, 44)
                         self.role_thumb_cache[role] = widget
                         return widget
                 except Exception:
