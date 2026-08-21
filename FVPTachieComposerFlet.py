@@ -451,6 +451,9 @@ class ComposerApp:
                 if len(parts) >= 2 and parts[0] == "CHR":
                     role = parts[1]
                     outfit = parts[3] if len(parts) >= 4 else "默认"
+                    # Handle ru suffix for silhouette files
+                    if parts[-1].lower() == "ru":
+                        outfit = f"{outfit}_ru"
                 else:
                     role = info["filename"]
                     outfit = "默认"

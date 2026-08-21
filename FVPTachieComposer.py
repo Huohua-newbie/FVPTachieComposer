@@ -453,6 +453,9 @@ def compose_preview(base_img, part_img, offset_x, offset_y):
 	"""将部件图像合成到底图上，返回合成后的 PIL Image"""
 	base = base_img.convert('RGBA')
 	part = part_img.convert('RGBA')
+	# If part size matches base size, treat as full replacement
+	if part.size == base.size:
+		return part
 	result = base.copy()
 	w, h = part.size
 	paste_x, paste_y = offset_x, offset_y
