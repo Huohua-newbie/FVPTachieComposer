@@ -812,11 +812,9 @@ def _img_bytes(img, fmt="PNG"):
 def _thumb_bytes(img, size=100):
     w, h = img.size
     s = min(1.0, size / max(w, h))
-    thumb = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.Resampling.NEAREST)
-    if thumb.mode == "RGBA":
-        thumb = thumb.convert("RGB")
+    thumb = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.Resampling.LANCZOS)
     buf = io.BytesIO()
-    thumb.save(buf, "JPEG", quality=70)
+    thumb.save(buf, "PNG")
     return buf.getvalue()
 
 
