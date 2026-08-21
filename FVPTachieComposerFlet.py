@@ -408,7 +408,7 @@ class ComposerApp:
         import threading
         def dismiss():
             import time
-            time.sleep(3)
+            time.sleep(1)
             try:
                 self.page.overlay.clear()
                 self.page.update()
