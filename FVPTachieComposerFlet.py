@@ -9,6 +9,7 @@ Run: python FVPTachieComposerFlet.py
 
 import asyncio
 import io
+import sys
 from pathlib import Path
 
 import flet as ft
@@ -21,6 +22,16 @@ from FVPTachieComposer import (
 )
 
 TRANSPARENT = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+
+
+def _app_icon():
+    """返回随程序分发的 Shinku.ico 路径；开发环境取脚本目录，打包后取解包目录。"""
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", "")) or Path(sys.executable).parent
+    else:
+        base = Path(__file__).parent
+    icon = base / "Shinku.ico"
+    return str(icon) if icon.exists() else None
 
 HELP_TEXT = (
     "1. 点击「打开 BIN」选择 .bin 文件\n"
@@ -65,6 +76,9 @@ class ComposerApp:
         p.window.min_width = 1080
         p.window.min_height = 640
         p.window.title_bar_hidden = True
+        icon = _app_icon()
+        if icon:
+            p.window.icon = icon
         p.padding = 0
         p.spacing = 0
         self._apply_theme()
@@ -697,6 +711,9 @@ class ComposerApp:
         self.thumb_list.visible = False
         self.part_hint.visible = True
         self.part_count.value = ""
+        self.composed_img = None
+        self.result_image.src = TRANSPARENT
+        self.result_hint.visible = True
         self.save_btn.disabled = True
         self.batch_btn.disabled = True
 
