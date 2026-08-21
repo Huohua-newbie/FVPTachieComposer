@@ -248,7 +248,7 @@ class ComposerApp:
         )
 
         self.thumb_list = ft.ListView(
-            spacing=8, horizontal=True, height=140,
+            spacing=8, horizontal=True, height=128,
             auto_scroll=False, scroll=ft.ScrollMode.AUTO,
         )
         self.thumb_list.visible = False
@@ -275,7 +275,7 @@ class ComposerApp:
             expand=True,
         )
 
-        bottom = ft.Column([part_header, part_area], spacing=6, height=160)
+        bottom = ft.Column([part_header, part_area], spacing=6, height=148)
 
         return ft.Card(
             content=ft.Container(
@@ -520,10 +520,7 @@ class ComposerApp:
                     imgs = self._read_pil_list(info)
                     if imgs:
                         img = imgs[0]
-                        w, h = img.size
-                        s = min(1.0, 36 / max(w, h))
-                        thumb = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.Resampling.LANCZOS)
-                        widget = ft.Image(src=_img_bytes(thumb), width=36, height=36, fit=ft.BoxFit.CONTAIN)
+                        widget = _make_thumb_widget(img, 36)
                         self.role_thumb_cache[role] = widget
                         return widget
                 except Exception:
@@ -541,11 +538,7 @@ class ComposerApp:
         try:
             imgs = self._read_pil_list(info)
             if imgs:
-                img = imgs[0]
-                w, h = img.size
-                s = min(1.0, size / max(w, h))
-                thumb = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.Resampling.LANCZOS)
-                widget = ft.Image(src=_img_bytes(thumb), width=size, height=size, fit=ft.BoxFit.CONTAIN)
+                widget = _make_thumb_widget(imgs[0], size)
                 self.role_thumb_cache[key] = widget
                 return widget
         except Exception:
@@ -712,11 +705,7 @@ class ComposerApp:
         self._pick_part(0)
 
     def _make_thumb(self, img, idx):
-        w, h = img.size
-        mx = 110
-        s = min(1.0, mx / max(w, h))
-        thumb = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.Resampling.LANCZOS)
-        data = _img_bytes(thumb)
+        data = _thumb_bytes(img, 106)
         selected = idx == self.part_idx
 
         c = ft.Container(
@@ -818,6 +807,22 @@ def _img_bytes(img, fmt="PNG"):
     buf = io.BytesIO()
     img.save(buf, fmt)
     return buf.getvalue()
+
+
+def _thumb_bytes(img, size=106):
+    w, h = img.size
+    s = min(1.0, size / max(w, h))
+    thumb = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.Resampling.NEAREST)
+    if thumb.mode == "RGBA":
+        thumb = thumb.convert("RGB")
+    buf = io.BytesIO()
+    thumb.save(buf, "JPEG", quality=70)
+    return buf.getvalue()
+
+
+def _make_thumb_widget(img, size=36):
+    data = _thumb_bytes(img, size)
+    return ft.Image(src=data, width=size, height=size, fit=ft.BoxFit.CONTAIN)
 
 
 def main(page: ft.Page):
