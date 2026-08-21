@@ -50,6 +50,7 @@ class ComposerApp:
         self.part_idx = 0
         self.composed_img = None
         self.thumb_refs = []
+        self.role_thumb_cache = {}
 
         self.file_picker = ft.FilePicker()
         self.page.services = [self.file_picker]
@@ -269,7 +270,7 @@ class ComposerApp:
             expand=True,
         )
 
-        bottom = ft.Column([part_header, part_area], spacing=6, height=180)
+        bottom = ft.Column([part_header, part_area], spacing=6, height=160)
 
         return ft.Card(
             content=ft.Container(
@@ -287,10 +288,10 @@ class ComposerApp:
         self.result_hint = ft.Container(
             content=ft.Column(
                 [
-                    ft.Icon(ft.Icons.PALETTE_OUTLINED, size=56, color=ft.Colors.OUTLINE),
-                    ft.Text("点击部件帧后显示合成结果", size=14, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Icon(ft.Icons.PALETTE_OUTLINED, size=40, color=ft.Colors.OUTLINE),
+                    ft.Text("点击部件帧后显示合成结果", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                 ],
-                spacing=10,
+                spacing=8,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             alignment=ft.Alignment.CENTER,
@@ -305,9 +306,18 @@ class ComposerApp:
             fit=ft.StackFit.EXPAND,
         )
 
-        self.compose_btn = ft.Button("合成预览", icon=ft.Icons.TUNE, on_click=self._compose, expand=True)
-        self.save_btn = ft.Button("保存当前图", icon=ft.Icons.SAVE_ALT, on_click=self._save_current, disabled=True, expand=True)
-        self.batch_btn = ft.Button("批量合成并导出", icon=ft.Icons.DOWNLOAD, on_click=self._batch_export, disabled=True, expand=True)
+        self.compose_btn = ft.IconButton(ft.Icons.TUNE, on_click=self._compose, tooltip="合成预览",
+                                         icon_size=22, disabled=True)
+        self.save_btn = ft.IconButton(ft.Icons.SAVE_ALT, on_click=self._save_current, tooltip="保存当前图",
+                                      icon_size=22, disabled=True)
+        self.batch_btn = ft.IconButton(ft.Icons.DOWNLOAD, on_click=self._batch_export, tooltip="批量导出",
+                                       icon_size=22, disabled=True)
+
+        btn_bar = ft.Row(
+            [self.compose_btn, self.save_btn, self.batch_btn],
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=16,
+        )
 
         return ft.Card(
             content=ft.Container(
@@ -321,12 +331,9 @@ class ComposerApp:
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                         result_area,
-                        ft.Container(height=4),
-                        self.compose_btn,
-                        self.save_btn,
-                        self.batch_btn,
+                        btn_bar,
                     ],
-                    spacing=8,
+                    spacing=6,
                     expand=True,
                 ),
                 padding=12,
@@ -486,8 +493,10 @@ class ComposerApp:
             chevron.name = ft.Icons.EXPAND_MORE if state["open"] else ft.Icons.CHEVRON_RIGHT
             self.page.update()
 
+        thumb_widget = self._get_role_thumbnail(role, outfits)
+
         header = ft.ListTile(
-            leading=ft.Icon(ft.Icons.PERSON, color=ft.Colors.PRIMARY),
+            leading=thumb_widget,
             title=ft.Text(role, size=13, weight=ft.FontWeight.W_600,
                           max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
             trailing=ft.Row([ft.Container(ft.Text(str(count), size=10), padding=ft.Padding.symmetric(horizontal=6)),
@@ -497,6 +506,31 @@ class ComposerApp:
             dense=True,
         )
         return ft.Column([header, body], spacing=0)
+
+    def _get_role_thumbnail(self, role, outfits):
+        if role in self.role_thumb_cache:
+            return self.role_thumb_cache[role]
+        for outfit, infos in sorted(outfits.items()):
+            for info in infos:
+                if info["filename"].endswith("_表情"):
+                    continue
+                try:
+                    imgs = self._read_pil_list(info)
+                    if imgs:
+                        img = imgs[0]
+                        w, h = img.size
+                        s = min(1.0, 36 / max(w, h))
+                        thumb = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.Resampling.LANCZOS)
+                        widget = ft.Image(src=_img_bytes(thumb), width=36, height=36, fit=ft.BoxFit.CONTAIN)
+                        self.role_thumb_cache[role] = widget
+                        return widget
+                except Exception:
+                    break
+                break
+            break
+        widget = ft.Icon(ft.Icons.PERSON, color=ft.Colors.PRIMARY)
+        self.role_thumb_cache[role] = widget
+        return widget
 
     def _outfit_tile(self, outfit, infos):
         state = {"open": False}
@@ -648,7 +682,7 @@ class ComposerApp:
 
     def _make_thumb(self, img, idx):
         w, h = img.size
-        mx = 108
+        mx = 110
         s = min(1.0, mx / max(w, h))
         thumb = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.Resampling.LANCZOS)
         data = _img_bytes(thumb)
@@ -657,7 +691,7 @@ class ComposerApp:
         c = ft.Container(
             content=ft.Stack(
                 [
-                    ft.Image(src=data, fit=ft.BoxFit.CONTAIN, width=104, height=104),
+                    ft.Image(src=data, fit=ft.BoxFit.CONTAIN, width=106, height=106),
                     ft.Container(
                         content=ft.Text(str(idx), size=10, color=ft.Colors.WHITE),
                         bgcolor=ft.Colors.with_opacity(0.5, ft.Colors.BLACK),
@@ -668,8 +702,8 @@ class ComposerApp:
                     ),
                 ],
             ),
-            width=108,
-            height=108,
+            width=110,
+            height=110,
             border=ft.Border.all(2, ft.Colors.PRIMARY if selected else ft.Colors.OUTLINE_VARIANT),
             border_radius=10,
             padding=2,
