@@ -141,6 +141,8 @@ class ComposerApp:
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
+        self.max_btn = ft.IconButton(ft.Icons.CROP_SQUARE, on_click=self._toggle_maximize, tooltip="最大化", icon_size=18)
+
         right = ft.Row(
             [
                 ft.IconButton(ft.Icons.HELP_OUTLINE, on_click=self._help, tooltip="使用说明", icon_size=18),
@@ -149,7 +151,7 @@ class ComposerApp:
                     on_click=self._toggle_theme, tooltip="切换主题", icon_size=18,
                 ),
                 ft.IconButton(ft.Icons.MINIMIZE, on_click=self._minimize, tooltip="最小化", icon_size=18),
-                ft.IconButton(ft.Icons.CROP_SQUARE, on_click=self._toggle_maximize, tooltip="最大化", icon_size=18),
+                self.max_btn,
                 ft.IconButton(ft.Icons.CLOSE, on_click=self._close, tooltip="关闭", icon_size=18),
             ],
             spacing=0,
@@ -384,6 +386,10 @@ class ComposerApp:
 
     async def _toggle_maximize(self, e):
         self.page.window.maximized = not self.page.window.maximized
+        maximized = bool(self.page.window.maximized)
+        if getattr(self, "max_btn", None):
+            self.max_btn.icon = ft.Icons.FILTER_NONE if maximized else ft.Icons.CROP_SQUARE
+            self.max_btn.tooltip = "还原" if maximized else "最大化"
         self.page.update()
 
     async def _close(self, e):
@@ -579,6 +585,7 @@ class ComposerApp:
             state["open"] = not state["open"]
             body.visible = state["open"]
             self._set_chevron(chevron, state["open"], 16)
+            body.update()
             chevron.update()
 
         thumb_widget = self._get_role_thumbnail(role, outfits)
@@ -649,6 +656,7 @@ class ComposerApp:
             state["open"] = not state["open"]
             body.visible = state["open"]
             self._set_chevron(chevron, state["open"], 14)
+            body.update()
             chevron.update()
 
         thumb_info = next((i for i in infos if not i["filename"].endswith("_表情")), None)
