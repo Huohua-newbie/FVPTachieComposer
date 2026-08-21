@@ -222,8 +222,15 @@ class ComposerApp:
 
         self.base_image = ft.Image(src=TRANSPARENT, fit=ft.BoxFit.CONTAIN, expand=True)
 
+        base_viewer = ft.InteractiveViewer(
+            content=self.base_image,
+            min_scale=1.0,
+            max_scale=12.0,
+            expand=True,
+        )
+
         base_area = ft.Stack(
-            [self.base_hint, self.base_image],
+            [base_viewer, self.base_hint],
             expand=True,
             fit=ft.StackFit.EXPAND,
         )
@@ -319,8 +326,15 @@ class ComposerApp:
 
         self.result_image = ft.Image(src=TRANSPARENT, fit=ft.BoxFit.CONTAIN, expand=True)
 
+        result_viewer = ft.InteractiveViewer(
+            content=self.result_image,
+            min_scale=1.0,
+            max_scale=12.0,
+            expand=True,
+        )
+
         result_area = ft.Stack(
-            [self.result_hint, self.result_image],
+            [result_viewer, self.result_hint],
             expand=True,
             fit=ft.StackFit.EXPAND,
         )
@@ -520,10 +534,28 @@ class ComposerApp:
         self.empty_hint.visible = False
         self.page.update()
 
+    def _make_chevron(self, size=16):
+        """带旋转方向动画的展开箭头：收起朝右，展开旋转为朝下。"""
+        return ft.AnimatedSwitcher(
+            ft.Icon(ft.Icons.CHEVRON_RIGHT, size=size, color=ft.Colors.ON_SURFACE_VARIANT),
+            transition=ft.AnimatedSwitcherTransition.ROTATION,
+            duration=180,
+            reverse_duration=180,
+            switch_in_curve=ft.AnimationCurve.EASE_IN_OUT,
+            switch_out_curve=ft.AnimationCurve.EASE_IN_OUT,
+        )
+
+    def _set_chevron(self, holder, open_, size=16):
+        holder.content = ft.Icon(
+            ft.Icons.EXPAND_MORE if open_ else ft.Icons.CHEVRON_RIGHT,
+            size=size,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+        )
+
     def _role_tile(self, role, outfits):
         state = {"open": False}
         count = sum(len(v) for v in outfits.values())
-        chevron = ft.Icon(ft.Icons.CHEVRON_RIGHT, size=16, color=ft.Colors.ON_SURFACE_VARIANT)
+        chevron = self._make_chevron(16)
 
         body = ft.Column(spacing=0, visible=False)
         for outfit, infos in sorted(outfits.items()):
@@ -532,8 +564,8 @@ class ComposerApp:
         def toggle(e):
             state["open"] = not state["open"]
             body.visible = state["open"]
-            chevron.name = ft.Icons.EXPAND_MORE if state["open"] else ft.Icons.CHEVRON_RIGHT
-            self.page.update()
+            self._set_chevron(chevron, state["open"], 16)
+            chevron.update()
 
         thumb_widget = self._get_role_thumbnail(role, outfits)
 
@@ -588,7 +620,7 @@ class ComposerApp:
 
     def _outfit_tile(self, outfit, infos):
         state = {"open": False}
-        chevron = ft.Icon(ft.Icons.CHEVRON_RIGHT, size=14, color=ft.Colors.ON_SURFACE_VARIANT)
+        chevron = self._make_chevron(14)
 
         body = ft.Column(spacing=0, visible=False)
         for info in sorted(infos, key=lambda x: x["filename"]):
@@ -602,8 +634,8 @@ class ComposerApp:
         def toggle(e):
             state["open"] = not state["open"]
             body.visible = state["open"]
-            chevron.name = ft.Icons.EXPAND_MORE if state["open"] else ft.Icons.CHEVRON_RIGHT
-            self.page.update()
+            self._set_chevron(chevron, state["open"], 14)
+            chevron.update()
 
         thumb_info = next((i for i in infos if not i["filename"].endswith("_表情")), None)
         thumb_widget = self._make_mini_thumb(thumb_info, 30) if thumb_info else ft.Icon(ft.Icons.FOLDER, size=18, color=ft.Colors.SECONDARY)
