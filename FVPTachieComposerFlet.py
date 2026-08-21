@@ -34,7 +34,7 @@ HELP_TEXT = (
 class ComposerApp:
     def __init__(self, page: ft.Page):
         self.page = page
-        self.is_dark = True
+        self.is_dark = False
 
         self.input_file = None
         self.file_infos = []
@@ -247,18 +247,14 @@ class ComposerApp:
             expand=True,
         )
 
-        self.thumb_row = ft.Row(
-            spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            scroll=ft.ScrollMode.AUTO, wrap=False,
+        self.thumb_list = ft.ListView(
+            spacing=8, horizontal=True, height=140,
+            auto_scroll=False, scroll=ft.ScrollMode.AUTO,
         )
-        self.thumb_scroll = ft.Container(
-            content=self.thumb_row,
-            height=140,
-        )
-        self.thumb_scroll.visible = False
+        self.thumb_list.visible = False
 
         part_area = ft.Stack(
-            [self.part_hint, self.thumb_scroll],
+            [self.part_hint, self.thumb_list],
             expand=True,
             fit=ft.StackFit.EXPAND,
         )
@@ -468,8 +464,8 @@ class ComposerApp:
         self.result_hint.visible = True
         self.frame_label.value = ""
         self.frame_nav_holder.visible = False
-        self.thumb_row.controls.clear()
-        self.thumb_scroll.visible = False
+        self.thumb_list.controls.clear()
+        self.thumb_list.visible = False
         self.part_hint.visible = True
         self.part_count.value = ""
         self.save_btn.disabled = True
@@ -578,7 +574,7 @@ class ComposerApp:
             self.page.update()
 
         thumb_info = next((i for i in infos if not i["filename"].endswith("_表情")), None)
-        thumb_widget = self._make_mini_thumb(thumb_info, 24) if thumb_info else ft.Icon(ft.Icons.FOLDER, size=18, color=ft.Colors.SECONDARY)
+        thumb_widget = self._make_mini_thumb(thumb_info, 30) if thumb_info else ft.Icon(ft.Icons.FOLDER, size=18, color=ft.Colors.SECONDARY)
 
         header = ft.ListTile(
             leading=thumb_widget,
@@ -593,7 +589,7 @@ class ComposerApp:
 
     def _action_tile(self, name, info):
         selected = info["filename"] == self.selected_filename
-        thumb_widget = self._make_mini_thumb(info, 20)
+        thumb_widget = self._make_mini_thumb(info, 26)
 
         c = ft.ListTile(
             leading=thumb_widget,
@@ -679,8 +675,8 @@ class ComposerApp:
         self.part_info = None
         self.part_imgs = []
         self.thumb_refs = []
-        self.thumb_row.controls.clear()
-        self.thumb_scroll.visible = False
+        self.thumb_list.controls.clear()
+        self.thumb_list.visible = False
         self.part_hint.visible = True
         self.part_count.value = ""
         self.save_btn.disabled = True
@@ -709,9 +705,9 @@ class ComposerApp:
         self.part_imgs = imgs
         self.part_count.value = f"{len(imgs)} 帧"
         for idx, img in enumerate(imgs):
-            self.thumb_row.controls.append(self._make_thumb(img, idx))
+            self.thumb_list.controls.append(self._make_thumb(img, idx))
         self.part_hint.visible = False
-        self.thumb_scroll.visible = True
+        self.thumb_list.visible = True
         self.page.update()
         self._pick_part(0)
 
