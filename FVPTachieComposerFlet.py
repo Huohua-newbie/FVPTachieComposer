@@ -53,9 +53,7 @@ class ComposerApp:
         self.role_thumb_cache = {}
 
         self.file_picker = ft.FilePicker()
-        self.snack_bar = ft.SnackBar(ft.Text("", size=12))
         self.page.services = [self.file_picker]
-        self.page.overlay.append(self.snack_bar)
         self._setup_page()
         self._build()
 
@@ -389,10 +387,34 @@ class ComposerApp:
     # ── Status ──────────────────────────────────────────────
 
     def _snack(self, msg, error=False):
-        self.snack_bar.bgcolor = ft.Colors.ERROR_CONTAINER if error else ft.Colors.PRIMARY_CONTAINER
-        self.snack_bar.content = ft.Text(msg, size=12)
-        self.snack_bar.open = True
+        bg = ft.Colors.ERROR_CONTAINER if error else ft.Colors.PRIMARY_CONTAINER
+        fg = ft.Colors.ON_ERROR_CONTAINER if error else ft.Colors.ON_PRIMARY_CONTAINER
+        toast = ft.Container(
+            content=ft.Text(msg, size=12, color=fg, weight=ft.FontWeight.W_500),
+            bgcolor=bg,
+            border_radius=8,
+            padding=ft.Padding.symmetric(horizontal=16, vertical=10),
+            shadow=ft.BoxShadow(blur_radius=8, spread_radius=0, color=ft.Colors.with_opacity(0.15, ft.Colors.BLACK)),
+            alignment=ft.Alignment.CENTER,
+        )
+        overlay = ft.Stack(
+            [toast],
+            top=16, left=0, right=0,
+        )
+        self.page.overlay.clear()
+        self.page.overlay.append(overlay)
         self.page.update()
+
+        import threading
+        def dismiss():
+            import time
+            time.sleep(3)
+            try:
+                self.page.overlay.clear()
+                self.page.update()
+            except Exception:
+                pass
+        threading.Thread(target=dismiss, daemon=True).start()
 
     def _set_status(self, text):
         self.status_text.value = text
@@ -773,30 +795,43 @@ class ComposerApp:
         if not self.part_info or not self.selected_info or not self.part_imgs:
             self._snack("请先选择底图并合成", error=True)
             return
+        if not self.base_imgs:
+            self._snack("底图为空", error=True)
+            return
         try:
             result = await self.file_picker.get_directory_path(dialog_title="选择导出目录")
         except Exception:
             return
         if not result:
             return
-        save_dir = result
+        save_dir = str(result)
         self._set_status("正在批量导出…")
 
+        base = self.base_imgs[0]
+        ox = self.part_info.get("offset_x", 0)
+        oy = self.part_info.get("offset_y", 0)
+        fname = self.selected_info["filename"]
+        parts_data = list(self.part_imgs)
+
         def work():
-            base = self.base_imgs[0]
-            ox = self.part_info.get("offset_x", 0)
-            oy = self.part_info.get("offset_y", 0)
             saved = 0
-            for idx, p in enumerate(self.part_imgs):
-                composed = compose_preview(base, p, ox, oy)
-                out = Path(save_dir) / f"{self.selected_info['filename']}_diff_{idx:03d}.png"
-                composed.save(out, "PNG")
-                saved += 1
-            return saved
+            errors = 0
+            for idx, p in enumerate(parts_data):
+                try:
+                    composed = compose_preview(base, p, ox, oy)
+                    out = Path(save_dir) / f"{fname}_diff_{idx:03d}.png"
+                    composed.save(out, "PNG")
+                    saved += 1
+                except Exception:
+                    errors += 1
+            return saved, errors
 
         try:
-            n = await asyncio.to_thread(work)
-            self._snack(f"已导出 {n} 张到 {Path(save_dir).name}")
+            saved, errors = await asyncio.to_thread(work)
+            if errors:
+                self._snack(f"导出完成: {saved} 成功, {errors} 失败", error=errors > 0)
+            else:
+                self._snack(f"已导出 {saved} 张到 {Path(save_dir).name}")
             self._set_status("导出完成")
         except Exception as ex:
             self._snack(f"导出失败: {ex}", error=True)
