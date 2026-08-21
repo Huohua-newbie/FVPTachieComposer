@@ -64,6 +64,7 @@ class ComposerApp:
         p.window.height = 880
         p.window.min_width = 1080
         p.window.min_height = 640
+        p.window.title_bar_hidden = True
         p.padding = 0
         p.spacing = 0
         self._apply_theme()
@@ -173,7 +174,7 @@ class ComposerApp:
             expand=True,
         )
 
-        self.tree_list = ft.ListView(spacing=0, expand=True)
+        self.tree_list = ft.ListView(spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
         self.tree_list.visible = False
 
         body = ft.Stack([self.empty_hint, self.tree_list], expand=True, fit=ft.StackFit.EXPAND)
@@ -245,7 +246,10 @@ class ComposerApp:
             expand=True,
         )
 
-        self.thumb_list = ft.ListView(spacing=8, horizontal=True, height=130)
+        self.thumb_list = ft.ListView(
+            spacing=8, horizontal=True, height=140,
+            auto_scroll=False, scroll=ft.ScrollMode.AUTO,
+        )
         self.thumb_list.visible = False
 
         part_area = ft.Stack(
@@ -306,15 +310,13 @@ class ComposerApp:
             fit=ft.StackFit.EXPAND,
         )
 
-        self.compose_btn = ft.IconButton(ft.Icons.TUNE, on_click=self._compose, tooltip="合成预览",
-                                         icon_size=22, disabled=True)
         self.save_btn = ft.IconButton(ft.Icons.SAVE_ALT, on_click=self._save_current, tooltip="保存当前图",
                                       icon_size=22, disabled=True)
         self.batch_btn = ft.IconButton(ft.Icons.DOWNLOAD, on_click=self._batch_export, tooltip="批量导出",
                                        icon_size=22, disabled=True)
 
         btn_bar = ft.Row(
-            [self.compose_btn, self.save_btn, self.batch_btn],
+            [self.save_btn, self.batch_btn],
             alignment=ft.MainAxisAlignment.CENTER,
             spacing=16,
         )
@@ -370,6 +372,7 @@ class ComposerApp:
 
     async def _toggle_theme(self, e):
         self.is_dark = not self.is_dark
+        self.selected_action_ctrl = None
         self.page.clean()
         self._apply_theme()
         self._build()
@@ -464,7 +467,6 @@ class ComposerApp:
         self.thumb_list.visible = False
         self.part_hint.visible = True
         self.part_count.value = ""
-        self.compose_btn.disabled = True
         self.save_btn.disabled = True
         self.batch_btn.disabled = True
 
@@ -499,8 +501,7 @@ class ComposerApp:
             leading=thumb_widget,
             title=ft.Text(role, size=13, weight=ft.FontWeight.W_600,
                           max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-            trailing=ft.Row([ft.Container(ft.Text(str(count), size=10), padding=ft.Padding.symmetric(horizontal=6)),
-                             chevron], spacing=4),
+            trailing=chevron,
             on_click=toggle,
             content_padding=ft.Padding.symmetric(horizontal=4, vertical=0),
             dense=True,
@@ -579,12 +580,18 @@ class ComposerApp:
 
     def _select_action(self, info, ctrl):
         if self.selected_action_ctrl is not None:
-            self.selected_action_ctrl.selected = False
-            self.selected_action_ctrl.update()
+            try:
+                self.selected_action_ctrl.selected = False
+                self.selected_action_ctrl.update()
+            except Exception:
+                self.selected_action_ctrl = None
         self.selected_action_ctrl = ctrl
         self.selected_filename = info["filename"]
-        ctrl.selected = True
-        ctrl.update()
+        try:
+            ctrl.selected = True
+            ctrl.update()
+        except Exception:
+            self.selected_action_ctrl = None
         self._load_base(info)
 
     # ── Base image ──────────────────────────────────────────
@@ -647,7 +654,6 @@ class ComposerApp:
         self.thumb_list.visible = False
         self.part_hint.visible = True
         self.part_count.value = ""
-        self.compose_btn.disabled = True
         self.save_btn.disabled = True
         self.batch_btn.disabled = True
 
@@ -689,24 +695,12 @@ class ComposerApp:
         selected = idx == self.part_idx
 
         c = ft.Container(
-            content=ft.Stack(
-                [
-                    ft.Image(src=data, fit=ft.BoxFit.CONTAIN, width=106, height=106),
-                    ft.Container(
-                        content=ft.Text(str(idx), size=10, color=ft.Colors.WHITE),
-                        bgcolor=ft.Colors.with_opacity(0.5, ft.Colors.BLACK),
-                        border_radius=6,
-                        padding=ft.Padding.symmetric(horizontal=5, vertical=1),
-                        alignment=ft.Alignment(-1, -1),
-                        margin=ft.Margin.only(left=4, top=4, right=0, bottom=0),
-                    ),
-                ],
-            ),
+            content=ft.Image(src=data, fit=ft.BoxFit.CONTAIN, width=106, height=106),
             width=110,
             height=110,
-            border=ft.Border.all(2, ft.Colors.PRIMARY if selected else ft.Colors.OUTLINE_VARIANT),
+            bgcolor=ft.Colors.TRANSPARENT,
+            border=ft.Border.all(2, ft.Colors.PRIMARY if selected else ft.Colors.TRANSPARENT),
             border_radius=10,
-            padding=2,
             on_click=lambda e, i=idx: self._pick_part(i),
         )
         self.thumb_refs.append((c, idx))
@@ -717,8 +711,11 @@ class ComposerApp:
             return
         self.part_idx = idx
         for c, i in self.thumb_refs:
-            c.border = ft.Border.all(2, ft.Colors.PRIMARY if i == idx else ft.Colors.OUTLINE_VARIANT)
-            c.update()
+            c.border = ft.Border.all(2, ft.Colors.PRIMARY if i == idx else ft.Colors.TRANSPARENT)
+            try:
+                c.update()
+            except Exception:
+                pass
         self._compose()
 
     def _compose(self, e=None):
@@ -799,7 +796,11 @@ def _img_bytes(img, fmt="PNG"):
 
 
 def main(page: ft.Page):
-    ComposerApp(page)
+    try:
+        ComposerApp(page)
+    except Exception as ex:
+        page.add(ft.Text(f"初始化失败: {ex}", color=ft.Colors.ERROR))
+        page.update()
 
 
 if __name__ == "__main__":
