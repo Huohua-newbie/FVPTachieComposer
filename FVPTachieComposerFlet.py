@@ -19,6 +19,7 @@ from FVPTachieComposer import (
     compose_preview,
     hzc_data_to_pil_list,
     parse_bin_info_extended,
+    parse_dir_infos,
 )
 
 TRANSPARENT = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
@@ -171,6 +172,7 @@ class ComposerApp:
                 ft.Icon(ft.Icons.PEOPLE, size=18, color=ft.Colors.PRIMARY),
                 ft.Text("角色库", size=14, weight=ft.FontWeight.W_600, expand=True),
                 ft.IconButton(ft.Icons.FOLDER_OPEN, on_click=self._open_bin, tooltip="打开 BIN", icon_size=20),
+                ft.IconButton(ft.Icons.FOLDER, on_click=self._open_dir, tooltip="打开 HZC 文件夹", icon_size=20),
             ],
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
@@ -466,11 +468,23 @@ class ComposerApp:
             return
         await self._load_bin(path)
 
+    async def _open_dir(self, e):
+        try:
+            result = await self.file_picker.get_directory_path(dialog_title="选择包含 HZC 文件的文件夹")
+        except Exception:
+            return
+        if not result:
+            return
+        await self._load_bin(str(result))
+
     async def _load_bin(self, path):
         self._set_status("正在解析…")
 
         def work():
-            infos = parse_bin_info_extended(path)
+            if Path(path).is_dir():
+                infos = parse_dir_infos(path)
+            else:
+                infos = parse_bin_info_extended(path)
             hier = {}
             for info in infos:
                 if info["type"] != "hzc":
@@ -686,9 +700,14 @@ class ComposerApp:
     # ── Base image ──────────────────────────────────────────
 
     def _read_pil_list(self, info):
-        with open(self.input_file, "rb") as f:
-            f.seek(info["offset"])
-            data = f.read(info["size"])
+        src = info.get("path")
+        if src:
+            with open(src, "rb") as f:
+                data = f.read()
+        else:
+            with open(self.input_file, "rb") as f:
+                f.seek(info["offset"])
+                data = f.read(info["size"])
         header = {
             "image_type": info.get("image_type", 0),
             "width": info.get("width", 0),

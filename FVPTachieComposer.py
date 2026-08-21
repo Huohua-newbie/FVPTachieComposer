@@ -397,6 +397,38 @@ def parse_bin_info_extended(input_file):
 				info.update({'image_type': None, 'width': 0, 'height': 0, 'offset_x': 0, 'offset_y': 0, 'frame_count': 1})
 	return base_infos
 
+# ---------- 解析散装 HZC 文件夹 ----------
+def parse_dir_infos(folder):
+	"""
+	递归扫描文件夹，识别 HZC 图像文件（按 .hzc 后缀或 hzc1 文件头），
+	返回与 parse_bin_info_extended 兼容的信息列表。
+	每个元素额外含 'path'（文件绝对路径），offset 恒为 0，size 为文件大小。
+	"""
+	folder = Path(folder)
+	infos = []
+	for p in sorted(folder.rglob('*')):
+		if not p.is_file():
+			continue
+		with open(p, 'rb') as f:
+			header_data = f.read(44)
+		has_magic = len(header_data) >= 4 and header_data[:4] == b'hzc1'
+		if not has_magic and p.suffix.lower() != '.hzc':
+			continue
+		header = parse_hzc_header_from_bytes(header_data) if has_magic else None
+		info = {
+			'filename': p.stem,
+			'offset': 0,
+			'size': p.stat().st_size,
+			'type': 'hzc',
+			'path': str(p),
+		}
+		if header:
+			info.update(header)
+		else:
+			info.update({'image_type': None, 'width': 0, 'height': 0, 'offset_x': 0, 'offset_y': 0, 'frame_count': 1})
+		infos.append(info)
+	return infos
+
 # ---------- 将 HZC 数据转换为 PIL 图像列表 ----------
 def hzc_data_to_pil_list(hzc_data, header_info):
 	"""
