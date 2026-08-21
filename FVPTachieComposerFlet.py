@@ -248,7 +248,7 @@ class ComposerApp:
         )
 
         self.thumb_list = ft.ListView(
-            spacing=8, horizontal=True, height=128,
+            spacing=8, horizontal=True, height=140,
             auto_scroll=False, scroll=ft.ScrollMode.AUTO,
         )
         self.thumb_list.visible = False
@@ -705,13 +705,13 @@ class ComposerApp:
         self._pick_part(0)
 
     def _make_thumb(self, img, idx):
-        data = _thumb_bytes(img, 106)
+        data = _thumb_bytes(img, 100)
         selected = idx == self.part_idx
 
         c = ft.Container(
-            content=ft.Image(src=data, fit=ft.BoxFit.CONTAIN, width=106, height=106),
-            width=110,
-            height=110,
+            content=ft.Image(src=data, fit=ft.BoxFit.CONTAIN, width=100, height=100),
+            width=104,
+            height=104,
             bgcolor=ft.Colors.TRANSPARENT,
             border=ft.Border.all(2, ft.Colors.PRIMARY if selected else ft.Colors.TRANSPARENT),
             border_radius=10,
@@ -809,7 +809,7 @@ def _img_bytes(img, fmt="PNG"):
     return buf.getvalue()
 
 
-def _thumb_bytes(img, size=106):
+def _thumb_bytes(img, size=100):
     w, h = img.size
     s = min(1.0, size / max(w, h))
     thumb = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.Resampling.NEAREST)
