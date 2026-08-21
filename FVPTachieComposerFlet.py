@@ -389,7 +389,7 @@ class ComposerApp:
 
     async def _open_bin(self, e):
         fp = ft.FilePicker()
-        self.page.overlay.append(fp)
+        self.page.services.append(fp)
         self.page.update()
         try:
             result = await fp.pick_files(
@@ -399,7 +399,7 @@ class ComposerApp:
             )
         finally:
             try:
-                self.page.overlay.remove(fp)
+                self.page.services.remove(fp)
             except ValueError:
                 pass
         if not result or not result.files:
@@ -717,13 +717,13 @@ class ComposerApp:
             return
         name = f"{self.selected_info['filename']}_diff_{self.part_idx:03d}.png"
         fp = ft.FilePicker()
-        self.page.overlay.append(fp)
+        self.page.services.append(fp)
         self.page.update()
         try:
             result = await fp.save_file(dialog_title="保存当前合成图像", file_name=name)
         finally:
             try:
-                self.page.overlay.remove(fp)
+                self.page.services.remove(fp)
             except ValueError:
                 pass
         if not result or not result.path:
@@ -739,13 +739,13 @@ class ComposerApp:
             self._snack("请先选择底图并合成", error=True)
             return
         fp = ft.FilePicker()
-        self.page.overlay.append(fp)
+        self.page.services.append(fp)
         self.page.update()
         try:
             result = await fp.get_directory_path(dialog_title="选择导出目录")
         finally:
             try:
-                self.page.overlay.remove(fp)
+                self.page.services.remove(fp)
             except ValueError:
                 pass
         if not result or not result.path:
