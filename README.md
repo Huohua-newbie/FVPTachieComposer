@@ -1,10 +1,10 @@
-# FVP Tachie Composer v2.1.0-beta
+# FVP Tachie Composer v2.1.1-beta
 
 FVP 引擎角色立绘查看与合成工具——**即开即用**，无需安装 Python。
 
 ## 使用方法
 
-1. 解压下载的 `FVPTachieComposer-v2.1.0-beta-win64.zip`
+1. 解压下载的 `FVPTachieComposer-v2.1.1-beta-win64.zip`
 2. 双击 `FVPTachieComposer.exe` 运行
 3. 点击左上角 **文件夹图标**，选择 FVP 引擎的 `.bin` 资源文件
 4. 左侧按 **角色 → 服装 → 动作** 展开浏览（每级均有缩略图预览）
