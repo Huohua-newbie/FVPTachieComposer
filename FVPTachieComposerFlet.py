@@ -9,7 +9,10 @@ Run: python FVPTachieComposerFlet.py
 
 import asyncio
 import io
+import os
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import flet as ft
@@ -52,6 +55,9 @@ def _expr_suffixes():
 
 
 EXPR_SUFFIXES = _expr_suffixes()
+
+_THUMB_POOL = ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 4)), thread_name_prefix="thumb")
+_UI_LOCK = threading.Lock()
 
 
 def _is_expr(filename):
@@ -635,43 +641,60 @@ class ComposerApp:
         )
         return ft.Column([header, body], spacing=0)
 
+    def _queue_thumb(self, placeholder, info, size, cache_key):
+        """后台线程解码首帧生成缩略图，完成后原位替换占位符。"""
+        def job():
+            try:
+                imgs = self._read_pil_list(info)
+            except Exception:
+                return
+            if not imgs:
+                return
+            widget = _make_thumb_widget(imgs[0], size)
+            self.role_thumb_cache[cache_key] = widget
+            with _UI_LOCK:
+                try:
+                    placeholder.content = widget
+                    placeholder.update()
+                except Exception:
+                    pass
+        _THUMB_POOL.submit(job)
+
     def _get_role_thumbnail(self, role, outfits):
         if role in self.role_thumb_cache:
             return self.role_thumb_cache[role]
+        target = None
         for outfit, infos in sorted(outfits.items()):
             for info in infos:
-                if _is_expr(info["filename"]):
-                    continue
-                try:
-                    imgs = self._read_pil_list(info)
-                    if imgs:
-                        img = imgs[0]
-                        widget = _make_thumb_widget(img, 44)
-                        self.role_thumb_cache[role] = widget
-                        return widget
-                except Exception:
+                if not _is_expr(info["filename"]):
+                    target = info
                     break
+            if target:
                 break
-            break
-        widget = ft.Icon(ft.Icons.PERSON, color=ft.Colors.PRIMARY)
-        self.role_thumb_cache[role] = widget
-        return widget
+        placeholder = ft.Container(
+            content=ft.Icon(ft.Icons.PERSON, size=24, color=ft.Colors.PRIMARY),
+            width=44,
+            height=44,
+            alignment=ft.Alignment.CENTER,
+        )
+        if target is None:
+            self.role_thumb_cache[role] = placeholder
+            return placeholder
+        self._queue_thumb(placeholder, target, 44, role)
+        return placeholder
 
     def _make_mini_thumb(self, info, size=24):
         key = f"mini_{info['filename']}_{size}"
         if key in self.role_thumb_cache:
             return self.role_thumb_cache[key]
-        try:
-            imgs = self._read_pil_list(info)
-            if imgs:
-                widget = _make_thumb_widget(imgs[0], size)
-                self.role_thumb_cache[key] = widget
-                return widget
-        except Exception:
-            pass
-        fallback = ft.Icon(ft.Icons.IMAGE_OUTLINED, size=14, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.role_thumb_cache[key] = fallback
-        return fallback
+        placeholder = ft.Container(
+            content=ft.Icon(ft.Icons.IMAGE_OUTLINED, size=max(12, size - 10), color=ft.Colors.ON_SURFACE_VARIANT),
+            width=size,
+            height=size,
+            alignment=ft.Alignment.CENTER,
+        )
+        self._queue_thumb(placeholder, info, size, key)
+        return placeholder
 
     def _outfit_tile(self, outfit, infos):
         state = {"open": False}
@@ -922,18 +945,21 @@ class ComposerApp:
         fname = self.selected_info["filename"]
         parts_data = list(self.part_imgs)
 
+        def one(args):
+            idx, p = args
+            try:
+                composed = compose_preview(base, p, ox, oy)
+                out = Path(save_dir) / f"{fname}_diff_{idx:03d}.png"
+                composed.save(out, "PNG")
+                return True
+            except Exception:
+                return False
+
         def work():
-            saved = 0
-            errors = 0
-            for idx, p in enumerate(parts_data):
-                try:
-                    composed = compose_preview(base, p, ox, oy)
-                    out = Path(save_dir) / f"{fname}_diff_{idx:03d}.png"
-                    composed.save(out, "PNG")
-                    saved += 1
-                except Exception:
-                    errors += 1
-            return saved, errors
+            with ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 4))) as ex:
+                oks = list(ex.map(one, enumerate(parts_data)))
+            saved = sum(1 for ok in oks if ok)
+            return saved, len(oks) - saved
 
         try:
             saved, errors = await asyncio.to_thread(work)
