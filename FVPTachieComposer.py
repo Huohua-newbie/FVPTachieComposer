@@ -45,12 +45,51 @@ def parse_hzc_header(header_bytes):
 def transform_bytes_bytearray(data):
 	"""
 	字节变换函数（仅用于多帧 HZC）：每4个字节一组，交换位置0和2
+	使用扩展切片在 C 层完成交换，避免逐字节 Python 循环。
 	"""
 	byte_arr = bytearray(data)
-	for i in range(0, len(byte_arr), 4):
-		if i + 3 < len(byte_arr):
-			byte_arr[i], byte_arr[i+2] = byte_arr[i+2], byte_arr[i]
+	n4 = (len(byte_arr) // 4) * 4
+	byte_arr[0:n4:4], byte_arr[2:n4:4] = data[2:n4:4], data[0:n4:4]
 	return bytes(byte_arr)
+
+
+def hzc_decode_first_frame(hzc_data, header_info):
+	"""
+	仅解码多帧 HZC 的第一帧（供缩略图等场景）：
+	zlib 增量解压到首帧所需字节即停，跳过其余帧的解压与 PIL 构建。
+	返回 PIL Image 或 None。
+	"""
+	if len(hzc_data) < 44:
+		return None
+	width = header_info.get('width') or 0
+	height = header_info.get('height') or 0
+	image_type = header_info.get('image_type')
+	if not width or not height:
+		return None
+	bpf = width * height * 4
+	d = zlib.decompressobj()
+	try:
+		head = d.decompress(hzc_data[44:], bpf)
+		while len(head) < bpf and d.unconsumed_tail:
+			chunk = d.decompress(d.unconsumed_tail, bpf - len(head))
+			if not chunk:
+				break
+			head += chunk
+	except zlib.error:
+		return None
+	if len(head) < bpf:
+		return None
+	if image_type == 2:
+		frame = transform_bytes_bytearray(head[:bpf])
+		return Image.frombytes('RGBA', (width, height), frame)
+	if image_type == 0:
+		need = width * height * 3
+		img = Image.frombytes('RGB', (width, height), head[:need])
+		r, g, b = img.split()
+		return Image.merge("RGB", (r, g, b))
+	img = Image.frombytes('RGBA', (width, height), head[:bpf])
+	b, g, r, a = img.split()
+	return Image.merge("RGBA", (r, g, b, a))
 
 def convert_hzc_data(hzc_data, original_filename, base_output_dir):
 	"""

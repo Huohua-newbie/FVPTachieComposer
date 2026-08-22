@@ -21,6 +21,7 @@ from PIL import Image
 from FVPTachieComposer import (
     compose_preview,
     hzc_data_to_pil_list,
+    hzc_decode_first_frame,
     parse_bin_info_extended,
     parse_dir_infos,
 )
@@ -57,7 +58,6 @@ def _expr_suffixes():
 EXPR_SUFFIXES = _expr_suffixes()
 
 _THUMB_POOL = ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 4)), thread_name_prefix="thumb")
-_UI_LOCK = threading.Lock()
 
 
 def _is_expr(filename):
@@ -103,6 +103,11 @@ class ComposerApp:
         self.composed_img = None
         self.thumb_refs = []
         self.role_thumb_cache = {}
+
+        self._dirty_lock = threading.Lock()
+        self._thumb_dirty = []
+        self._flush_stop = threading.Event()
+        threading.Thread(target=self._flush_loop, daemon=True).start()
 
         self.file_picker = ft.FilePicker()
         self.page.services = [self.file_picker]
@@ -641,24 +646,53 @@ class ComposerApp:
         )
         return ft.Column([header, body], spacing=0)
 
+    def _flush_loop(self):
+        """每 150ms 将本轮完成的缩略图合并为一次 page.update，避免刷新风暴。"""
+        while not self._flush_stop.wait(0.15):
+            with self._dirty_lock:
+                batch, self._thumb_dirty = self._thumb_dirty, []
+            if not batch:
+                continue
+            try:
+                self.page.update()
+            except Exception:
+                pass
+
+    def _mark_dirty(self, ctrl):
+        with self._dirty_lock:
+            self._thumb_dirty.append(ctrl)
+
     def _queue_thumb(self, placeholder, info, size, cache_key):
-        """后台线程解码首帧生成缩略图，完成后原位替换占位符。"""
+        """后台线程解码首帧生成缩略图，完成后原位替换占位符（批量刷新）。"""
         def job():
             try:
-                imgs = self._read_pil_list(info)
+                img = self._read_first_frame(info)
+                if img is None:
+                    return
+                widget = _make_thumb_widget(img, size)
+                self.role_thumb_cache[cache_key] = widget
+                placeholder.content = widget
+                self._mark_dirty(placeholder)
             except Exception:
-                return
-            if not imgs:
-                return
-            widget = _make_thumb_widget(imgs[0], size)
-            self.role_thumb_cache[cache_key] = widget
-            with _UI_LOCK:
-                try:
-                    placeholder.content = widget
-                    placeholder.update()
-                except Exception:
-                    pass
+                pass
         _THUMB_POOL.submit(job)
+
+    def _read_first_frame(self, info):
+        src = info.get("path")
+        if src:
+            with open(src, "rb") as f:
+                data = f.read()
+        else:
+            with open(self.input_file, "rb") as f:
+                f.seek(info["offset"])
+                data = f.read(info["size"])
+        header = {
+            "image_type": info.get("image_type", 0),
+            "width": info.get("width", 0),
+            "height": info.get("height", 0),
+            "frame_count": info.get("frame_count", 1),
+        }
+        return hzc_decode_first_frame(data, header)
 
     def _get_role_thumbnail(self, role, outfits):
         if role in self.role_thumb_cache:
