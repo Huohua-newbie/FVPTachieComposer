@@ -621,15 +621,20 @@ class ComposerApp:
         state = {"open": False}
         count = sum(len(v) for v in outfits.values())
         chevron = self._make_chevron(16)
+        header_pending = []
 
         body = ft.Column(spacing=0, visible=False)
         for outfit, infos in sorted(outfits.items()):
-            body.controls.append(self._outfit_tile(outfit, infos))
+            body.controls.append(self._outfit_tile(outfit, infos, header_registry=header_pending))
 
         def toggle(e):
             state["open"] = not state["open"]
             body.visible = state["open"]
             self._set_chevron(chevron, state["open"], 16)
+            if state["open"] and header_pending:
+                for task in header_pending:
+                    self._queue_thumb(*task)
+                header_pending.clear()
             body.update()
             chevron.update()
 
@@ -717,7 +722,8 @@ class ComposerApp:
         self._queue_thumb(placeholder, target, 44, role)
         return placeholder
 
-    def _make_mini_thumb(self, info, size=24):
+    def _make_mini_thumb(self, info, size=24, registry=None):
+        """registry 为 None 时立即排队解码；传入列表则登记任务，待节点展开可见后再排队。"""
         key = f"mini_{info['filename']}_{size}"
         if key in self.role_thumb_cache:
             return self.role_thumb_cache[key]
@@ -727,12 +733,17 @@ class ComposerApp:
             height=size,
             alignment=ft.Alignment.CENTER,
         )
-        self._queue_thumb(placeholder, info, size, key)
+        task = (placeholder, info, size, key)
+        if registry is None:
+            self._queue_thumb(*task)
+        else:
+            registry.append(task)
         return placeholder
 
-    def _outfit_tile(self, outfit, infos):
+    def _outfit_tile(self, outfit, infos, header_registry=None):
         state = {"open": False}
         chevron = self._make_chevron(14)
+        action_pending = []
 
         body = ft.Column(spacing=0, visible=False)
         for info in sorted(infos, key=lambda x: x["filename"]):
@@ -741,17 +752,21 @@ class ComposerApp:
             parts = info["filename"].split("_")
             name = parts[2] if parts[0] == "CHR" and len(parts) >= 3 else (
                 parts[4] if len(parts) >= 5 else info["filename"])
-            body.controls.append(self._action_tile(name, info))
+            body.controls.append(self._action_tile(name, info, registry=action_pending))
 
         def toggle(e):
             state["open"] = not state["open"]
             body.visible = state["open"]
             self._set_chevron(chevron, state["open"], 14)
+            if state["open"] and action_pending:
+                for task in action_pending:
+                    self._queue_thumb(*task)
+                action_pending.clear()
             body.update()
             chevron.update()
 
         thumb_info = next((i for i in infos if not _is_expr(i["filename"])), None)
-        thumb_widget = self._make_mini_thumb(thumb_info, 30) if thumb_info else ft.Icon(ft.Icons.FOLDER, size=18, color=ft.Colors.SECONDARY)
+        thumb_widget = self._make_mini_thumb(thumb_info, 30, registry=header_registry) if thumb_info else ft.Icon(ft.Icons.FOLDER, size=18, color=ft.Colors.SECONDARY)
 
         header = ft.ListTile(
             leading=thumb_widget,
@@ -764,9 +779,9 @@ class ComposerApp:
         )
         return ft.Column([header, body], spacing=0)
 
-    def _action_tile(self, name, info):
+    def _action_tile(self, name, info, registry=None):
         selected = info["filename"] == self.selected_filename
-        thumb_widget = self._make_mini_thumb(info, 26)
+        thumb_widget = self._make_mini_thumb(info, 26, registry=registry)
 
         c = ft.ListTile(
             leading=thumb_widget,
