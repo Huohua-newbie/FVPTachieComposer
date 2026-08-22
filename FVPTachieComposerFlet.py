@@ -34,6 +34,40 @@ def _app_icon():
     icon = base / "Shinku.ico"
     return str(icon) if icon.exists() else None
 
+
+def _expr_suffixes():
+    """生成“表情”在各编码组合下的后缀变体，兼容 GBK/BIG5 等误读 SJIS 文件名的拆包结果。"""
+    cands = {"表情"}
+    for enc in ("shift_jis", "utf-8"):
+        try:
+            raw = "表情".encode(enc)
+        except Exception:
+            continue
+        for dst in ("gbk", "big5", "cp1252"):
+            try:
+                cands.add(raw.decode(dst))
+            except Exception:
+                pass
+    return tuple(cands)
+
+
+EXPR_SUFFIXES = _expr_suffixes()
+
+
+def _is_expr(filename):
+    """判断文件名是否为表情差分文件（编码无关）。"""
+    return any(filename.endswith(s) for s in EXPR_SUFFIXES)
+
+
+def _find_expr_info(file_infos, base_name):
+    """查找底图对应的表情差分条目：base_<表情后缀>，后缀按编码变体集合精确匹配。"""
+    prefix = base_name + "_"
+    for i in file_infos:
+        if i.get("type") == "hzc" and i["filename"].startswith(prefix):
+            if i["filename"][len(prefix):] in EXPR_SUFFIXES:
+                return i
+    return None
+
 HELP_TEXT = (
     "1. 点击「打开 BIN」选择 .bin 文件\n"
     "2. 左侧按 角色 → 服装 → 动作 展开\n"
@@ -606,7 +640,7 @@ class ComposerApp:
             return self.role_thumb_cache[role]
         for outfit, infos in sorted(outfits.items()):
             for info in infos:
-                if info["filename"].endswith("_表情"):
+                if _is_expr(info["filename"]):
                     continue
                 try:
                     imgs = self._read_pil_list(info)
@@ -645,7 +679,7 @@ class ComposerApp:
 
         body = ft.Column(spacing=0, visible=False)
         for info in sorted(infos, key=lambda x: x["filename"]):
-            if info["filename"].endswith("_表情"):
+            if _is_expr(info["filename"]):
                 continue
             parts = info["filename"].split("_")
             name = parts[2] if parts[0] == "CHR" and len(parts) >= 3 else (
@@ -659,7 +693,7 @@ class ComposerApp:
             body.update()
             chevron.update()
 
-        thumb_info = next((i for i in infos if not i["filename"].endswith("_表情")), None)
+        thumb_info = next((i for i in infos if not _is_expr(i["filename"])), None)
         thumb_widget = self._make_mini_thumb(thumb_info, 30) if thumb_info else ft.Icon(ft.Icons.FOLDER, size=18, color=ft.Colors.SECONDARY)
 
         header = ft.ListTile(
@@ -776,11 +810,7 @@ class ComposerApp:
         self.save_btn.disabled = True
         self.batch_btn.disabled = True
 
-        part_name = info["filename"] + "_表情"
-        part_info = next(
-            (i for i in self.file_infos if i["filename"] == part_name and i["type"] == "hzc"),
-            None,
-        )
+        part_info = _find_expr_info(self.file_infos, info["filename"])
         if not part_info:
             self.page.update()
             return
