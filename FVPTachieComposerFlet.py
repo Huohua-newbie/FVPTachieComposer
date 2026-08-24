@@ -132,7 +132,7 @@ class ComposerApp:
     def _apply_theme(self):
         p = self.page
         sb = ft.ScrollbarTheme(thumb_visibility=True, track_visibility=False)
-        tt = ft.TooltipTheme(wait_duration=100, show_duration=2000, enable_feedback=True)
+        tt = ft.TooltipTheme(wait_duration=100, show_duration=150, enable_feedback=True)
         if self.is_dark:
             p.theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb, tooltip_theme=tt)
             p.dark_theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb, tooltip_theme=tt)
