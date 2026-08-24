@@ -132,14 +132,15 @@ class ComposerApp:
     def _apply_theme(self):
         p = self.page
         sb = ft.ScrollbarTheme(thumb_visibility=True, track_visibility=False)
+        tt = ft.TooltipTheme(wait_duration=100, show_duration=2000, enable_feedback=True)
         if self.is_dark:
-            p.theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb)
-            p.dark_theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb)
+            p.theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb, tooltip_theme=tt)
+            p.dark_theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb, tooltip_theme=tt)
             p.theme_mode = ft.ThemeMode.DARK
             p.bgcolor = ft.Colors.SURFACE_CONTAINER_LOWEST
         else:
-            p.theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True, scrollbar_theme=sb)
-            p.dark_theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True, scrollbar_theme=sb)
+            p.theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True, scrollbar_theme=sb, tooltip_theme=tt)
+            p.dark_theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True, scrollbar_theme=sb, tooltip_theme=tt)
             p.theme_mode = ft.ThemeMode.LIGHT
             p.bgcolor = ft.Colors.SURFACE_CONTAINER_LOWEST
 
