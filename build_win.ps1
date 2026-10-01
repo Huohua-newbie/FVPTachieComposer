@@ -1,4 +1,4 @@
-#Requires -Version 5
+﻿#Requires -Version 5
 <#
 .SYNOPSIS  FVPTachieComposer Windows 一键构建（含体积裁剪与产物校验）
 .EXAMPLE   .\build_win.ps1 -Version 2.1.2-beta
