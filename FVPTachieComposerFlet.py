@@ -114,7 +114,10 @@ class ComposerApp:
         self._loop = None
 
         self.file_picker = ft.FilePicker()
-        self.page.services = [self.file_picker]
+        self.clipboard = ft.Clipboard()
+        self.page.services = [self.file_picker, self.clipboard]
+        self._snack_seq = 0
+        self._snack_overlay = None
         self._setup_page()
         self._build()
 
@@ -472,14 +475,44 @@ class ComposerApp:
 
     # ── Status ──────────────────────────────────────────────
 
-    def _snack(self, msg, error=False):
+    def _snack(self, msg, error=False, folder=None):
+        self._snack_seq = getattr(self, "_snack_seq", 0) + 1
+        seq = self._snack_seq
         bg = ft.Colors.ERROR_CONTAINER if error else ft.Colors.PRIMARY_CONTAINER
         fg = ft.Colors.ON_ERROR_CONTAINER if error else ft.Colors.ON_PRIMARY_CONTAINER
+        row = [
+            ft.Icon(
+                ft.Icons.ERROR if error else ft.Icons.CHECK_CIRCLE,
+                size=18, color=fg,
+            ),
+            ft.Text(msg, size=12, color=fg, weight=ft.FontWeight.W_500,
+                    expand=True, max_lines=3, overflow=ft.TextOverflow.ELLIPSIS),
+        ]
+        if not error and folder:
+            async def open_dir(e, _d=folder):
+                self._open_folder(_d)
+            row.append(ft.TextButton("打开文件夹", on_click=open_dir))
+        if error:
+            copy_btn = ft.TextButton("复制报错")
+
+            async def copy_err(e, _m=msg, _b=copy_btn):
+                try:
+                    await self.clipboard.set(_m)
+                    _b.text = "已复制"
+                    _b.update()
+                except Exception:
+                    pass
+
+            copy_btn.on_click = copy_err
+            row.append(copy_btn)
+            row.append(ft.IconButton(ft.Icons.CLOSE, icon_size=16,
+                                     tooltip=_tip("关闭"),
+                                     on_click=lambda e, _s=seq: self._dismiss_snack(_s)))
         toast = ft.Container(
-            content=ft.Text(msg, size=12, color=fg, weight=ft.FontWeight.W_500),
+            content=ft.Row(row, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             bgcolor=bg,
             border_radius=8,
-            padding=ft.Padding.symmetric(horizontal=16, vertical=10),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
             shadow=ft.BoxShadow(blur_radius=8, spread_radius=0, color=ft.Colors.with_opacity(0.15, ft.Colors.BLACK)),
             alignment=ft.Alignment.CENTER,
         )
@@ -487,20 +520,49 @@ class ComposerApp:
             [toast],
             top=16, left=0, right=0,
         )
-        self.page.overlay.clear()
+        try:
+            if self._snack_overlay in self.page.overlay:
+                self.page.overlay.remove(self._snack_overlay)
+        except Exception:
+            pass
+        self._snack_overlay = overlay
         self.page.overlay.append(overlay)
         self.page.update()
 
-        import threading
-        def dismiss():
+        if not error:
+            import threading
             import time
-            time.sleep(1)
-            try:
-                self.page.overlay.clear()
+
+            def dismiss(_s=seq):
+                time.sleep(1)
+                try:
+                    if _s == self._snack_seq and self._snack_overlay in self.page.overlay:
+                        self.page.overlay.remove(self._snack_overlay)
+                        self.page.update()
+                except Exception:
+                    pass
+            threading.Thread(target=dismiss, daemon=True).start()
+
+    def _dismiss_snack(self, seq):
+        try:
+            if seq == self._snack_seq and self._snack_overlay in self.page.overlay:
+                self.page.overlay.remove(self._snack_overlay)
                 self.page.update()
-            except Exception:
-                pass
-        threading.Thread(target=dismiss, daemon=True).start()
+        except Exception:
+            pass
+
+    def _open_folder(self, path):
+        import platform
+        import subprocess
+        try:
+            if platform.system() == "Windows":
+                os.startfile(path)
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as ex:
+            self._snack(f"打开文件夹失败: {ex}", error=True)
 
     def _set_status(self, text):
         self.status_text.value = text
@@ -991,7 +1053,8 @@ class ComposerApp:
             return
         try:
             self.composed_img.save(result, "PNG")
-            self._snack(f"已保存: {Path(result).name}")
+            self._snack(f"已保存: {Path(result).name}", folder=str(Path(result).parent))
+            self._set_status(str(result))
         except Exception as ex:
             self._snack(f"保存失败: {ex}", error=True)
 
@@ -1036,10 +1099,10 @@ class ComposerApp:
         try:
             saved, errors = await asyncio.to_thread(work)
             if errors:
-                self._snack(f"导出完成: {saved} 成功, {errors} 失败", error=errors > 0)
+                self._snack(f"导出完成: {saved} 成功, {errors} 失败", error=errors > 0, folder=save_dir)
             else:
-                self._snack(f"已导出 {saved} 张到 {Path(save_dir).name}")
-            self._set_status("导出完成")
+                self._snack(f"已导出 {saved} 张到 {Path(save_dir).name}", folder=save_dir)
+            self._set_status(save_dir)
         except Exception as ex:
             self._snack(f"导出失败: {ex}", error=True)
             self._set_status("导出失败")
