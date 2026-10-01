@@ -121,10 +121,10 @@ class ComposerApp:
     def _setup_page(self):
         p = self.page
         p.title = "FVP Tachie Composer"
-        p.window.width = 1440
-        p.window.height = 880
-        p.window.min_width = 1080
-        p.window.min_height = 640
+        p.window.width = 1280
+        p.window.height = 760
+        p.window.min_width = 1020
+        p.window.min_height = 600
         p.window.title_bar_hidden = True
         icon = _app_icon()
         if icon:
