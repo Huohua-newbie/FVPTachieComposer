@@ -33,11 +33,12 @@ if (-not $pkg) { throw '找不到 PKG-00.toc，构建可能失败' }
 Select-String -Path $pkg.FullName -Pattern 'Shinku.ico' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Shinku.ico missing from PKG datas' }
 
-Write-Host "== 校验: 体积裁剪生效(tcl/numpy/pygments/libmpv 不应残留) =="
+Write-Host "== 校验: 体积裁剪生效(tcl/numpy/pygments/libmpv 不应残留；rich 必须存在) =="
 $names = Get-Content $pkg.FullName -Raw
-foreach ($pat in @('tcl\', 'tkinter', 'numpy', 'pygments', "'rich'", 'libmpv')) {
+foreach ($pat in @('tcl\', 'tkinter', 'numpy', 'pygments', 'libmpv')) {
     if ($names -match [regex]::Escape($pat)) { throw "裁剪失效, 仍含: $pat" }
 }
+if ($names -notmatch 'rich') { throw 'rich 缺失会导致启动失败' }
 
 Write-Host "== 校验: exe 图标非默认 =="
 Add-Type -AssemblyName System.Drawing

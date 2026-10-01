@@ -49,7 +49,8 @@ a = Analysis(
         "PIL.ImageTk",
         "numpy",
         "pygments",
-        "rich",
+        # 注意：rich 必须保留，flet_desktop 启动时 import rich.progress；
+        # markdown_it/pygments 仅被 rich.markdown/rich.syntax 按需引用，可排除
         "markdown_it",
         "setuptools",
         "pkg_resources",
