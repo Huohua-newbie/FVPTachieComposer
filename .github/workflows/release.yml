@@ -43,37 +43,12 @@ jobs:
       - name: Self check
         run: python .github/selfcheck.py
 
-      - name: Build exe
-        run: |
-          pyinstaller --onefile --noconfirm --noconsole `
-            --name FVPTachieComposer `
-            --icon Shinku.ico `
-            --add-data "Shinku.ico;." `
-            --distpath dist --workpath build --specpath build `
-            FVPTachieComposerFlet.py
-
-      - name: Verify icon embedded
-        shell: pwsh
-        run: |
-          Select-String -Path build/FVPTachieComposer/PKG-00.toc -Pattern 'Shinku.ico' | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Shinku.ico missing from PKG datas' }
-          Add-Type -AssemblyName System.Drawing
-          $a = [System.Drawing.Icon]::ExtractAssociatedIcon("$PWD/dist/FVPTachieComposer.exe")
-          $b = [System.Drawing.Icon]::ExtractAssociatedIcon("$env:SystemRoot/System32/notepad.exe")
-          $ms1 = New-Object IO.MemoryStream; $a.ToBitmap().Save($ms1, [System.Drawing.Imaging.ImageFormat]::Png)
-          $ms2 = New-Object IO.MemoryStream; $b.ToBitmap().Save($ms2, [System.Drawing.Imaging.ImageFormat]::Png)
-          if ([BitConverter]::ToString($ms1.ToArray()) -eq [BitConverter]::ToString($ms2.ToArray())) { throw 'exe icon check inconclusive' }
-          Write-Host 'icon check passed'
-
-      - name: Package and checksum
+      - name: Build, verify and package
         shell: pwsh
         run: |
           $ver = $env:TAG -replace '^v',''
-          $zip = "FVPTachieComposer-$ver-win64.zip"
-          Compress-Archive -Path dist/FVPTachieComposer.exe -DestinationPath "dist/$zip" -Force
-          $h = (Get-FileHash "dist/$zip" -Algorithm SHA256).Hash.ToLower()
-          "$h  $zip" | Out-File dist/SHA256SUMS.txt -Encoding ascii
-          "ZIP=$zip" >> $env:GITHUB_ENV
+          ./build_win.ps1 -Version $ver
+          "ZIP=FVPTachieComposer-$ver-win64.zip" >> $env:GITHUB_ENV
 
       - name: Stage to Draft release
         shell: pwsh

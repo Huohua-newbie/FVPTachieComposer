@@ -1,11 +1,13 @@
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 import struct
 import zlib
-from PIL import Image, ImageTk
+from PIL import Image
 import os
 import ctypes
+
+# 说明：tkinter（含 ImageTk）仅 legacy HZCGUI 界面使用，
+# 为避免 PyInstaller 打包时引入 Tcl/Tk（约 7MB），相关 import 全部下沉到函数级；
+# Flet 入口不经过 HZCGUI，不受影响。
 
 
 
@@ -730,6 +732,10 @@ class HZCGUI:
 		style.configure("TPanedwindow", background=bg, sashthickness=6)
 
 	def __init__(self, root):
+		global tk, ttk, filedialog, messagebox, ImageTk
+		import tkinter as tk
+		from tkinter import ttk, filedialog, messagebox
+		from PIL import ImageTk
 		self.root = root
 		self.root.title("FVP引擎 立绘查看与合成工具")
 		self.root.geometry("1600x900")
@@ -1486,6 +1492,7 @@ class HZCGUI:
 
 # ---------- 启动 ----------
 if __name__ == '__main__':
+	import tkinter as tk
 	root = tk.Tk()
 	app = HZCGUI(root)
 	root.mainloop()

@@ -17,18 +17,19 @@ pip install -r requirements.txt pyinstaller
 ## 构建命令（仓库根目录执行）
 
 ```powershell
-pyinstaller --onefile --noconfirm --noconsole `
-  --name FVPTachieComposer `
-  --icon Shinku.ico `
-  --add-data "Shinku.ico;." `
-  --distpath dist --workpath build --specpath build `
-  FVPTachieComposerFlet.py
+.\build_win.ps1 -Version <版本号，如 2.1.2-beta>
 ```
+
+脚本内容：`pyinstaller`（`FVPTachieComposer.win.spec`，入库版本）→
+三项校验（Shinku.ico 进包 / tcl·numpy·pygments·libmpv 无残留 / exe 图标非默认）→
+打包 zip + 生成 `SHA256SUMS.txt`。
 
 说明：
 
+- 体积裁剪逻辑（excludes / DLL 同源去重 / 去 libmpv）全部收敛在
+  `FVPTachieComposer.win.spec` 的 `_slim()` 与 `excludes` 中，`build_win.ps1`
+  与 CI 共用同一份，保证本地/云端构建一致。
 - `--icon` 写 exe 程序图标；`--add-data` 把图标打进包供运行时窗口图标读取（`_app_icon()` 走 `_MEIPASS`）。
-- 相对路径写法仅在**仓库根目录**执行时有效。经 WSL 调用 Windows Python 时 cwd 解析异常，需改用绝对路径（历史坑，CI 无此问题）。
 
 ## 打包与校验
 

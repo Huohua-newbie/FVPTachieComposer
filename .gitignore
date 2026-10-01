@@ -8,3 +8,6 @@ dist/
 .idea/
 *.iml
 *.spec
+
+# 入库的正式构建 spec 不忽略
+!FVPTachieComposer.win.spec
