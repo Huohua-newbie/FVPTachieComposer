@@ -92,6 +92,9 @@ class _Any:
     def __getattr__(self, name):
         if name.startswith("__"):
             raise AttributeError(name)
+        # 先返回构造时传入的值，贴近真实控件“读取属性即设定值”的语义
+        if name in self._kwargs:
+            return self._kwargs[name]
         return _Any()
 
     def update(self):
@@ -220,6 +223,43 @@ async def main():
     app._snack("err-test", error=True)
     await asyncio.sleep(1.3)
     assert len(page.overlay) == 1, "失败横幅不应自动消失"
+
+    # 6) 单选项级联自动选中：单服装角色展开→服装自动展开→单动作自动选中合成
+    page2 = FakePage()
+    app2 = ComposerApp(page2)
+    tmp2 = Path(tempfile.mkdtemp(prefix="auto_sel_"))
+    make_hzc(tmp2 / "CHR_S_基_私服.hzc")
+    make_hzc(tmp2 / "CHR_S_基_私服_表情.hzc", image_type=2, frames=2)
+    make_hzc(tmp2 / "CHR_T_基_私服.hzc")
+    make_hzc(tmp2 / "CHR_T_喜_私服.hzc")
+    await app2._load_bin(str(tmp2))
+    await asyncio.sleep(1.0)
+    r2 = find_tiles(app2)
+    assert len(r2) == 2, f"role 数={len(r2)}"
+    # 找到角色 S 的 tile（title 文本为 S）
+    s_entry = None
+    for header, body, tog in r2:
+        title = header._kwargs.get("title")
+        if getattr(title, "_args", None) and title._args and title._args[0] == "S":
+            s_entry = (header, body, tog)
+            break
+    assert s_entry is not None, "未找到角色 S"
+    sheader, sbody, stog = s_entry
+    assert sbody._kwargs.get("visible") is False
+    stog(_Any())
+    assert sbody.visible is True
+    s_outfit_col = sbody.controls[0]
+    soheader, sobody = s_outfit_col._args[0]
+    assert sobody.visible is True, "单服装未自动展开"
+    assert app2.composed_img is not None, "单动作未自动选中合成"
+    assert app2.selected_filename == "CHR_S_基_私服", app2.selected_filename
+    # 去重守卫：收起再展开不再重复加载，且已展开的子服装不被翻转关闭
+    before = app2.composed_img
+    stog(_Any())
+    stog(_Any())
+    assert app2.selected_filename == "CHR_S_基_私服"
+    assert app2.composed_img is before, "重复加载了已选项"
+    assert sobody.visible is True, "重展开时已开的服装被误关闭"
 
     print("THUMB_THREADING_OK")
 

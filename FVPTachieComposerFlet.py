@@ -697,17 +697,23 @@ class ComposerApp:
         count = sum(len(v) for v in outfits.values())
         chevron = self._make_chevron(16)
         header_pending = []
+        child_toggles = []
 
         body = ft.Column(spacing=0, visible=False)
         for outfit, infos in sorted(outfits.items()):
-            body.controls.append(self._outfit_tile(outfit, infos, header_registry=header_pending))
+            body.controls.append(self._outfit_tile(outfit, infos, header_registry=header_pending, _expand_box=child_toggles))
 
         def toggle(e):
             state["open"] = not state["open"]
             body.visible = state["open"]
             self._set_chevron(chevron, state["open"], 16)
-            if state["open"] and header_pending:
-                self._flush_tasks(header_pending)
+            if state["open"]:
+                if header_pending:
+                    self._flush_tasks(header_pending)
+                if len(child_toggles) == 1:
+                    tog, bod = child_toggles[0]
+                    if not bod.visible:
+                        tog(None)
             body.update()
             chevron.update()
 
@@ -834,10 +840,11 @@ class ComposerApp:
             registry.append(task)
         return placeholder
 
-    def _outfit_tile(self, outfit, infos, header_registry=None):
+    def _outfit_tile(self, outfit, infos, header_registry=None, _expand_box=None):
         state = {"open": False}
         chevron = self._make_chevron(14)
         action_pending = []
+        action_tiles = []
 
         body = ft.Column(spacing=0, visible=False)
         for info in sorted(infos, key=lambda x: x["filename"]):
@@ -846,16 +853,25 @@ class ComposerApp:
             parts = info["filename"].split("_")
             name = parts[2] if parts[0] == "CHR" and len(parts) >= 3 else (
                 parts[4] if len(parts) >= 5 else info["filename"])
-            body.controls.append(self._action_tile(name, info, registry=action_pending))
+            tile = self._action_tile(name, info, registry=action_pending)
+            action_tiles.append((tile, info))
+            body.controls.append(tile)
 
         def toggle(e):
             state["open"] = not state["open"]
             body.visible = state["open"]
             self._set_chevron(chevron, state["open"], 14)
-            if state["open"] and action_pending:
-                self._flush_tasks(action_pending)
+            if state["open"]:
+                if action_pending:
+                    self._flush_tasks(action_pending)
+                if len(action_tiles) == 1:
+                    tile, info = action_tiles[0]
+                    if self.selected_filename != info.get("filename"):
+                        self._select_action(info, tile)
             body.update()
             chevron.update()
+        if _expand_box is not None:
+            _expand_box.append((toggle, body))
 
         thumb_info = next((i for i in infos if not _is_expr(i["filename"])), None)
         thumb_widget = self._make_mini_thumb(thumb_info, 30, registry=header_registry) if thumb_info else ft.Icon(ft.Icons.FOLDER, size=18, color=ft.Colors.SECONDARY)
@@ -888,6 +904,8 @@ class ComposerApp:
         return c
 
     def _select_action(self, info, ctrl):
+        if self.selected_filename == info.get("filename"):
+            return
         if self.selected_action_ctrl is not None:
             try:
                 self.selected_action_ctrl.selected = False
