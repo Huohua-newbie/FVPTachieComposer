@@ -581,6 +581,7 @@ class ComposerApp:
         try:
             result = await self.file_picker.pick_files(
                 dialog_title="选择 BIN 文件",
+                file_type=ft.FilePickerFileType.CUSTOM,
                 allowed_extensions=["bin"],
                 allow_multiple=False,
             )
