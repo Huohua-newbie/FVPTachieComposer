@@ -28,7 +28,9 @@ if ($parts.Count -eq 2) { & $parts[0] $parts[1] -m PyInstaller --noconfirm FVPTa
 else { & $py -m PyInstaller --noconfirm FVPTachieComposer.win.spec --distpath dist --workpath build }
 
 Write-Host "== 校验: Shinku.ico 进入运行时资源 =="
-Select-String -Path build/FVPTachieComposer/PKG-00.toc -Pattern 'Shinku.ico' | Out-Null
+$pkg = Get-ChildItem -Path build -Recurse -Filter PKG-00.toc | Select-Object -First 1
+if (-not $pkg) { throw '找不到 PKG-00.toc，构建可能失败' }
+Select-String -Path $pkg.FullName -Pattern 'Shinku.ico' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Shinku.ico missing from PKG datas' }
 
 Write-Host "== 校验: 体积裁剪生效(tcl/numpy/pygments/libmpv 不应残留) =="
