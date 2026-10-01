@@ -475,6 +475,23 @@ class ComposerApp:
 
     # ── Status ──────────────────────────────────────────────
 
+    def _later(self, delay, callback, *args):
+        """在 UI 线程延迟执行（替代后台 sleep 线程，后者跨线程碰 UI 会丢更新甚至破坏 session）。"""
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+                self._loop = loop
+            except RuntimeError:
+                loop = None
+        if loop is not None:
+            try:
+                loop.call_later(delay, callback, *args)
+                return True
+            except Exception:
+                pass
+        return False
+
     def _snack(self, msg, error=False, folder=None):
         self._snack_seq = getattr(self, "_snack_seq", 0) + 1
         seq = self._snack_seq
@@ -505,9 +522,9 @@ class ComposerApp:
 
             copy_btn.on_click = copy_err
             row.append(copy_btn)
-            row.append(ft.IconButton(ft.Icons.CLOSE, icon_size=16,
-                                     tooltip=_tip("关闭"),
-                                     on_click=lambda e, _s=seq: self._dismiss_snack(_s)))
+        row.append(ft.IconButton(ft.Icons.CLOSE, icon_size=16,
+                                tooltip=_tip("关闭"),
+                                on_click=lambda e, _s=seq: self._dismiss_snack(_s)))
         toast = ft.Container(
             content=ft.Row(row, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             bgcolor=bg,
@@ -530,18 +547,8 @@ class ComposerApp:
         self.page.update()
 
         if not error:
-            import threading
-            import time
-
-            def dismiss(_s=seq):
-                time.sleep(1)
-                try:
-                    if _s == self._snack_seq and self._snack_overlay in self.page.overlay:
-                        self.page.overlay.remove(self._snack_overlay)
-                        self.page.update()
-                except Exception:
-                    pass
-            threading.Thread(target=dismiss, daemon=True).start()
+            # 成功横幅 1 秒后自动消除：走事件循环定时器，全程 UI 线程
+            self._later(1.0, self._dismiss_snack, seq)
 
     def _dismiss_snack(self, seq):
         try:
