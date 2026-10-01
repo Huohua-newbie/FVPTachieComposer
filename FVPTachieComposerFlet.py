@@ -11,7 +11,6 @@ import asyncio
 import io
 import os
 import sys
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -104,10 +103,10 @@ class ComposerApp:
         self.thumb_refs = []
         self.role_thumb_cache = {}
 
-        self._dirty_lock = threading.Lock()
-        self._thumb_dirty = []
-        self._flush_stop = threading.Event()
-        threading.Thread(target=self._flush_loop, daemon=True).start()
+        # UI 事件循环引用（_load_bin/_toggle_theme 中捕获）：
+        # 后台缩略图解码完成后，经由它把“替换+刷新”调度回 UI 线程执行，
+        # 避免后台线程直接碰控件导致的更新丢失。
+        self._loop = None
 
         self.file_picker = ft.FilePicker()
         self.page.services = [self.file_picker]
@@ -454,6 +453,7 @@ class ComposerApp:
         self.page.update()
 
     async def _toggle_theme(self, e):
+        self._capture_loop()
         self.is_dark = not self.is_dark
         self.selected_action_ctrl = None
         self.page.clean()
@@ -530,6 +530,7 @@ class ComposerApp:
         await self._load_bin(str(result))
 
     async def _load_bin(self, path):
+        self._capture_loop()
         self._set_status("正在解析…")
 
         def work():
@@ -633,9 +634,7 @@ class ComposerApp:
             body.visible = state["open"]
             self._set_chevron(chevron, state["open"], 16)
             if state["open"] and header_pending:
-                for task in header_pending:
-                    self._queue_thumb(*task)
-                header_pending.clear()
+                self._flush_tasks(header_pending)
             body.update()
             chevron.update()
 
@@ -652,36 +651,57 @@ class ComposerApp:
         )
         return ft.Column([header, body], spacing=0)
 
-    def _flush_loop(self):
-        """每 150ms 将本轮完成的缩略图合并为一次 page.update，避免刷新风暴。"""
-        while not self._flush_stop.wait(0.15):
-            with self._dirty_lock:
-                batch, self._thumb_dirty = self._thumb_dirty, []
-            if not batch:
-                continue
-            try:
-                self.page.update()
-            except Exception:
-                pass
+    def _capture_loop(self):
+        """在 async 入口捕获当前事件循环（纯标准库，不依赖 Flet 版本 API）。"""
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
 
-    def _mark_dirty(self, ctrl):
-        with self._dirty_lock:
-            self._thumb_dirty.append(ctrl)
+    def _push_thumb(self, placeholder, widget, cache_key):
+        """必须在 UI 线程执行：替换占位内容并做控件级精确推送。"""
+        try:
+            self.role_thumb_cache[cache_key] = widget
+            placeholder.content = widget
+            placeholder.update()
+        except Exception:
+            pass
 
     def _queue_thumb(self, placeholder, info, size, cache_key):
-        """后台线程解码首帧生成缩略图，完成后原位替换占位符（批量刷新）。"""
+        """后台线程只做解码；完成后经事件循环把替换+刷新调度回 UI 线程。"""
         def job():
             try:
                 img = self._read_first_frame(info)
-                if img is None:
-                    return
-                widget = _make_thumb_widget(img, size)
-                self.role_thumb_cache[cache_key] = widget
-                placeholder.content = widget
-                self._mark_dirty(placeholder)
             except Exception:
-                pass
+                return
+            if img is None:
+                return
+            try:
+                widget = _make_thumb_widget(img, size)
+            except Exception:
+                return
+            loop = getattr(self, "_loop", None)
+            if loop is not None:
+                try:
+                    loop.call_soon_threadsafe(self._push_thumb, placeholder, widget, cache_key)
+                    return
+                except Exception:
+                    pass
+            self._push_thumb(placeholder, widget, cache_key)
         _THUMB_POOL.submit(job)
+
+    def _flush_tasks(self, tasks):
+        """展开时在 UI 线程调用：已解码的当场应用，未完成的提交后台任务。"""
+        for placeholder, info, size, key in tasks:
+            cached = self.role_thumb_cache.get(key)
+            if cached is not None:
+                try:
+                    placeholder.content = cached
+                except Exception:
+                    pass
+            else:
+                self._queue_thumb(placeholder, info, size, key)
+        tasks.clear()
 
     def _read_first_frame(self, info):
         src = info.get("path")
@@ -760,9 +780,7 @@ class ComposerApp:
             body.visible = state["open"]
             self._set_chevron(chevron, state["open"], 14)
             if state["open"] and action_pending:
-                for task in action_pending:
-                    self._queue_thumb(*task)
-                action_pending.clear()
+                self._flush_tasks(action_pending)
             body.update()
             chevron.update()
 
