@@ -12,7 +12,20 @@ Set-Location $PSScriptRoot
 $zip = "FVPTachieComposer-$Version-win64.zip"
 
 Write-Host "== PyInstaller =="
-pyinstaller --noconfirm FVPTachieComposer.win.spec --distpath dist --workpath build
+$py = $null
+foreach ($c in @('py -3.13', 'python')) {
+    try {
+        $parts = $c -split ' ', 2
+        if ($parts.Count -eq 2) { & $parts[0] $parts[1] -m PyInstaller --version | Out-Null }
+        else { & $c -m PyInstaller --version | Out-Null }
+        $py = $c; break
+    } catch { }
+}
+if (-not $py) { throw '找不到带 PyInstaller 的 Python（需要 py -3.13 或 python -m PyInstaller 可用）' }
+Write-Host "使用解释器: $py"
+$parts = $py -split ' ', 2
+if ($parts.Count -eq 2) { & $parts[0] $parts[1] -m PyInstaller --noconfirm FVPTachieComposer.win.spec --distpath dist --workpath build }
+else { & $py -m PyInstaller --noconfirm FVPTachieComposer.win.spec --distpath dist --workpath build }
 
 Write-Host "== 校验: Shinku.ico 进入运行时资源 =="
 Select-String -Path build/FVPTachieComposer/PKG-00.toc -Pattern 'Shinku.ico' | Out-Null
