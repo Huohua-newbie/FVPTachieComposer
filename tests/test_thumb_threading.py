@@ -210,9 +210,11 @@ async def main():
     app._select_action(first_outfit_info(app), act_header)
     assert app.composed_img is not None, "合成结果为空"
 
-    # 5) 成功横幅 1 秒后自动消除（事件循环定时器）；失败横幅常驻
+    # 5) 成功横幅 2 秒后自动消除（事件循环定时器）；失败横幅常驻
     app._snack("ok-test")
     assert len(page.overlay) == 1, "横幅未挂载"
+    await asyncio.sleep(1.0)
+    assert len(page.overlay) == 1, "成功横幅消除过早"
     await asyncio.sleep(1.3)
     assert len(page.overlay) == 0, "成功横幅未自动消除"
     app._snack("err-test", error=True)

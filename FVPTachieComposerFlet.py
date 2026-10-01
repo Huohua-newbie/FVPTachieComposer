@@ -547,8 +547,8 @@ class ComposerApp:
         self.page.update()
 
         if not error:
-            # 成功横幅 1 秒后自动消除：走事件循环定时器，全程 UI 线程
-            self._later(1.0, self._dismiss_snack, seq)
+            # 成功横幅 2 秒后自动消除：走事件循环定时器，全程 UI 线程
+            self._later(2.0, self._dismiss_snack, seq)
 
     def _dismiss_snack(self, seq):
         try:
