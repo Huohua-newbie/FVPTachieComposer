@@ -1,2 +1,4 @@
 flet[desktop]==0.86.5
 Pillow==12.2.0
+# 构建所需：含 PyInstaller hook（收录 Flutter 桌面客户端），缺失则打出的包无 UI 运行时
+flet-cli==0.86.5
