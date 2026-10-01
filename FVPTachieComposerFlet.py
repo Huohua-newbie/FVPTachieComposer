@@ -83,7 +83,8 @@ HELP_TEXT = (
     "2. 左侧按 角色 → 服装 → 动作 展开\n"
     "3. 点击动作预览底图，中间自动加载差分部件\n"
     "4. 点击缩略图，右侧生成合成预览\n"
-    "5. 保存当前图 / 批量合成并导出"
+    "5. 保存当前图 / 批量合成并导出\n"
+    "6. 也可把 .bin 文件或 HZC 文件夹拖到程序图标上直接打开"
 )
 
 
@@ -1154,12 +1155,21 @@ def _make_thumb_widget(img, size=36):
     return ft.Image(src=data, width=size, height=size, fit=ft.BoxFit.CONTAIN)
 
 
-def main(page: ft.Page):
+async def main(page: ft.Page):
     try:
-        ComposerApp(page)
+        app = ComposerApp(page)
     except Exception as ex:
         page.add(ft.Text(f"初始化失败: {ex}", color=ft.Colors.ERROR))
         page.update()
+        return
+    # 命令行/拖到程序图标打开：首个存在的文件或目录参数自动载入
+    if len(sys.argv) > 1:
+        p = Path(sys.argv[1])
+        if p.exists() and (p.is_dir() or p.suffix.lower() == ".bin"):
+            await app._load_bin(str(p))
+        else:
+            app._snack(f"无法打开: {sys.argv[1]}", error=True)
+    return app
 
 
 if __name__ == "__main__":

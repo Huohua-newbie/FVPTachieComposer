@@ -118,7 +118,8 @@ class _FtModule(types.ModuleType):
 
 sys.modules["flet"] = _FtModule("flet")
 
-from FVPTachieComposerFlet import ComposerApp  # noqa: E402
+from FVPTachieComposerFlet import ComposerApp
+from FVPTachieComposerFlet import main as app_main  # noqa: E402
 
 
 def make_hzc(path, image_type=1, w=8, h=8, frames=1):
@@ -260,6 +261,25 @@ async def main():
     assert app2.selected_filename == "CHR_S_基_私服"
     assert app2.composed_img is before, "重复加载了已选项"
     assert sobody.visible is True, "重展开时已开的服装被误关闭"
+
+    # 7) 命令行/拖到图标打开：argv 目录参数启动即自动载入；非法参数给报错横幅
+    page3 = FakePage()
+    tmp3 = Path(tempfile.mkdtemp(prefix="argv_open_"))
+    make_hzc(tmp3 / "CHR_Q_基_私服.hzc")
+    old_argv, sys.argv = sys.argv, ["prog", str(tmp3)]
+    try:
+        app3 = await app_main(page3)
+    finally:
+        sys.argv = old_argv
+    assert app3.input_file == str(tmp3), app3.input_file
+    assert app3.hierarchy.get("Q"), "层级未建立"
+    page4 = FakePage()
+    old_argv, sys.argv = sys.argv, ["prog", str(tmp3 / "不存在.bin")]
+    try:
+        await app_main(page4)
+    finally:
+        sys.argv = old_argv
+    assert len(page4.overlay) == 1, "非法参数应弹报错横幅"
 
     print("THUMB_THREADING_OK")
 
