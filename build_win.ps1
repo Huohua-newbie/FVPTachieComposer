@@ -34,7 +34,7 @@ Select-String -Path $pkg.FullName -Pattern 'Shinku.ico' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Shinku.ico missing from PKG datas' }
 
 Write-Host "== 校验: 体积裁剪生效(tcl/numpy/pygments/libmpv 不应残留) =="
-$names = Get-Content build/FVPTachieComposer/PKG-00.toc -Raw
+$names = Get-Content $pkg.FullName -Raw
 foreach ($pat in @('tcl\', 'tkinter', 'numpy', 'pygments', "'rich'", 'libmpv')) {
     if ($names -match [regex]::Escape($pat)) { throw "裁剪失效, 仍含: $pat" }
 }
