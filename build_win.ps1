@@ -38,7 +38,11 @@ $names = Get-Content $pkg.FullName -Raw
 foreach ($pat in @('tcl\', 'tkinter', 'numpy', 'pygments', 'libmpv')) {
     if ($names -match [regex]::Escape($pat)) { throw "裁剪失效, 仍含: $pat" }
 }
-if ($names -notmatch 'rich') { throw 'rich 缺失会导致启动失败' }
+if ($names -notmatch 'flet_desktop') { throw 'flet_desktop 缺失会导致启动失败' }
+$pyz = Get-ChildItem -Path build -Recurse -Filter PYZ-00.toc | Select-Object -First 1
+if (-not $pyz) { throw '找不到 PYZ-00.toc' }
+$pyzNames = Get-Content $pyz.FullName -Raw
+if ($pyzNames -notmatch "'rich'") { throw 'rich 缺失会导致启动失败' }
 
 Write-Host "== 校验: exe 图标非默认 =="
 Add-Type -AssemblyName System.Drawing
