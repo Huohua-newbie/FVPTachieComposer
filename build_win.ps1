@@ -24,8 +24,11 @@ foreach ($c in @('py -3.13', 'python')) {
 if (-not $py) { throw '找不到带 PyInstaller 的 Python（需要 py -3.13 或 python -m PyInstaller 可用）' }
 Write-Host "使用解释器: $py"
 $parts = $py -split ' ', 2
-if ($parts.Count -eq 2) { & $parts[0] $parts[1] -m PyInstaller --noconfirm FVPTachieComposer.win.spec --distpath dist --workpath build }
-else { & $py -m PyInstaller --noconfirm FVPTachieComposer.win.spec --distpath dist --workpath build }
+if ($parts.Count -eq 2) { $pyExe, $pyPre = $parts[0], @($parts[1]) } else { $pyExe, $pyPre = $py, @() }
+Write-Host "== 预热 Flet 桌面客户端缓存（缺失则自动下载） =="
+& $pyExe @pyPre -c "from flet_desktop import ensure_client_cached; p = ensure_client_cached(); print(p); assert p, 'Flet desktop client cache missing'"
+if ($LASTEXITCODE -ne 0) { throw 'Flet 桌面客户端缓存不可用，构建中止' }
+& $pyExe @pyPre -m PyInstaller --noconfirm FVPTachieComposer.win.spec --distpath dist --workpath build
 
 Write-Host "== 校验: Shinku.ico 进入运行时资源 =="
 $pkg = Get-ChildItem -Path build -Recurse -Filter PKG-00.toc | Select-Object -First 1
