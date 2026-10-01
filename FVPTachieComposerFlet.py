@@ -38,6 +38,11 @@ def _app_icon():
     return str(icon) if icon.exists() else None
 
 
+def _tip(text):
+    """统一提示气泡：悬停 100ms 即显，移开 150ms 快速淡出。"""
+    return ft.Tooltip(message=text, wait_duration=100, show_duration=150)
+
+
 def _expr_suffixes():
     """生成“表情”在各编码组合下的后缀变体，兼容 GBK/BIG5 等误读 SJIS 文件名的拆包结果。"""
     cands = {"表情"}
@@ -131,15 +136,14 @@ class ComposerApp:
     def _apply_theme(self):
         p = self.page
         sb = ft.ScrollbarTheme(thumb_visibility=True, track_visibility=False)
-        tt = ft.TooltipTheme(wait_duration=100, show_duration=150, enable_feedback=True)
         if self.is_dark:
-            p.theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb, tooltip_theme=tt)
-            p.dark_theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb, tooltip_theme=tt)
+            p.theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb)
+            p.dark_theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb)
             p.theme_mode = ft.ThemeMode.DARK
             p.bgcolor = ft.Colors.SURFACE_CONTAINER_LOWEST
         else:
-            p.theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True, scrollbar_theme=sb, tooltip_theme=tt)
-            p.dark_theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True, scrollbar_theme=sb, tooltip_theme=tt)
+            p.theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True, scrollbar_theme=sb)
+            p.dark_theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True, scrollbar_theme=sb)
             p.theme_mode = ft.ThemeMode.LIGHT
             p.bgcolor = ft.Colors.SURFACE_CONTAINER_LOWEST
 
@@ -186,18 +190,18 @@ class ComposerApp:
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-        self.max_btn = ft.IconButton(ft.Icons.CROP_SQUARE, on_click=self._toggle_maximize, tooltip="最大化", icon_size=18)
+        self.max_btn = ft.IconButton(ft.Icons.CROP_SQUARE, on_click=self._toggle_maximize, tooltip=_tip("最大化"), icon_size=18)
 
         right = ft.Row(
             [
-                ft.IconButton(ft.Icons.HELP_OUTLINE, on_click=self._help, tooltip="使用说明", icon_size=18),
+                ft.IconButton(ft.Icons.HELP_OUTLINE, on_click=self._help, tooltip=_tip("使用说明"), icon_size=18),
                 ft.IconButton(
                     ft.Icons.DARK_MODE if self.is_dark else ft.Icons.LIGHT_MODE,
-                    on_click=self._toggle_theme, tooltip="切换主题", icon_size=18,
+                    on_click=self._toggle_theme, tooltip=_tip("切换主题"), icon_size=18,
                 ),
-                ft.IconButton(ft.Icons.MINIMIZE, on_click=self._minimize, tooltip="最小化", icon_size=18),
+                ft.IconButton(ft.Icons.MINIMIZE, on_click=self._minimize, tooltip=_tip("最小化"), icon_size=18),
                 self.max_btn,
-                ft.IconButton(ft.Icons.CLOSE, on_click=self._close, tooltip="关闭", icon_size=18),
+                ft.IconButton(ft.Icons.CLOSE, on_click=self._close, tooltip=_tip("关闭"), icon_size=18),
             ],
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -218,8 +222,8 @@ class ComposerApp:
             [
                 ft.Icon(ft.Icons.PEOPLE, size=18, color=ft.Colors.PRIMARY),
                 ft.Text("角色库", size=14, weight=ft.FontWeight.W_600, expand=True),
-                ft.IconButton(ft.Icons.FOLDER_OPEN, on_click=self._open_bin, tooltip="打开 BIN", icon_size=20),
-                ft.IconButton(ft.Icons.FOLDER, on_click=self._open_dir, tooltip="打开 HZC 文件夹", icon_size=20),
+                ft.IconButton(ft.Icons.FOLDER_OPEN, on_click=self._open_bin, tooltip=_tip("打开 BIN"), icon_size=20),
+                ft.IconButton(ft.Icons.FOLDER, on_click=self._open_dir, tooltip=_tip("打开 HZC 文件夹"), icon_size=20),
             ],
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
@@ -388,9 +392,9 @@ class ComposerApp:
             fit=ft.StackFit.EXPAND,
         )
 
-        self.save_btn = ft.IconButton(ft.Icons.SAVE_ALT, on_click=self._save_current, tooltip="保存当前图",
+        self.save_btn = ft.IconButton(ft.Icons.SAVE_ALT, on_click=self._save_current, tooltip=_tip("保存当前图"),
                                       icon_size=22, disabled=True)
-        self.batch_btn = ft.IconButton(ft.Icons.DOWNLOAD, on_click=self._batch_export, tooltip="批量导出",
+        self.batch_btn = ft.IconButton(ft.Icons.DOWNLOAD, on_click=self._batch_export, tooltip=_tip("批量导出"),
                                        icon_size=22, disabled=True)
 
         btn_bar = ft.Row(
@@ -434,7 +438,7 @@ class ComposerApp:
         maximized = bool(self.page.window.maximized)
         if getattr(self, "max_btn", None):
             self.max_btn.icon = ft.Icons.FILTER_NONE if maximized else ft.Icons.CROP_SQUARE
-            self.max_btn.tooltip = "还原" if maximized else "最大化"
+            self.max_btn.tooltip = _tip("还原" if maximized else "最大化")
         self.page.update()
 
     async def _close(self, e):
