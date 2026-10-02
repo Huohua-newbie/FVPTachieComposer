@@ -31,6 +31,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 按 tag 精确检出要构建的版本；dispatch 时取输入 tag，tag 推送时取当前 ref
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: actions/setup-python@v5
         with:
