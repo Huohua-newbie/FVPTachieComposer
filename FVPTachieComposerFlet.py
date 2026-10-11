@@ -37,7 +37,6 @@ RADIUS_STAGE = 14
 RADIUS_TILE = 10
 THUMB = 104
 PART_STRIP_H = THUMB + GUTTER + 4
-PLAY_INTERVAL = 0.12
 PART_HINT_IDLE = "选择底图后显示差分帧"
 PART_HINT_EMPTY = "该底图没有对应的表情差分"
 
@@ -47,7 +46,6 @@ def _palette(dark):
         return {
             "page": "#0e1116",
             "panel": "#151a21",
-            "panel_alt": "#11161d",
             "stage": "#0b0e13",
             "line": "#252d39",
             "line_soft": "#1c232d",
@@ -55,7 +53,6 @@ def _palette(dark):
             "text_dim": "#8e9aae",
             "accent": "#7aa6ff",
             "accent_soft": "#1e2b45",
-            "accent_2": "#f2879f",
             "chip": "#1a212b",
             "hover": "#1b222d",
             "sel": "#22334f",
@@ -69,7 +66,6 @@ def _palette(dark):
     return {
         "page": "#eceef5",
         "panel": "#f9fafd",
-        "panel_alt": "#ffffff",
         "stage": "#f4f6fc",
         "line": "#dcdfec",
         "line_soft": "#e8ebf4",
@@ -162,21 +158,19 @@ def _find_expr_info(file_infos, base_name):
 HELP_STEPS = (
     ("打开", "点击「打开 BIN」选择 .bin，或「HZC 文件夹」直接指向解包目录；"
              "也可把 .bin / HZC 文件夹拖到程序图标上直接打开。"),
-    ("挑选", "左侧按 角色 → 服装 → 动作 展开，顶部搜索框可按任意层级名字过滤。"),
-    ("预览", "中间是底图舞台：滚轮缩放、拖拽平移，下方滑块逐帧擦洗，▶ 可自动播放。"),
-    ("合成", "点击「差分部件」里的任意一帧，右侧即时合成；X/Y 滑杆用于对位微调。"),
+    ("挑选", "左侧按 角色 → 服装 → 动作 展开，每级都有缩略图。"),
+    ("预览", "中间是底图舞台：滚轮缩放、拖拽平移，多帧底图用左右箭头翻帧。"),
+    ("合成", "点击「差分部件」里的任意一帧表情，右侧即时合成。"),
     ("导出", "「保存当前」导出一张 PNG，「批量导出」把该底图的全部差分一次性铺平。"),
 )
 
 HELP_KEYS = (
     ("← →", "上一帧 / 下一帧"),
-    ("[ ]", "上一个 / 下一个差分部件"),
-    ("P", "自动播放 / 暂停"),
     ("0", "复位缩放"),
     ("Ctrl+S", "保存当前合成图"),
     ("Ctrl+O", "打开 BIN"),
     ("L", "切换深浅主题"),
-    ("Esc", "清空搜索 / 关闭对话框"),
+    ("Esc", "关闭对话框"),
 )
 
 
@@ -192,20 +186,15 @@ class ComposerApp:
         self.selected_info = None
         self.selected_filename = None
         self.selected_action_ctrl = None
-        self.query = ""
 
         self.base_imgs = []
         self.base_idx = 0
         self.part_info = None
         self.part_imgs = []
         self.part_idx = 0
-        self.nudge_x = 0
-        self.nudge_y = 0
         self.composed_img = None
         self.thumb_refs = []
         self.role_thumb_cache = {}
-        self._playing = False
-        self._viewer = None
 
         # UI 事件循环引用（_load_bin/_toggle_theme 中捕获）：
         # 后台缩略图解码完成后，经由它把“替换+刷新”调度回 UI 线程执行，
@@ -454,28 +443,6 @@ class ComposerApp:
             ],
         )
 
-        self.filter_box = ft.TextField(
-            hint_text="搜索角色 / 服装 / 动作",
-            text_size=12,
-            dense=True,
-            border_radius=10,
-            bgcolor=ink["panel_alt"],
-            filled=True,
-            fill_color=ink["panel_alt"],
-            prefix_icon=ft.Icons.SEARCH,
-            prefix_icon_size_constraints=ft.BoxConstraints(min_width=18, max_width=18),
-            border_width=1,
-            border_color=ink["line"],
-            focused_border_color=ink["accent"],
-            hint_style=ft.TextStyle(size=11, color=ink["text_dim"]),
-            content_padding=ft.Padding.only(left=6, right=6, top=7, bottom=7),
-            suffix=ft.IconButton(ft.Icons.CLOSE, icon_size=15, icon_color=ink["text_dim"],
-                                 on_click=self._clear_filter, tooltip=_tip("清空 (Esc)")),
-            on_change=self._on_filter,
-            on_submit=self._on_filter,
-        )
-        self.filter_count = ft.Text("", size=10, color=ink["text_dim"])
-
         self.empty_hint = ft.Container(
             content=ft.Column(
                 [
@@ -516,7 +483,7 @@ class ComposerApp:
         body = ft.Stack([self.empty_hint, self.tree_list], expand=True, fit=ft.StackFit.EXPAND)
 
         return self._panel(
-            [header, self.filter_box, ft.Container(expand=True, content=body), self.filter_count],
+            [header, ft.Container(expand=True, content=body)],
             pad_right=6,
         )
 
@@ -561,24 +528,10 @@ class ComposerApp:
                                       icon_size=19, icon_color=ink["text_dim"])
         self.next_btn = ft.IconButton(ft.Icons.CHEVRON_RIGHT, on_click=self._next_frame,
                                       icon_size=19, icon_color=ink["text_dim"])
-        self.play_btn = ft.IconButton(ft.Icons.PLAY_ARROW, on_click=self._toggle_play,
-                                      icon_size=19, icon_color=ink["accent"], tooltip=_tip("自动播放 (P)"))
-        self.frame_slider = ft.Slider(
-            min=1, max=2, value=1, divisions=1,
-            on_change=self._on_scrub,
-            active_color=ink["accent"],
-            inactive_color=ink["line"],
-        )
         frame_nav = ft.Row(
-            [
-                self.prev_btn,
-                ft.Container(expand=True, content=ft.Column([self.frame_slider], tight=True)),
-                self.next_btn,
-                ft.Container(width=1),
-                self.play_btn,
-                self.frame_label,
-            ],
-            spacing=4,
+            [self.prev_btn, self.frame_label, self.next_btn],
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=6,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         self.frame_nav_holder = ft.Container(frame_nav, visible=False)
@@ -667,50 +620,6 @@ class ComposerApp:
                                            expand=True, fit=ft.StackFit.EXPAND))
         self.result_meta = self._meta()
 
-        def nudge(icon, slider, tip):
-            return ft.Row(
-                [
-                    ft.Container(
-                        ft.Icon(icon, size=14, color=ink["text_dim"]),
-                        width=22, height=22, border_radius=7, bgcolor=ink["chip"],
-                        alignment=ft.Alignment.CENTER,
-                    ),
-                    slider,
-                ],
-                spacing=6,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                tooltip=_tip(tip),
-            )
-
-        self.nudge_x_slider = ft.Slider(min=-48, max=48, value=0, on_change=self._on_nudge_x,
-                                        active_color=ink["accent_2"], inactive_color=ink["line"],
-                                        expand=True)
-        self.nudge_y_slider = ft.Slider(min=-48, max=48, value=0, on_change=self._on_nudge_y,
-                                        active_color=ink["accent_2"], inactive_color=ink["line"],
-                                        expand=True)
-        sx = nudge(ft.Icons.ARROW_BACK, self.nudge_x_slider, "水平偏移差分部件")
-        sy = nudge(ft.Icons.EXPAND_MORE, self.nudge_y_slider, "垂直偏移差分部件")
-
-        self.nudge_reset = ft.IconButton(ft.Icons.REFRESH, on_click=self._reset_nudge,
-                                         icon_size=16, icon_color=ink["text_dim"],
-                                         tooltip=_tip("复位偏移"))
-        nudge_head = ft.Row(
-            [
-                ft.Text("对位微调", size=11, weight=ft.FontWeight.W_600, color=ink["text"]),
-                ft.Container(expand=True),
-                self.nudge_reset,
-            ],
-            spacing=4,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-        self.nudge_box = ft.Container(
-            content=ft.Column([nudge_head, sx, sy], spacing=2),
-            visible=False,
-            padding=ft.Padding.only(left=4, right=4, top=4, bottom=4),
-            border_radius=RADIUS_TILE,
-            bgcolor=ink["chip"],
-        )
-
         self.save_btn = ft.FilledButton(
             "保存当前", icon=ft.Icons.SAVE_ALT, on_click=self._save_current, disabled=True,
             tooltip=_tip("导出这一张 PNG (Ctrl+S)"),
@@ -734,7 +643,6 @@ class ComposerApp:
             [
                 self._section(ft.Icons.PALETTE_OUTLINED, "合成结果", right=[self.result_meta]),
                 result_area,
-                self.nudge_box,
                 btn_bar,
             ],
             pad_right=10,
@@ -1005,9 +913,6 @@ class ComposerApp:
         self.selected_info = None
         self.selected_filename = None
         self.selected_action_ctrl = None
-        self.query = ""
-        if getattr(self, "filter_box", None) is not None:
-            self.filter_box.value = ""
         self._clear_previews()
         self._render_tree()
         hzc = sum(1 for i in infos if i["type"] == "hzc")
@@ -1021,9 +926,6 @@ class ComposerApp:
         self.part_info = None
         self.composed_img = None
         self.thumb_refs = []
-        self.nudge_x = 0
-        self.nudge_y = 0
-        self._stop_play()
         self.base_image.src = TRANSPARENT
         self.result_image.src = TRANSPARENT
         self.base_hint.visible = True
@@ -1037,48 +939,15 @@ class ComposerApp:
         self.part_hint.visible = True
         self.part_hint_text.value = PART_HINT_IDLE
         self.part_count.value = ""
-        self.nudge_box.visible = False
-        self._sync_nudge_sliders()
         self.save_btn.disabled = True
         self.batch_btn.disabled = True
 
     # ── Tree ────────────────────────────────────────────────
 
-    def _match(self, *names):
-        q = (self.query or "").strip().lower()
-        if not q:
-            return True
-        return any(q in (n or "").lower() for n in names)
-
-    def _on_filter(self, e):
-        self.query = (getattr(self.filter_box, "value") or "").strip()
-        self._render_tree()
-
-    def _clear_filter(self, e=None):
-        self.query = ""
-        self.filter_box.value = ""
-        self._render_tree()
-
     def _render_tree(self):
         self.tree_list.controls.clear()
-        shown = 0
         for role, outfits in sorted(self.hierarchy.items()):
-            actions = [i for infos in outfits.values() for i in infos if not _is_expr(i["filename"])]
-            if self.query:
-                keep = self._match(role) or any(
-                    self._match(outfit, i["filename"]) for outfit, infos in outfits.items()
-                    for i in infos
-                )
-                if not keep:
-                    continue
-                shown += len(actions)
-            self.tree_list.controls.append(self._role_tile(role, outfits, open_=bool(self.query)))
-        if self.query:
-            self.filter_count.value = f"匹配 {shown} 个动作" if shown else "无匹配"
-            self.filter_count.visible = True
-        else:
-            self.filter_count.value = ""
-            self.filter_count.visible = False
+            self.tree_list.controls.append(self._role_tile(role, outfits))
         self.tree_list.visible = True
         self.empty_hint.visible = False
         self.page.update()
@@ -1101,17 +970,17 @@ class ComposerApp:
             color=self.ink["text_dim"],
         )
 
-    def _role_tile(self, role, outfits, open_=False):
-        state = {"open": bool(open_)}
+    def _role_tile(self, role, outfits):
+        state = {"open": False}
         count = sum(len([i for i in infos if not _is_expr(i["filename"])]) for infos in outfits.values())
         chevron = self._make_chevron(16)
         header_pending = []
         child_toggles = []
 
-        body = ft.Column(spacing=0, visible=state["open"])
+        body = ft.Column(spacing=0, visible=False)
         for outfit, infos in sorted(outfits.items()):
             body.controls.append(self._outfit_tile(outfit, infos, header_registry=header_pending,
-                                                   _expand_box=child_toggles, open_=state["open"]))
+                                                   _expand_box=child_toggles))
 
         def toggle(e):
             state["open"] = not state["open"]
@@ -1147,10 +1016,6 @@ class ComposerApp:
             hover_color=self.ink["hover"],
             bgcolor="#00000000",
         )
-        if state["open"]:
-            self._set_tile_bg(header, True)
-            if header_pending:
-                self._flush_tasks(header_pending)
         return ft.Column([header, body], spacing=0)
 
     def _set_tile_bg(self, tile, on):
@@ -1201,10 +1066,6 @@ class ComposerApp:
 
     def _flush_tasks(self, tasks):
         """展开时在 UI 线程调用：已解码的当场应用，未完成的提交后台任务。"""
-        if self.query:
-            # 过滤态整棵树都是展开的，逐个解码只会白烧 CPU——搜索看的是名字
-            tasks.clear()
-            return
         for placeholder, info, size, key in tasks:
             cached = self.role_thumb_cache.get(key)
             if cached is not None:
@@ -1272,19 +1133,18 @@ class ComposerApp:
         )
         task = (placeholder, info, size, key)
         if registry is None:
-            if not self.query:
-                self._queue_thumb(*task)
+            self._queue_thumb(*task)
         else:
             registry.append(task)
         return placeholder
 
-    def _outfit_tile(self, outfit, infos, header_registry=None, _expand_box=None, open_=False):
-        state = {"open": bool(open_)}
+    def _outfit_tile(self, outfit, infos, header_registry=None, _expand_box=None):
+        state = {"open": False}
         chevron = self._make_chevron(14)
         action_pending = []
         action_tiles = []
 
-        body = ft.Column(spacing=0, visible=state["open"])
+        body = ft.Column(spacing=0, visible=False)
         for info in sorted(infos, key=lambda x: x["filename"]):
             if _is_expr(info["filename"]):
                 continue
@@ -1329,10 +1189,6 @@ class ComposerApp:
             hover_color=self.ink["hover"],
             bgcolor="#00000000",
         )
-        if state["open"]:
-            self._set_tile_bg(header, True)
-            if action_pending:
-                self._flush_tasks(action_pending)
         return ft.Column([header, body], spacing=0)
 
     def _action_tile(self, name, info, registry=None):
@@ -1396,7 +1252,6 @@ class ComposerApp:
 
     def _load_base(self, info):
         self.selected_info = info
-        self._stop_play()
         try:
             self.base_imgs = self._read_pil_list(info)
         except Exception as ex:
@@ -1420,10 +1275,6 @@ class ComposerApp:
         self.frame_nav_holder.visible = n > 1
         self.prev_btn.disabled = self.base_idx <= 0
         self.next_btn.disabled = self.base_idx >= n - 1
-        if n > 1:
-            self.frame_slider.max = n
-            self.frame_slider.divisions = n - 1
-            self.frame_slider.value = self.base_idx + 1
         self.base_meta.value = f"{img.size[0]}×{img.size[1]} · {n} 帧"
         self.page.update()
 
@@ -1435,18 +1286,6 @@ class ComposerApp:
     def _next_frame(self, e):
         if self.base_idx < len(self.base_imgs) - 1:
             self.base_idx += 1
-            self._show_base_frame()
-
-    def _on_scrub(self, e):
-        if not self.base_imgs:
-            return
-        try:
-            idx = int(round(float(e.control.value))) - 1
-        except (TypeError, ValueError, AttributeError):
-            return
-        idx = max(0, min(len(self.base_imgs) - 1, idx))
-        if idx != self.base_idx:
-            self.base_idx = idx
             self._show_base_frame()
 
     def _spawn(self, coro):
@@ -1470,38 +1309,12 @@ class ComposerApp:
             return
         self._spawn(viewer.reset())
 
-    def _toggle_play(self, e):
-        if len(self.base_imgs) < 2:
-            return
-        self._playing = not self._playing
-        self.play_btn.icon = ft.Icons.PAUSE if self._playing else ft.Icons.PLAY_ARROW
-        try:
-            self.play_btn.update()
-        except Exception:
-            pass
-        if self._playing:
-            self._tick()
-
-    def _stop_play(self):
-        self._playing = False
-
-    def _tick(self):
-        if not self._playing or not self.base_imgs:
-            return
-        self.base_idx = (self.base_idx + 1) % len(self.base_imgs)
-        self._show_base_frame()
-        if not self._later(PLAY_INTERVAL, self._tick):
-            self._playing = False
-
     # ── Parts ───────────────────────────────────────────────
 
     def _load_parts(self, info):
         self.part_info = None
         self.part_imgs = []
         self.thumb_refs = []
-        self.nudge_x = 0
-        self.nudge_y = 0
-        self._sync_nudge_sliders()
         self.thumb_list.controls.clear()
         self.thumb_list.visible = False
         self.part_hint.visible = True
@@ -1511,7 +1324,6 @@ class ComposerApp:
         self.result_image.src = TRANSPARENT
         self.result_hint.visible = True
         self.result_meta.value = ""
-        self.nudge_box.visible = False
         self.save_btn.disabled = True
         self.batch_btn.disabled = True
 
@@ -1580,37 +1392,13 @@ class ComposerApp:
                 pass
         self._compose()
 
-    def _on_nudge_x(self, e):
-        self.nudge_x = int(round(self.nudge_x_slider.value or 0))
-        self._compose()
-
-    def _on_nudge_y(self, e):
-        self.nudge_y = int(round(self.nudge_y_slider.value or 0))
-        self._compose()
-
-    def _sync_nudge_sliders(self):
-        for slider, value in ((self.nudge_x_slider, self.nudge_x), (self.nudge_y_slider, self.nudge_y)):
-            if slider is None:
-                return
-            slider.value = value
-            try:
-                slider.update()
-            except Exception:
-                pass
-
-    def _reset_nudge(self, e):
-        self.nudge_x = 0
-        self.nudge_y = 0
-        self._sync_nudge_sliders()
-        self._compose()
-
     def _compose(self, e=None):
         if not self.part_info or not self.selected_info or not self.part_imgs:
             return
         if self.part_idx >= len(self.part_imgs) or not self.base_imgs:
             return
-        ox = self.part_info.get("offset_x", 0) + self.nudge_x
-        oy = self.part_info.get("offset_y", 0) + self.nudge_y
+        ox = self.part_info.get("offset_x", 0)
+        oy = self.part_info.get("offset_y", 0)
         composed = compose_preview(
             self.base_imgs[0],
             self.part_imgs[self.part_idx],
@@ -1621,7 +1409,6 @@ class ComposerApp:
         self.result_image.src = _img_bytes(composed)
         self.result_hint.visible = False
         self.result_meta.value = f"{composed.size[0]}×{composed.size[1]} · 偏移 {ox:+d}/{oy:+d}"
-        self.nudge_box.visible = True
         self.save_btn.disabled = False
         self.batch_btn.disabled = False
         self.page.update()
@@ -1631,22 +1418,15 @@ class ComposerApp:
     async def _on_keyboard(self, e):
         key = (getattr(e, "key", None) or "").lower()
         if key == "escape":
-            if self.query:
-                self._clear_filter()
             try:
                 self.page.pop_dialog()
             except Exception:
                 pass
             return
         if getattr(e, "control", None) is not None:
-            return  # 焦点在输入框里，不抢键
+            return  # 焦点在输入控件上，不抢键
         if key in ("left", "right") and len(self.base_imgs) > 1:
             (self._prev_frame if key == "left" else self._next_frame)(None)
-        elif key in ("bracketleft", "bracketright") and self.part_imgs:
-            delta = -1 if key == "bracketleft" else 1
-            self._pick_part(max(0, min(len(self.part_imgs) - 1, self.part_idx + delta)))
-        elif key == "p":
-            self._toggle_play(None)
         elif key == "0":
             self._reset_zoom()
         elif key == "l":
@@ -1693,8 +1473,8 @@ class ComposerApp:
         self._set_status("正在批量导出…")
 
         base = self.base_imgs[0]
-        ox = self.part_info.get("offset_x", 0) + self.nudge_x
-        oy = self.part_info.get("offset_y", 0) + self.nudge_y
+        ox = self.part_info.get("offset_x", 0)
+        oy = self.part_info.get("offset_y", 0)
         fname = self.selected_info["filename"]
         parts_data = list(self.part_imgs)
 

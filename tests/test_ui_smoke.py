@@ -169,7 +169,7 @@ async def run():
     assert app.composed_img is not None, "合成结果为空"
     assert app.thumb_list.visible, "缩略图条未显示"
 
-    # 帧导航 / 部件切换 / 过滤 / 横幅 / 帮助
+    # 帧导航 / 部件切换 / 缩放复位
     if len(app.base_imgs) > 1:
         app._next_frame(None)
         app._prev_frame(None)
@@ -177,21 +177,6 @@ async def run():
     app._reset_zoom(None)
     await asyncio.sleep(0.1)
     assert any(m == "reset" for m, _a in page.session.calls), "复位缩放未真正下发"
-    app.nudge_x_slider.value = 6
-    app._on_nudge_x(None)
-    assert app.nudge_x == 6 and app.composed_img is not None, "对位微调未重算合成"
-    app._reset_nudge(None)
-    assert app.nudge_x == 0
-    if hasattr(app, "filter_box"):
-        app.filter_box.value = "私服"
-        app._on_filter(None)
-        assert app.tree_list.controls, "过滤后树为空"
-        app.filter_box.value = ""
-        app._on_filter(None)
-    if hasattr(app, "_play_timer"):
-        app._toggle_play(None)
-        await asyncio.sleep(0.3)
-        app._toggle_play(None)
 
     app._snack("冒烟横幅")
     assert len(page.overlay) == 1, "横幅未挂载"
@@ -210,7 +195,7 @@ async def run():
 
     # 键盘事件入口（不抛异常即可，具体分派依赖真实 key）
     if app.page.on_keyboard_event is not None:
-        for key in ("Left", "Right", "bracketleft", "bracketright", "Escape", "l"):
+        for key in ("Left", "Right", "Escape", "0", "l"):
             ev = ft.KeyboardEvent(name=key, data="", control=None, key=key,
                                   shift=False, ctrl=False, alt=False, meta=False)
             await app._on_keyboard(ev)

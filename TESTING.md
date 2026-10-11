@@ -2,10 +2,19 @@
 
 测试对象：Draft release 中的 `FVPTachieComposer-v<ver>-win64.zip`，解压到干净目录运行。
 
+## 无头自检（不需要 GUI，先跑这两个）
+
+```bash
+python tests/test_ui_smoke.py          # 用真实 flet 搭整棵树，查控件参数与滚动条留槽
+python tests/test_thumb_threading.py   # 假 flet，查缩略图解码仍在后台线程、update 回 UI 线程
+```
+
 ## 启动与外观
 
 - [ ] 双击 exe 正常启动，任务栏/窗口图标为 Shinku（非 Python 默认）
 - [ ] 深色/浅色主题切换正常，切换后树与预览不丢失
+- [ ] 列表滚动条停在为自己预留的槽里（树右侧、差分条底部），不压住缩略图与文字
+- [ ] 横幅是标题栏下方的居中胶囊，成功提示约 2 秒自动消失，错误提示常驻，均不遮窗口按钮
 
 ## 打开 bin
 
