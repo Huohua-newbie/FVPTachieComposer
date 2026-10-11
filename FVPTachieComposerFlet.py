@@ -38,6 +38,8 @@ RADIUS_TILE = 10
 THUMB = 104
 PART_STRIP_H = THUMB + GUTTER + 4
 PLAY_INTERVAL = 0.12
+PART_HINT_IDLE = "选择底图后显示差分帧"
+PART_HINT_EMPTY = "该底图没有对应的表情差分"
 
 
 def _palette(dark):
@@ -119,18 +121,6 @@ def _app_icon():
 def _tip(text):
     """统一提示气泡：悬停 100ms 即显，移开 150ms 快速淡出。"""
     return ft.Tooltip(message=text, wait_duration=100, show_duration=150)
-
-
-def _kbd(text):
-    """快捷键键帽。"""
-    return ft.Container(
-        content=ft.Text(text, size=10, weight=ft.FontWeight.W_700, color="#8e9aae",
-                        font_family="Consolas"),
-        padding=ft.Padding.only(left=6, right=6, top=2, bottom=3),
-        border_radius=6,
-        bgcolor="#1a212b",
-        border=ft.Border.all(1, "#2c3542"),
-    )
 
 
 def _expr_suffixes():
@@ -322,6 +312,23 @@ class ComposerApp:
         return ft.Text(text, size=11, color=self.ink["text_dim"],
                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
 
+    def _kbd(self, text):
+        """快捷键键帽。"""
+        ink = self.ink
+        return ft.Container(
+            content=ft.Text(text, size=10, weight=ft.FontWeight.W_700, color=ink["text_dim"],
+                            font_family="Consolas"),
+            padding=ft.Padding.only(left=7, right=7, top=3, bottom=4),
+            border_radius=6,
+            bgcolor=ink["chip"],
+            border=ft.Border.only(
+                left=ft.BorderSide(1, ink["line"]),
+                top=ft.BorderSide(1, ink["line"]),
+                right=ft.BorderSide(1, ink["line_soft"]),
+                bottom=ft.BorderSide(2, ink["line_soft"]),
+            ),
+        )
+
     def _build(self):
         self._apply_theme()
         p = self.page
@@ -330,15 +337,15 @@ class ComposerApp:
         self.tree_col = self._build_tree_column()
         self.base_col = self._build_base_column()
         self.result_col = self._build_result_column()
-        self.status_text = ft.Text("就绪", size=11, color=self.ink["text_dim"])
+        self.status_text = ft.Text("就绪", size=11, color=self.ink["text_dim"],
+                                   max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
         self.status_meta = ft.Text("", size=11, color=self.ink["text_dim"])
 
         status_bar = ft.Container(
             content=ft.Row(
                 [
                     ft.Container(width=6, height=6, border_radius=3, bgcolor=self.ink["accent"]),
-                    self.status_text,
-                    ft.Container(expand=True),
+                    ft.Container(self.status_text, expand=True),
                     self.status_meta,
                 ],
                 spacing=8,
@@ -462,6 +469,8 @@ class ComposerApp:
             focused_border_color=ink["accent"],
             hint_style=ft.TextStyle(size=11, color=ink["text_dim"]),
             content_padding=ft.Padding.only(left=6, right=6, top=7, bottom=7),
+            suffix=ft.IconButton(ft.Icons.CLOSE, icon_size=15, icon_color=ink["text_dim"],
+                                 on_click=self._clear_filter, tooltip=_tip("清空 (Esc)")),
             on_change=self._on_filter,
             on_submit=self._on_filter,
         )
@@ -584,11 +593,12 @@ class ComposerApp:
             ],
         )
 
+        self.part_hint_text = ft.Text(PART_HINT_IDLE, size=11, color=ink["text_dim"])
         self.part_hint = ft.Container(
             content=ft.Row(
                 [
                     ft.Icon(ft.Icons.TUNE, size=18, color=ink["text_dim"]),
-                    ft.Text("选择底图后显示差分帧", size=11, color=ink["text_dim"]),
+                    self.part_hint_text,
                 ],
                 spacing=8,
                 tight=True,
@@ -772,7 +782,7 @@ class ComposerApp:
 
         def key_row(keys, desc):
             return ft.Row(
-                [_kbd(keys), ft.Text(desc, size=11, color=ink["text_dim"])],
+                [self._kbd(keys), ft.Text(desc, size=11, color=ink["text_dim"])],
                 spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
 
@@ -1025,6 +1035,7 @@ class ComposerApp:
         self.thumb_list.controls.clear()
         self.thumb_list.visible = False
         self.part_hint.visible = True
+        self.part_hint_text.value = PART_HINT_IDLE
         self.part_count.value = ""
         self.nudge_box.visible = False
         self._sync_nudge_sliders()
@@ -1043,6 +1054,11 @@ class ComposerApp:
         self.query = (getattr(self.filter_box, "value") or "").strip()
         self._render_tree()
 
+    def _clear_filter(self, e=None):
+        self.query = ""
+        self.filter_box.value = ""
+        self._render_tree()
+
     def _render_tree(self):
         self.tree_list.controls.clear()
         shown = 0
@@ -1059,8 +1075,10 @@ class ComposerApp:
             self.tree_list.controls.append(self._role_tile(role, outfits, open_=bool(self.query)))
         if self.query:
             self.filter_count.value = f"匹配 {shown} 个动作" if shown else "无匹配"
+            self.filter_count.visible = True
         else:
             self.filter_count.value = ""
+            self.filter_count.visible = False
         self.tree_list.visible = True
         self.empty_hint.visible = False
         self.page.update()
@@ -1183,6 +1201,10 @@ class ComposerApp:
 
     def _flush_tasks(self, tasks):
         """展开时在 UI 线程调用：已解码的当场应用，未完成的提交后台任务。"""
+        if self.query:
+            # 过滤态整棵树都是展开的，逐个解码只会白烧 CPU——搜索看的是名字
+            tasks.clear()
+            return
         for placeholder, info, size, key in tasks:
             cached = self.role_thumb_cache.get(key)
             if cached is not None:
@@ -1250,7 +1272,8 @@ class ComposerApp:
         )
         task = (placeholder, info, size, key)
         if registry is None:
-            self._queue_thumb(*task)
+            if not self.query:
+                self._queue_thumb(*task)
         else:
             registry.append(task)
         return placeholder
@@ -1482,6 +1505,7 @@ class ComposerApp:
         self.thumb_list.controls.clear()
         self.thumb_list.visible = False
         self.part_hint.visible = True
+        self.part_hint_text.value = PART_HINT_IDLE
         self.part_count.value = ""
         self.composed_img = None
         self.result_image.src = TRANSPARENT
@@ -1493,6 +1517,7 @@ class ComposerApp:
 
         part_info = _find_expr_info(self.file_infos, info["filename"])
         if not part_info:
+            self.part_hint_text.value = PART_HINT_EMPTY
             self.page.update()
             return
 
@@ -1535,7 +1560,7 @@ class ComposerApp:
                 small_size=16,
                 bgcolor=ink["accent"] if selected else ink["chip"],
                 text_color="#ffffff" if selected else ink["text_dim"],
-                alignment=ft.Alignment(-1.0, -1.0),
+                alignment=ft.Alignment.TOP_RIGHT,
                 padding=ft.Padding.only(left=4, right=4, top=0, bottom=0),
                 label_visible=True,
             ),
@@ -1607,9 +1632,7 @@ class ComposerApp:
         key = (getattr(e, "key", None) or "").lower()
         if key == "escape":
             if self.query:
-                self.query = ""
-                self.filter_box.value = ""
-                self._render_tree()
+                self._clear_filter()
             try:
                 self.page.pop_dialog()
             except Exception:
