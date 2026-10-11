@@ -8,6 +8,7 @@ Run: python FVPTachieComposerFlet.py
 """
 
 import asyncio
+import base64
 import io
 import os
 import sys
@@ -36,7 +37,7 @@ RADIUS_PANEL = 16
 RADIUS_STAGE = 14
 RADIUS_TILE = 10
 THUMB = 104
-PART_STRIP_H = THUMB + GUTTER + 4
+PART_STRIP_H = THUMB + GUTTER + 14   # 上沿给序号角标留位，下沿给横向滚动条留槽
 PART_HINT_IDLE = "选择底图后显示差分帧"
 PART_HINT_EMPTY = "该底图没有对应的表情差分"
 
@@ -99,9 +100,7 @@ def _checker_src(a, b, cell=11):
     img.putpixel((1, 0), _rgb(b))
     img.putpixel((0, 1), _rgb(b))
     img = img.resize((cell * 2, cell * 2), Image.Resampling.NEAREST)
-    buf = io.BytesIO()
-    img.save(buf, "PNG")
-    return buf.getvalue()
+    return _img_src(img)
 
 
 def _app_icon():
@@ -290,8 +289,8 @@ class ComposerApp:
             content=content,
             expand=True,
             bgcolor=ink["stage"],
-            image=ft.Image(src=self._checker, fit=ft.BoxFit.NONE, repeat=ft.ImageRepeat.REPEAT,
-                           opacity=0.85),
+            image=ft.DecorationImage(src=self._checker, fit=ft.BoxFit.NONE,
+                                     repeat=ft.ImageRepeat.REPEAT, opacity=0.85),
             border=ft.Border.all(1, ink["line_soft"]),
             border_radius=RADIUS_STAGE,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
@@ -567,7 +566,7 @@ class ComposerApp:
         self.thumb_list = ft.ListView(
             spacing=10, horizontal=True, height=PART_STRIP_H,
             auto_scroll=False, scroll=ft.ScrollMode.AUTO,
-            padding=ft.Padding.only(left=1, right=1, top=1, bottom=GUTTER),
+            padding=ft.Padding.only(left=1, right=1, top=12, bottom=GUTTER),
         )
         self.thumb_list.visible = False
 
@@ -1004,11 +1003,7 @@ class ComposerApp:
             title=ft.Text(role, size=13, weight=ft.FontWeight.W_700, color=self.ink["text"],
                           max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
             subtitle=ft.Text(f"{count} 动作 · {len(outfits)} 服装", size=10, color=self.ink["text_dim"]),
-            trailing=ft.Row(
-                [ft.Text(f"{count}", size=10, color=self.ink["text_dim"]), chevron],
-                spacing=4,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
+            trailing=chevron,
             on_click=toggle,
             content_padding=ft.Padding.only(left=4, right=2, top=0, bottom=0),
             dense=True,
@@ -1268,7 +1263,7 @@ class ComposerApp:
 
     def _show_base_frame(self):
         img = self.base_imgs[self.base_idx]
-        self.base_image.src = _img_bytes(img)
+        self.base_image.src = _img_src(img)
         self.base_hint.visible = False
         n = len(self.base_imgs)
         self.frame_label.value = f"{self.base_idx + 1}/{n}" if n > 1 else ""
@@ -1298,10 +1293,19 @@ class ComposerApp:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 loop = None
-        if loop is not None:
-            loop.create_task(coro)
-        else:
+        if loop is None:
             coro.close()
+            return
+
+        async def quiet():
+            # 控件还没在客户端挂上时 invoke 会超时（例如加载瞬间调 reset），
+            # 这类失败只影响一次缩放复位，不该冒泡成未捕获的任务异常。
+            try:
+                await coro
+            except Exception:
+                pass
+
+        loop.create_task(quiet())
 
     def _reset_zoom(self, e=None):
         viewer = getattr(self, "base_viewer", None)
@@ -1406,7 +1410,7 @@ class ComposerApp:
             oy,
         )
         self.composed_img = composed
-        self.result_image.src = _img_bytes(composed)
+        self.result_image.src = _img_src(composed)
         self.result_hint.visible = False
         self.result_meta.value = f"{composed.size[0]}×{composed.size[1]} · 偏移 {ox:+d}/{oy:+d}"
         self.save_btn.disabled = False
@@ -1512,13 +1516,21 @@ def _img_bytes(img, fmt="PNG"):
     return buf.getvalue()
 
 
+def _img_src(img, fmt="PNG"):
+    """给 ft.Image 用的 data URI。
+
+    注意：src 直接塞 bytes 只在「构造时」有效，构造后 `img.src = bytes` 赋值
+    不会被重新编码，客户端拿到的是乱码路径 → 图像区一片空白。
+    统一走 data URI，构造和更新两条路都成立。
+    """
+    return "data:image/png;base64," + base64.b64encode(_img_bytes(img, fmt)).decode()
+
+
 def _thumb_bytes(img, size=100):
     w, h = img.size
     s = min(1.0, size / max(w, h))
     thumb = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.Resampling.LANCZOS)
-    buf = io.BytesIO()
-    thumb.save(buf, "PNG")
-    return buf.getvalue()
+    return _img_src(thumb)
 
 
 def _make_thumb_widget(img, size=36):

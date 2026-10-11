@@ -120,6 +120,16 @@ def build_fixture():
     return tmp
 
 
+def _walk(ctrl):
+    """递归走完一棵真实 flet 控件树（controls 列表 + 单个 content 子控件）。"""
+    yield ctrl
+    for child in getattr(ctrl, "controls", None) or []:
+        yield from _walk(child)
+    inner = getattr(ctrl, "content", None)
+    if isinstance(inner, ft.Control):
+        yield from _walk(inner)
+
+
 def _right_pad(lv):
     p = lv.padding
     if p is None:
@@ -150,6 +160,22 @@ async def run():
     assert sb.track_visibility is False, "滚动条轨道不应占视觉重量"
     assert (sb.thickness or 0) <= 10, f"滚动条过粗: {sb.thickness}"
 
+    # 图像源必须是字符串 data URI：src 给 bytes 只在构造时有效，
+    # 之后 `img.src = bytes` 不会被重新编码，客户端当成路径解析 → 预览区空白。
+
+    roots = page.added if isinstance(page.added, list) else [page.added]
+    nodes = [c for r in roots for c in _walk(r)]
+    bad_img = [c for c in nodes
+               if getattr(c, "image", None) is not None
+               and not isinstance(c.image, ft.DecorationImage)]
+    assert not bad_img, \
+        f"Container.image 只认 DecorationImage，塞 ft.Image 会被静默丢掉: {type(bad_img[0].image)}"
+
+    # ListTile.trailing 里的 Row 默认撑满主轴，会把标题/副标题挤成竖排
+    for c in nodes:
+        if isinstance(c, ft.ListTile) and isinstance(c.trailing, ft.Row):
+            assert c.trailing.tight, "ListTile.trailing 的 Row 必须 tight=True"
+
     # 展开到动作层并选中，跑完 底图 → 差分 → 合成 全链路
     role_col = app.tree_list.controls[0]
     role_header, role_body = role_col.controls[0], role_col.controls[1]
@@ -168,6 +194,14 @@ async def run():
     assert app.part_imgs, "差分部件未加载"
     assert app.composed_img is not None, "合成结果为空"
     assert app.thumb_list.visible, "缩略图条未显示"
+    # 图像源必须是字符串 data URI：src 给 bytes 只在构造时有效，
+    # 之后 `img.src = bytes` 不会被重新编码，客户端当成路径解析 → 预览区空白。
+    for name in ("base_image", "result_image"):
+        src = getattr(app, name).src
+        assert isinstance(src, str) and src.startswith("data:image/"), \
+            f"{name}.src 不是 data URI，更新后不会显示: {type(src)}"
+    tile_src = app.thumb_list.controls[0].content.src
+    assert isinstance(tile_src, str), "差分缩略图 src 必须是字符串"
 
     # 帧导航 / 部件切换 / 缩放复位
     if len(app.base_imgs) > 1:
