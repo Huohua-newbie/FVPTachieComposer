@@ -27,6 +27,84 @@ from FVPTachieComposer import (
 
 TRANSPARENT = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
 
+# ── 设计 token ────────────────────────────────────────────
+# 滚动条是覆盖式绘制（Flutter OverlayScrollbar），它不会自己让位。
+# 所以所有可滚动区都必须显式留一条 GUTTER 通道，内容不许探进去——
+# 这是"滚动条压住缩略图/文字"那类重合的唯一根治点。
+GUTTER = 12
+RADIUS_PANEL = 16
+RADIUS_STAGE = 14
+RADIUS_TILE = 10
+THUMB = 104
+PART_STRIP_H = THUMB + GUTTER + 4
+PLAY_INTERVAL = 0.12
+
+
+def _palette(dark):
+    if dark:
+        return {
+            "page": "#0e1116",
+            "panel": "#151a21",
+            "panel_alt": "#11161d",
+            "stage": "#0b0e13",
+            "line": "#252d39",
+            "line_soft": "#1c232d",
+            "text": "#e9edf5",
+            "text_dim": "#8e9aae",
+            "accent": "#7aa6ff",
+            "accent_soft": "#1e2b45",
+            "accent_2": "#f2879f",
+            "chip": "#1a212b",
+            "hover": "#1b222d",
+            "sel": "#22334f",
+            "checker_a": "#151b23",
+            "checker_b": "#10151c",
+            "ok_bg": "#1e2b45",
+            "ok_fg": "#c8daff",
+            "err_bg": "#3a1d24",
+            "err_fg": "#ffc9d2",
+        }
+    return {
+        "page": "#eceef5",
+        "panel": "#f9fafd",
+        "panel_alt": "#ffffff",
+        "stage": "#f4f6fc",
+        "line": "#dcdfec",
+        "line_soft": "#e8ebf4",
+        "text": "#1b2130",
+        "text_dim": "#68728a",
+        "accent": "#3f6ee0",
+        "accent_soft": "#e4ecfd",
+        "accent_2": "#d8577f",
+        "chip": "#eef1f9",
+        "hover": "#eef1f8",
+        "sel": "#dde7fd",
+        "checker_a": "#f1f3fa",
+        "checker_b": "#e5e9f4",
+        "ok_bg": "#e4ecfd",
+        "ok_fg": "#2a4f9e",
+        "err_bg": "#fbe3e7",
+        "err_fg": "#9c2a44",
+    }
+
+
+def _rgb(hex_str):
+    h = hex_str.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _checker_src(a, b, cell=11):
+    """透明立绘的棋盘衬底：一眼分清“这里是透明的”和“这里是白的”。"""
+    img = Image.new("RGB", (2, 2))
+    img.putpixel((0, 0), _rgb(a))
+    img.putpixel((1, 1), _rgb(a))
+    img.putpixel((1, 0), _rgb(b))
+    img.putpixel((0, 1), _rgb(b))
+    img = img.resize((cell * 2, cell * 2), Image.Resampling.NEAREST)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
 
 def _app_icon():
     """返回随程序分发的 Shinku.ico 路径；开发环境取脚本目录，打包后取解包目录。"""
@@ -41,6 +119,18 @@ def _app_icon():
 def _tip(text):
     """统一提示气泡：悬停 100ms 即显，移开 150ms 快速淡出。"""
     return ft.Tooltip(message=text, wait_duration=100, show_duration=150)
+
+
+def _kbd(text):
+    """快捷键键帽。"""
+    return ft.Container(
+        content=ft.Text(text, size=10, weight=ft.FontWeight.W_700, color="#8e9aae",
+                        font_family="Consolas"),
+        padding=ft.Padding.only(left=6, right=6, top=2, bottom=3),
+        border_radius=6,
+        bgcolor="#1a212b",
+        border=ft.Border.all(1, "#2c3542"),
+    )
 
 
 def _expr_suffixes():
@@ -78,13 +168,25 @@ def _find_expr_info(file_infos, base_name):
                 return i
     return None
 
-HELP_TEXT = (
-    "1. 点击「打开 BIN」选择 .bin 文件\n"
-    "2. 左侧按 角色 → 服装 → 动作 展开\n"
-    "3. 点击动作预览底图，中间自动加载差分部件\n"
-    "4. 点击缩略图，右侧生成合成预览\n"
-    "5. 保存当前图 / 批量合成并导出\n"
-    "6. 也可把 .bin 文件或 HZC 文件夹拖到程序图标上直接打开"
+
+HELP_STEPS = (
+    ("打开", "点击「打开 BIN」选择 .bin，或「HZC 文件夹」直接指向解包目录；"
+             "也可把 .bin / HZC 文件夹拖到程序图标上直接打开。"),
+    ("挑选", "左侧按 角色 → 服装 → 动作 展开，顶部搜索框可按任意层级名字过滤。"),
+    ("预览", "中间是底图舞台：滚轮缩放、拖拽平移，下方滑块逐帧擦洗，▶ 可自动播放。"),
+    ("合成", "点击「差分部件」里的任意一帧，右侧即时合成；X/Y 滑杆用于对位微调。"),
+    ("导出", "「保存当前」导出一张 PNG，「批量导出」把该底图的全部差分一次性铺平。"),
+)
+
+HELP_KEYS = (
+    ("← →", "上一帧 / 下一帧"),
+    ("[ ]", "上一个 / 下一个差分部件"),
+    ("P", "自动播放 / 暂停"),
+    ("0", "复位缩放"),
+    ("Ctrl+S", "保存当前合成图"),
+    ("Ctrl+O", "打开 BIN"),
+    ("L", "切换深浅主题"),
+    ("Esc", "清空搜索 / 关闭对话框"),
 )
 
 
@@ -92,6 +194,7 @@ class ComposerApp:
     def __init__(self, page: ft.Page):
         self.page = page
         self.is_dark = False
+        self.ink = _palette(False)
 
         self.input_file = None
         self.file_infos = []
@@ -99,15 +202,20 @@ class ComposerApp:
         self.selected_info = None
         self.selected_filename = None
         self.selected_action_ctrl = None
+        self.query = ""
 
         self.base_imgs = []
         self.base_idx = 0
         self.part_info = None
         self.part_imgs = []
         self.part_idx = 0
+        self.nudge_x = 0
+        self.nudge_y = 0
         self.composed_img = None
         self.thumb_refs = []
         self.role_thumb_cache = {}
+        self._playing = False
+        self._viewer = None
 
         # UI 事件循环引用（_load_bin/_toggle_theme 中捕获）：
         # 后台缩略图解码完成后，经由它把“替换+刷新”调度回 UI 线程执行，
@@ -135,21 +243,84 @@ class ComposerApp:
             p.window.icon = icon
         p.padding = 0
         p.spacing = 0
+        p.on_keyboard_event = self._on_keyboard
         self._apply_theme()
 
     def _apply_theme(self):
         p = self.page
-        sb = ft.ScrollbarTheme(thumb_visibility=True, track_visibility=False)
-        if self.is_dark:
-            p.theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb)
-            p.dark_theme = ft.Theme(color_scheme_seed="#5b9bf5", use_material3=True, scrollbar_theme=sb)
-            p.theme_mode = ft.ThemeMode.DARK
-            p.bgcolor = ft.Colors.SURFACE_CONTAINER_LOWEST
-        else:
-            p.theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True, scrollbar_theme=sb)
-            p.dark_theme = ft.Theme(color_scheme_seed="#3b82f6", use_material3=True, scrollbar_theme=sb)
-            p.theme_mode = ft.ThemeMode.LIGHT
-            p.bgcolor = ft.Colors.SURFACE_CONTAINER_LOWEST
+        self.ink = _palette(self.is_dark)
+        self._checker = _checker_src(self.ink["checker_a"], self.ink["checker_b"])
+        theme = ft.Theme(
+            color_scheme_seed=self.ink["accent"],
+            use_material3=True,
+            scrollbar_theme=ft.ScrollbarTheme(
+                thumb_visibility=True,
+                track_visibility=False,
+                thickness=6,
+                radius=8,
+                min_thumb_length=36,
+                interactive=True,
+                cross_axis_margin=3,
+                main_axis_margin=6,
+                thumb_color=ft.Colors.with_opacity(0.45, ft.Colors.ON_SURFACE_VARIANT),
+            ),
+        )
+        p.theme = theme
+        p.dark_theme = theme
+        p.theme_mode = ft.ThemeMode.DARK if self.is_dark else ft.ThemeMode.LIGHT
+        p.bgcolor = self.ink["page"]
+
+    # ── 通用小构件 ──────────────────────────────────────────
+
+    def _panel(self, controls, *, width=None, expand=False, pad_right=6):
+        """描边式面板：不用 Material 阴影，靠 1px 边线 + 分层底色分区，
+        三栏工具界面里阴影只会让边界变糊。"""
+        ink = self.ink
+        return ft.Container(
+            content=ft.Column(controls, spacing=10, expand=True),
+            width=width,
+            expand=expand,
+            bgcolor=ink["panel"],
+            border=ft.Border.all(1, ink["line"]),
+            border_radius=RADIUS_PANEL,
+            padding=ft.Padding.only(left=12, top=10, right=pad_right, bottom=10),
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+        )
+
+    def _section(self, icon, title, right=None):
+        ink = self.ink
+        return ft.Row(
+            [
+                ft.Container(
+                    ft.Icon(icon, size=15, color=ink["accent"]),
+                    width=24, height=24, border_radius=8, bgcolor=ink["accent_soft"],
+                    alignment=ft.Alignment.CENTER,
+                ),
+                ft.Text(title, size=13, weight=ft.FontWeight.W_700, color=ink["text"], expand=True),
+                *(right or []),
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def _stage(self, content):
+        """图像舞台：圆角 + 描边 + 棋盘底，并把溢出裁在自己的框里，
+        预览图永远不会糊到相邻区块上。"""
+        ink = self.ink
+        return ft.Container(
+            content=content,
+            expand=True,
+            bgcolor=ink["stage"],
+            image=ft.Image(src=self._checker, fit=ft.BoxFit.NONE, repeat=ft.ImageRepeat.REPEAT,
+                           opacity=0.85),
+            border=ft.Border.all(1, ink["line_soft"]),
+            border_radius=RADIUS_STAGE,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+        )
+
+    def _meta(self, text=""):
+        return ft.Text(text, size=11, color=self.ink["text_dim"],
+                       max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
 
     def _build(self):
         self._apply_theme()
@@ -159,23 +330,37 @@ class ComposerApp:
         self.tree_col = self._build_tree_column()
         self.base_col = self._build_base_column()
         self.result_col = self._build_result_column()
-        self.status_text = ft.Text("就绪", size=11)
+        self.status_text = ft.Text("就绪", size=11, color=self.ink["text_dim"])
+        self.status_meta = ft.Text("", size=11, color=self.ink["text_dim"])
 
         status_bar = ft.Container(
-            content=ft.Row([self.status_text]),
-            height=32,
-            padding=ft.Padding.symmetric(horizontal=16),
-            border=ft.Border.only(top=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)),
+            content=ft.Row(
+                [
+                    ft.Container(width=6, height=6, border_radius=3, bgcolor=self.ink["accent"]),
+                    self.status_text,
+                    ft.Container(expand=True),
+                    self.status_meta,
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            height=30,
+            padding=ft.Padding.only(left=16, right=16, top=0, bottom=2),
+            border=ft.Border.only(top=ft.BorderSide(1, self.ink["line_soft"])),
         )
 
-        body = ft.Row(
-            [
-                ft.Container(self.tree_col, width=290),
-                ft.Container(self.base_col, expand=True),
-                ft.Container(self.result_col, width=360),
-            ],
+        body = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Container(self.tree_col, width=300),
+                    ft.Container(self.base_col, expand=True),
+                    ft.Container(self.result_col, width=372),
+                ],
+                expand=True,
+                spacing=10,
+            ),
             expand=True,
-            spacing=0,
+            padding=ft.Padding.only(left=12, right=12, top=10, bottom=10),
         )
 
         p.add(ft.Column([self.title_bar, body, status_bar], spacing=0, expand=True))
@@ -184,93 +369,165 @@ class ComposerApp:
     # ── Title bar ───────────────────────────────────────────
 
     def _build_title_bar(self):
+        ink = self.ink
         logo = ft.Row(
             [
-                ft.Icon(ft.Icons.IMAGE, size=20, color=ft.Colors.PRIMARY),
-                ft.Text("FVP Tachie Composer", size=14, weight=ft.FontWeight.W_700),
-                ft.Text("立绘查看与合成", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                ft.Container(
+                    ft.Icon(ft.Icons.IMAGE, size=15, color="#ffffff"),
+                    width=26, height=26, border_radius=9,
+                    bgcolor=ink["accent"],
+                    alignment=ft.Alignment.CENTER,
+                ),
+                ft.Text("FVP Tachie Composer", size=13, weight=ft.FontWeight.W_800, color=ink["text"]),
+                ft.Text("立绘查看与合成", size=11, color=ink["text_dim"]),
             ],
             spacing=8,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-        self.max_btn = ft.IconButton(ft.Icons.CROP_SQUARE, on_click=self._toggle_maximize, tooltip=_tip("最大化"), icon_size=18)
+        self.file_chip = ft.Container(
+            content=ft.Text("未载入文件", size=11, color=ink["text_dim"],
+                            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            padding=ft.Padding.only(left=10, right=10, top=3, bottom=3),
+            border_radius=99,
+            bgcolor=ink["chip"],
+            border=ft.Border.all(1, ink["line_soft"]),
+            tooltip=_tip("当前打开的 BIN / HZC 目录"),
+        )
+
+        self.max_btn = ft.IconButton(
+            ft.Icons.CROP_SQUARE, on_click=self._toggle_maximize,
+            tooltip=_tip("最大化"), icon_size=17, icon_color=ink["text_dim"],
+        )
 
         right = ft.Row(
             [
-                ft.IconButton(ft.Icons.HELP_OUTLINE, on_click=self._help, tooltip=_tip("使用说明"), icon_size=18),
+                ft.IconButton(ft.Icons.HELP_OUTLINE, on_click=self._help, tooltip=_tip("使用说明"),
+                              icon_size=17, icon_color=ink["text_dim"]),
                 ft.IconButton(
                     ft.Icons.DARK_MODE if self.is_dark else ft.Icons.LIGHT_MODE,
-                    on_click=self._toggle_theme, tooltip=_tip("切换主题"), icon_size=18,
+                    on_click=self._toggle_theme, tooltip=_tip("切换主题 (L)"),
+                    icon_size=17, icon_color=ink["text_dim"],
                 ),
-                ft.IconButton(ft.Icons.MINIMIZE, on_click=self._minimize, tooltip=_tip("最小化"), icon_size=18),
+                ft.IconButton(ft.Icons.MINIMIZE, on_click=self._minimize, tooltip=_tip("最小化"),
+                              icon_size=17, icon_color=ink["text_dim"]),
                 self.max_btn,
-                ft.IconButton(ft.Icons.CLOSE, on_click=self._close, tooltip=_tip("关闭"), icon_size=18),
+                ft.IconButton(
+                    ft.Icons.CLOSE, on_click=self._close, tooltip=_tip("关闭"),
+                    icon_size=17, icon_color=ink["text_dim"], hover_color="#e0526b",
+                ),
             ],
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
         bar = ft.Container(
-            content=ft.Row([logo, ft.Container(expand=True), right], vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            height=48,
-            padding=ft.Padding.symmetric(horizontal=12),
-            border=ft.Border.only(bottom=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)),
+            content=ft.Row(
+                [logo, ft.Container(expand=True), self.file_chip, ft.Container(width=12), right],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            height=46,
+            padding=ft.Padding.only(left=14, right=8, top=0, bottom=0),
+            bgcolor=ink["panel"],
+            border=ft.Border.only(bottom=ft.BorderSide(1, ink["line"])),
         )
         return ft.WindowDragArea(bar, maximizable=True)
 
     # ── Left: tree ──────────────────────────────────────────
 
     def _build_tree_column(self):
-        header = ft.Row(
-            [
-                ft.Icon(ft.Icons.PEOPLE, size=18, color=ft.Colors.PRIMARY),
-                ft.Text("角色库", size=14, weight=ft.FontWeight.W_600, expand=True),
-                ft.IconButton(ft.Icons.FOLDER_OPEN, on_click=self._open_bin, tooltip=_tip("打开 BIN"), icon_size=20),
-                ft.IconButton(ft.Icons.FOLDER, on_click=self._open_dir, tooltip=_tip("打开 HZC 文件夹"), icon_size=20),
+        ink = self.ink
+        header = self._section(
+            ft.Icons.PEOPLE, "角色库",
+            right=[
+                ft.IconButton(ft.Icons.FOLDER_OPEN, on_click=self._open_bin,
+                              tooltip=_tip("打开 BIN (Ctrl+O)"), icon_size=19, icon_color=ink["accent"]),
+                ft.IconButton(ft.Icons.FOLDER, on_click=self._open_dir,
+                              tooltip=_tip("打开 HZC 文件夹"), icon_size=19, icon_color=ink["accent"]),
             ],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
+
+        self.filter_box = ft.TextField(
+            hint_text="搜索角色 / 服装 / 动作",
+            text_size=12,
+            dense=True,
+            border_radius=10,
+            bgcolor=ink["panel_alt"],
+            filled=True,
+            fill_color=ink["panel_alt"],
+            prefix_icon=ft.Icons.SEARCH,
+            prefix_icon_size_constraints=ft.BoxConstraints(min_width=18, max_width=18),
+            border_width=1,
+            border_color=ink["line"],
+            focused_border_color=ink["accent"],
+            hint_style=ft.TextStyle(size=11, color=ink["text_dim"]),
+            content_padding=ft.Padding.only(left=6, right=6, top=7, bottom=7),
+            on_change=self._on_filter,
+            on_submit=self._on_filter,
+        )
+        self.filter_count = ft.Text("", size=10, color=ink["text_dim"])
 
         self.empty_hint = ft.Container(
             content=ft.Column(
                 [
-                    ft.Icon(ft.Icons.FOLDER_OPEN, size=48, color=ft.Colors.OUTLINE),
-                    ft.Text("尚未加载文件", size=13, color=ft.Colors.ON_SURFACE_VARIANT),
-                    ft.Text("点击上方文件夹图标", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Container(
+                        ft.Icon(ft.Icons.FOLDER_OPEN, size=26, color=ink["accent"]),
+                        width=58, height=58, border_radius=20, bgcolor=ink["accent_soft"],
+                        alignment=ft.Alignment.CENTER,
+                    ),
+                    ft.Text("尚未加载文件", size=13, weight=ft.FontWeight.W_600, color=ink["text"]),
+                    ft.Text("选择一个 .bin 或 HZC 文件夹开始", size=11,
+                            color=ink["text_dim"], text_align=ft.TextAlign.CENTER),
+                    ft.Container(height=4),
+                    ft.FilledButton("打开 BIN", icon=ft.Icons.FOLDER_OPEN, on_click=self._open_bin,
+                                    style=ft.ButtonStyle(
+                                        bgcolor=ink["accent"], color="#ffffff",
+                                        padding=ft.Padding.symmetric(horizontal=16, vertical=10),
+                                        shape=ft.RoundedRectangleBorder(radius=10))),
+                    ft.OutlinedButton("HZC 文件夹", icon=ft.Icons.FOLDER, on_click=self._open_dir,
+                                      style=ft.ButtonStyle(
+                                          color=ink["text_dim"],
+                                          side=ft.BorderSide(1, ink["line"]),
+                                          padding=ft.Padding.symmetric(horizontal=16, vertical=8),
+                                          shape=ft.RoundedRectangleBorder(radius=10))),
                 ],
                 spacing=8,
+                tight=True,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             alignment=ft.Alignment.CENTER,
             expand=True,
         )
 
-        self.tree_list = ft.ListView(spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
+        # padding.right = 滚动条通道，树内容永远不进这条
+        self.tree_list = ft.ListView(spacing=2, expand=True, scroll=ft.ScrollMode.AUTO,
+                                     padding=ft.Padding.only(left=0, right=GUTTER, top=2, bottom=2))
         self.tree_list.visible = False
 
         body = ft.Stack([self.empty_hint, self.tree_list], expand=True, fit=ft.StackFit.EXPAND)
 
-        return ft.Card(
-            content=ft.Container(
-                content=ft.Column([header, body], spacing=0, expand=True),
-                padding=12,
-                expand=True,
-            ),
-            expand=True,
-            margin=ft.Margin.only(left=10, top=8, right=4, bottom=8),
+        return self._panel(
+            [header, self.filter_box, ft.Container(expand=True, content=body), self.filter_count],
+            pad_right=6,
         )
 
     # ── Center: base preview + parts ────────────────────────
 
     def _build_base_column(self):
+        ink = self.ink
         self.base_hint = ft.Container(
             content=ft.Column(
                 [
-                    ft.Icon(ft.Icons.IMAGE_OUTLINED, size=56, color=ft.Colors.OUTLINE),
-                    ft.Text("在左侧选择底图", size=14, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Container(
+                        ft.Icon(ft.Icons.IMAGE_OUTLINED, size=30, color=ink["text_dim"]),
+                        width=64, height=64, border_radius=22, bgcolor=ink["chip"],
+                        alignment=ft.Alignment.CENTER,
+                    ),
+                    ft.Text("在左侧选择底图", size=13, weight=ft.FontWeight.W_600, color=ink["text"]),
+                    ft.Text("滚轮缩放 · 拖拽平移 · ←/→ 切帧", size=11, color=ink["text_dim"]),
                 ],
                 spacing=10,
+                tight=True,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             alignment=ft.Alignment.CENTER,
@@ -278,103 +535,110 @@ class ComposerApp:
         )
 
         self.base_image = ft.Image(src=TRANSPARENT, fit=ft.BoxFit.CONTAIN, expand=True)
-
-        base_viewer = ft.InteractiveViewer(
-            content=self.base_image,
+        self.base_viewer = ft.InteractiveViewer(
+            content=ft.Container(self.base_image, expand=True, alignment=ft.Alignment.CENTER),
             min_scale=1.0,
             max_scale=12.0,
+            constrained=True,
             expand=True,
         )
 
-        base_area = ft.Stack(
-            [base_viewer, self.base_hint],
-            expand=True,
-            fit=ft.StackFit.EXPAND,
-        )
+        base_area = self._stage(ft.Stack([self.base_viewer, self.base_hint],
+                                         expand=True, fit=ft.StackFit.EXPAND))
+        self.base_meta = self._meta()
 
-        self.frame_label = ft.Text("", size=12)
-        self.prev_btn = ft.IconButton(ft.Icons.CHEVRON_LEFT, on_click=self._prev_frame, icon_size=20)
-        self.next_btn = ft.IconButton(ft.Icons.CHEVRON_RIGHT, on_click=self._next_frame, icon_size=20)
+        self.frame_label = ft.Text("", size=11, color=ink["text_dim"])
+        self.prev_btn = ft.IconButton(ft.Icons.CHEVRON_LEFT, on_click=self._prev_frame,
+                                      icon_size=19, icon_color=ink["text_dim"])
+        self.next_btn = ft.IconButton(ft.Icons.CHEVRON_RIGHT, on_click=self._next_frame,
+                                      icon_size=19, icon_color=ink["text_dim"])
+        self.play_btn = ft.IconButton(ft.Icons.PLAY_ARROW, on_click=self._toggle_play,
+                                      icon_size=19, icon_color=ink["accent"], tooltip=_tip("自动播放 (P)"))
+        self.frame_slider = ft.Slider(
+            min=1, max=2, value=1, divisions=1,
+            on_change=self._on_scrub,
+            active_color=ink["accent"],
+            inactive_color=ink["line"],
+        )
         frame_nav = ft.Row(
-            [self.prev_btn, self.frame_label, self.next_btn],
-            alignment=ft.MainAxisAlignment.CENTER,
+            [
+                self.prev_btn,
+                ft.Container(expand=True, content=ft.Column([self.frame_slider], tight=True)),
+                self.next_btn,
+                ft.Container(width=1),
+                self.play_btn,
+                self.frame_label,
+            ],
+            spacing=4,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         self.frame_nav_holder = ft.Container(frame_nav, visible=False)
 
-        self.part_count = ft.Text("", size=11, color=ft.Colors.ON_SURFACE_VARIANT)
-        part_header = ft.Row(
-            [
-                ft.Icon(ft.Icons.TUNE, size=16, color=ft.Colors.PRIMARY),
-                ft.Text("差分部件", size=14, weight=ft.FontWeight.W_600, expand=True),
+        self.part_count = ft.Text("", size=11, color=ink["text_dim"])
+        part_header = self._section(
+            ft.Icons.TUNE, "差分部件",
+            right=[
                 self.part_count,
+                ft.IconButton(ft.Icons.FIT_SCREEN, on_click=self._reset_zoom,
+                              icon_size=17, icon_color=ink["text_dim"], tooltip=_tip("复位缩放 (0)")),
             ],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
         self.part_hint = ft.Container(
-            content=ft.Column(
+            content=ft.Row(
                 [
-                    ft.Icon(ft.Icons.TUNE, size=36, color=ft.Colors.OUTLINE),
-                    ft.Text("选择底图后显示差分帧", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Icon(ft.Icons.TUNE, size=18, color=ink["text_dim"]),
+                    ft.Text("选择底图后显示差分帧", size=11, color=ink["text_dim"]),
                 ],
                 spacing=8,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
+            height=PART_STRIP_H,
             alignment=ft.Alignment.CENTER,
-            expand=True,
+            border=ft.Border.all(1, ink["line_soft"]),
+            border_radius=RADIUS_TILE,
         )
 
+        # 横向列表的滚动条在底部：bottom padding 就是它的通道
         self.thumb_list = ft.ListView(
-            spacing=8, horizontal=True, height=140,
+            spacing=10, horizontal=True, height=PART_STRIP_H,
             auto_scroll=False, scroll=ft.ScrollMode.AUTO,
+            padding=ft.Padding.only(left=1, right=1, top=1, bottom=GUTTER),
         )
         self.thumb_list.visible = False
 
-        part_area = ft.Stack(
-            [self.part_hint, self.thumb_list],
-            expand=True,
-            fit=ft.StackFit.EXPAND,
-        )
-
         top = ft.Column(
             [
-                ft.Row(
-                    [
-                        ft.Icon(ft.Icons.IMAGE_OUTLINED, size=16, color=ft.Colors.PRIMARY),
-                        ft.Text("底图预览", size=14, weight=ft.FontWeight.W_600),
-                    ],
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
+                self._section(ft.Icons.IMAGE_OUTLINED, "底图预览", right=[self.base_meta]),
                 base_area,
                 self.frame_nav_holder,
             ],
-            spacing=6,
+            spacing=8,
             expand=True,
         )
 
-        bottom = ft.Column([part_header, part_area], spacing=6, height=148)
+        bottom = ft.Column([part_header, self.part_hint, self.thumb_list], spacing=8)
 
-        return ft.Card(
-            content=ft.Container(
-                content=ft.Column([top, bottom], spacing=10, expand=True),
-                padding=12,
-                expand=True,
-            ),
-            expand=True,
-            margin=ft.Margin.only(left=4, top=8, right=4, bottom=8),
-        )
+        return self._panel([top, bottom], expand=True, pad_right=10)
 
     # ── Right: result ───────────────────────────────────────
 
     def _build_result_column(self):
+        ink = self.ink
         self.result_hint = ft.Container(
             content=ft.Column(
                 [
-                    ft.Icon(ft.Icons.PALETTE_OUTLINED, size=40, color=ft.Colors.OUTLINE),
-                    ft.Text("点击部件帧后显示合成结果", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Container(
+                        ft.Icon(ft.Icons.PALETTE_OUTLINED, size=24, color=ink["text_dim"]),
+                        width=54, height=54, border_radius=18, bgcolor=ink["chip"],
+                        alignment=ft.Alignment.CENTER,
+                    ),
+                    ft.Text("点击部件帧后显示合成结果", size=11,
+                            color=ink["text_dim"], text_align=ft.TextAlign.CENTER),
                 ],
                 spacing=8,
+                tight=True,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             alignment=ft.Alignment.CENTER,
@@ -382,53 +646,88 @@ class ComposerApp:
         )
 
         self.result_image = ft.Image(src=TRANSPARENT, fit=ft.BoxFit.CONTAIN, expand=True)
-
-        result_viewer = ft.InteractiveViewer(
-            content=self.result_image,
+        self.result_viewer = ft.InteractiveViewer(
+            content=ft.Container(self.result_image, expand=True, alignment=ft.Alignment.CENTER),
             min_scale=1.0,
             max_scale=12.0,
+            constrained=True,
+            expand=True,
+        )
+        result_area = self._stage(ft.Stack([self.result_viewer, self.result_hint],
+                                           expand=True, fit=ft.StackFit.EXPAND))
+        self.result_meta = self._meta()
+
+        def nudge(icon, slider, tip):
+            return ft.Row(
+                [
+                    ft.Container(
+                        ft.Icon(icon, size=14, color=ink["text_dim"]),
+                        width=22, height=22, border_radius=7, bgcolor=ink["chip"],
+                        alignment=ft.Alignment.CENTER,
+                    ),
+                    slider,
+                ],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                tooltip=_tip(tip),
+            )
+
+        self.nudge_x_slider = ft.Slider(min=-48, max=48, value=0, on_change=self._on_nudge_x,
+                                        active_color=ink["accent_2"], inactive_color=ink["line"],
+                                        expand=True)
+        self.nudge_y_slider = ft.Slider(min=-48, max=48, value=0, on_change=self._on_nudge_y,
+                                        active_color=ink["accent_2"], inactive_color=ink["line"],
+                                        expand=True)
+        sx = nudge(ft.Icons.ARROW_BACK, self.nudge_x_slider, "水平偏移差分部件")
+        sy = nudge(ft.Icons.EXPAND_MORE, self.nudge_y_slider, "垂直偏移差分部件")
+
+        self.nudge_reset = ft.IconButton(ft.Icons.REFRESH, on_click=self._reset_nudge,
+                                         icon_size=16, icon_color=ink["text_dim"],
+                                         tooltip=_tip("复位偏移"))
+        nudge_head = ft.Row(
+            [
+                ft.Text("对位微调", size=11, weight=ft.FontWeight.W_600, color=ink["text"]),
+                ft.Container(expand=True),
+                self.nudge_reset,
+            ],
+            spacing=4,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self.nudge_box = ft.Container(
+            content=ft.Column([nudge_head, sx, sy], spacing=2),
+            visible=False,
+            padding=ft.Padding.only(left=4, right=4, top=4, bottom=4),
+            border_radius=RADIUS_TILE,
+            bgcolor=ink["chip"],
+        )
+
+        self.save_btn = ft.FilledButton(
+            "保存当前", icon=ft.Icons.SAVE_ALT, on_click=self._save_current, disabled=True,
+            tooltip=_tip("导出这一张 PNG (Ctrl+S)"),
+            style=ft.ButtonStyle(bgcolor=ink["accent"], color="#ffffff",
+                                 padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+                                 shape=ft.RoundedRectangleBorder(radius=10)),
+            expand=True,
+        )
+        self.batch_btn = ft.OutlinedButton(
+            "批量导出", icon=ft.Icons.DOWNLOAD, on_click=self._batch_export, disabled=True,
+            tooltip=_tip("把该底图的全部差分铺平成 PNG"),
+            style=ft.ButtonStyle(color=ink["text_dim"], side=ft.BorderSide(1, ink["line"]),
+                                 padding=ft.Padding.symmetric(horizontal=12, vertical=9),
+                                 shape=ft.RoundedRectangleBorder(radius=10)),
             expand=True,
         )
 
-        result_area = ft.Stack(
-            [result_viewer, self.result_hint],
-            expand=True,
-            fit=ft.StackFit.EXPAND,
-        )
+        btn_bar = ft.Row([self.save_btn, self.batch_btn], spacing=8)
 
-        self.save_btn = ft.IconButton(ft.Icons.SAVE_ALT, on_click=self._save_current, tooltip=_tip("保存当前图"),
-                                      icon_size=22, disabled=True)
-        self.batch_btn = ft.IconButton(ft.Icons.DOWNLOAD, on_click=self._batch_export, tooltip=_tip("批量导出"),
-                                       icon_size=22, disabled=True)
-
-        btn_bar = ft.Row(
-            [self.save_btn, self.batch_btn],
-            alignment=ft.MainAxisAlignment.CENTER,
-            spacing=16,
-        )
-
-        return ft.Card(
-            content=ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Row(
-                            [
-                                ft.Icon(ft.Icons.PALETTE_OUTLINED, size=16, color=ft.Colors.PRIMARY),
-                                ft.Text("合成结果", size=14, weight=ft.FontWeight.W_600),
-                            ],
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
-                        result_area,
-                        btn_bar,
-                    ],
-                    spacing=6,
-                    expand=True,
-                ),
-                padding=12,
-                expand=True,
-            ),
-            expand=True,
-            margin=ft.Margin.only(left=4, top=8, right=10, bottom=8),
+        return self._panel(
+            [
+                self._section(ft.Icons.PALETTE_OUTLINED, "合成结果", right=[self.result_meta]),
+                result_area,
+                self.nudge_box,
+                btn_bar,
+            ],
+            pad_right=10,
         )
 
     # ── Title bar events ────────────────────────────────────
@@ -449,12 +748,56 @@ class ComposerApp:
         await self.page.window.destroy()
 
     def _help(self, e):
+        ink = self.ink
+
+        def step_row(idx, title, body):
+            return ft.Row(
+                [
+                    ft.Container(
+                        ft.Text(str(idx), size=11, weight=ft.FontWeight.W_800, color=ink["accent"]),
+                        width=22, height=22, border_radius=8, bgcolor=ink["accent_soft"],
+                        alignment=ft.Alignment.CENTER,
+                    ),
+                    ft.Column(
+                        [
+                            ft.Text(title, size=12, weight=ft.FontWeight.W_700, color=ink["text"]),
+                            ft.Text(body, size=11, color=ink["text_dim"]),
+                        ],
+                        spacing=1, expand=True,
+                    ),
+                ],
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            )
+
+        def key_row(keys, desc):
+            return ft.Row(
+                [_kbd(keys), ft.Text(desc, size=11, color=ink["text_dim"])],
+                spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+
+        content = ft.Column(
+            [
+                *[step_row(i + 1, t, b) for i, (t, b) in enumerate(HELP_STEPS)],
+                ft.Divider(height=14, color=ink["line_soft"]),
+                ft.Text("快捷键", size=12, weight=ft.FontWeight.W_700, color=ink["text"]),
+                *([key_row(k, d) for k, d in HELP_KEYS][:4]),
+                ft.Row([*[key_row(k, d) for k, d in HELP_KEYS[4:]]], spacing=18, wrap=True),
+            ],
+            spacing=8,
+            width=430,
+            scroll=ft.ScrollMode.AUTO,
+            height=430,
+        )
         self.page.show_dialog(
             ft.AlertDialog(
                 modal=True,
-                title=ft.Text("使用说明", weight=ft.FontWeight.W_700),
-                content=ft.Text(HELP_TEXT, size=13, selectable=True),
-                actions=[ft.TextButton("知道了", on_click=lambda e: self.page.pop_dialog())],
+                bgcolor=ink["panel"],
+                title=ft.Text("使用说明", weight=ft.FontWeight.W_800, color=ink["text"]),
+                content=content,
+                actions=[
+                    ft.TextButton("知道了", on_click=lambda e: self.page.pop_dialog()),
+                ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )
         )
@@ -496,12 +839,13 @@ class ComposerApp:
     def _snack(self, msg, error=False, folder=None):
         self._snack_seq = getattr(self, "_snack_seq", 0) + 1
         seq = self._snack_seq
-        bg = ft.Colors.ERROR_CONTAINER if error else ft.Colors.PRIMARY_CONTAINER
-        fg = ft.Colors.ON_ERROR_CONTAINER if error else ft.Colors.ON_PRIMARY_CONTAINER
+        ink = self.ink
+        bg = ink["err_bg"] if error else ink["ok_bg"]
+        fg = ink["err_fg"] if error else ink["ok_fg"]
         row = [
             ft.Icon(
                 ft.Icons.ERROR if error else ft.Icons.CHECK_CIRCLE,
-                size=18, color=fg,
+                size=17, color=fg,
             ),
             ft.Text(msg, size=12, color=fg, weight=ft.FontWeight.W_500,
                     expand=True, max_lines=3, overflow=ft.TextOverflow.ELLIPSIS),
@@ -509,9 +853,9 @@ class ComposerApp:
         if not error and folder:
             async def open_dir(e, _d=folder):
                 self._open_folder(_d)
-            row.append(ft.TextButton("打开文件夹", on_click=open_dir))
+            row.append(ft.TextButton("打开文件夹", on_click=open_dir, style=ft.ButtonStyle(color=fg)))
         if error:
-            copy_btn = ft.TextButton("复制报错")
+            copy_btn = ft.TextButton("复制报错", style=ft.ButtonStyle(color=fg))
 
             async def copy_err(e, _m=msg, _b=copy_btn):
                 try:
@@ -523,20 +867,21 @@ class ComposerApp:
 
             copy_btn.on_click = copy_err
             row.append(copy_btn)
-        row.append(ft.IconButton(ft.Icons.CLOSE, icon_size=16,
-                                tooltip=_tip("关闭"),
-                                on_click=lambda e, _s=seq: self._dismiss_snack(_s)))
+        row.append(ft.IconButton(ft.Icons.CLOSE, icon_size=15, icon_color=fg,
+                                 tooltip=_tip("关闭"),
+                                 on_click=lambda e, _s=seq: self._dismiss_snack(_s)))
         toast = ft.Container(
             content=ft.Row(row, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             bgcolor=bg,
-            border_radius=8,
-            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-            shadow=ft.BoxShadow(blur_radius=8, spread_radius=0, color=ft.Colors.with_opacity(0.15, ft.Colors.BLACK)),
-            alignment=ft.Alignment.CENTER,
+            border_radius=12,
+            border=ft.Border.all(1, ink["line"]),
+            padding=ft.Padding.only(left=12, right=6, top=7, bottom=7),
+            shadow=ft.BoxShadow(blur_radius=18, spread_radius=0, color="#00000033"),
         )
+        # 定位在标题栏下方并居中：不再横跨整窗、也不再压住窗口按钮
         overlay = ft.Stack(
-            [toast],
-            top=16, left=0, right=0,
+            [ft.Container(toast, top=56, left=0, right=0, alignment=ft.Alignment.CENTER)],
+            top=0, left=0, right=0, bottom=0,
         )
         try:
             if self._snack_overlay in self.page.overlay:
@@ -574,6 +919,14 @@ class ComposerApp:
 
     def _set_status(self, text):
         self.status_text.value = text
+        self.page.update()
+
+    def _set_status_meta(self):
+        if not self.hierarchy:
+            self.status_meta.value = ""
+            return
+        hzc = sum(1 for i in self.file_infos if i.get("type") == "hzc")
+        self.status_meta.value = f"{len(self.hierarchy)} 角色 · {hzc} 图像"
         self.page.update()
 
     # ── Open BIN ────────────────────────────────────────────
@@ -642,10 +995,15 @@ class ComposerApp:
         self.selected_info = None
         self.selected_filename = None
         self.selected_action_ctrl = None
+        self.query = ""
+        if getattr(self, "filter_box", None) is not None:
+            self.filter_box.value = ""
         self._clear_previews()
         self._render_tree()
         hzc = sum(1 for i in infos if i["type"] == "hzc")
+        self.file_chip.content.value = Path(path).name
         self._set_status(f"{Path(path).name} — {len(hier)} 角色, {hzc} 图像")
+        self._set_status_meta()
 
     def _clear_previews(self):
         self.base_imgs = []
@@ -653,25 +1011,56 @@ class ComposerApp:
         self.part_info = None
         self.composed_img = None
         self.thumb_refs = []
+        self.nudge_x = 0
+        self.nudge_y = 0
+        self._stop_play()
         self.base_image.src = TRANSPARENT
         self.result_image.src = TRANSPARENT
         self.base_hint.visible = True
         self.result_hint.visible = True
+        self.base_meta.value = ""
+        self.result_meta.value = ""
         self.frame_label.value = ""
         self.frame_nav_holder.visible = False
         self.thumb_list.controls.clear()
         self.thumb_list.visible = False
         self.part_hint.visible = True
         self.part_count.value = ""
+        self.nudge_box.visible = False
+        self._sync_nudge_sliders()
         self.save_btn.disabled = True
         self.batch_btn.disabled = True
 
     # ── Tree ────────────────────────────────────────────────
 
+    def _match(self, *names):
+        q = (self.query or "").strip().lower()
+        if not q:
+            return True
+        return any(q in (n or "").lower() for n in names)
+
+    def _on_filter(self, e):
+        self.query = (getattr(self.filter_box, "value") or "").strip()
+        self._render_tree()
+
     def _render_tree(self):
         self.tree_list.controls.clear()
+        shown = 0
         for role, outfits in sorted(self.hierarchy.items()):
-            self.tree_list.controls.append(self._role_tile(role, outfits))
+            actions = [i for infos in outfits.values() for i in infos if not _is_expr(i["filename"])]
+            if self.query:
+                keep = self._match(role) or any(
+                    self._match(outfit, i["filename"]) for outfit, infos in outfits.items()
+                    for i in infos
+                )
+                if not keep:
+                    continue
+                shown += len(actions)
+            self.tree_list.controls.append(self._role_tile(role, outfits, open_=bool(self.query)))
+        if self.query:
+            self.filter_count.value = f"匹配 {shown} 个动作" if shown else "无匹配"
+        else:
+            self.filter_count.value = ""
         self.tree_list.visible = True
         self.empty_hint.visible = False
         self.page.update()
@@ -679,7 +1068,7 @@ class ComposerApp:
     def _make_chevron(self, size=16):
         """带旋转方向动画的展开箭头：收起朝右，展开旋转为朝下。"""
         return ft.AnimatedSwitcher(
-            ft.Icon(ft.Icons.CHEVRON_RIGHT, size=size, color=ft.Colors.ON_SURFACE_VARIANT),
+            ft.Icon(ft.Icons.CHEVRON_RIGHT, size=size, color=self.ink["text_dim"]),
             transition=ft.AnimatedSwitcherTransition.ROTATION,
             duration=180,
             reverse_duration=180,
@@ -691,19 +1080,20 @@ class ComposerApp:
         holder.content = ft.Icon(
             ft.Icons.EXPAND_MORE if open_ else ft.Icons.CHEVRON_RIGHT,
             size=size,
-            color=ft.Colors.ON_SURFACE_VARIANT,
+            color=self.ink["text_dim"],
         )
 
-    def _role_tile(self, role, outfits):
-        state = {"open": False}
-        count = sum(len(v) for v in outfits.values())
+    def _role_tile(self, role, outfits, open_=False):
+        state = {"open": bool(open_)}
+        count = sum(len([i for i in infos if not _is_expr(i["filename"])]) for infos in outfits.values())
         chevron = self._make_chevron(16)
         header_pending = []
         child_toggles = []
 
-        body = ft.Column(spacing=0, visible=False)
+        body = ft.Column(spacing=0, visible=state["open"])
         for outfit, infos in sorted(outfits.items()):
-            body.controls.append(self._outfit_tile(outfit, infos, header_registry=header_pending, _expand_box=child_toggles))
+            body.controls.append(self._outfit_tile(outfit, infos, header_registry=header_pending,
+                                                   _expand_box=child_toggles, open_=state["open"]))
 
         def toggle(e):
             state["open"] = not state["open"]
@@ -718,19 +1108,39 @@ class ComposerApp:
                         tog(None)
             body.update()
             chevron.update()
+            self._set_tile_bg(header, state["open"])
 
         thumb_widget = self._get_role_thumbnail(role, outfits)
 
         header = ft.ListTile(
             leading=thumb_widget,
-            title=ft.Text(role, size=13, weight=ft.FontWeight.W_600,
+            title=ft.Text(role, size=13, weight=ft.FontWeight.W_700, color=self.ink["text"],
                           max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-            trailing=chevron,
+            subtitle=ft.Text(f"{count} 动作 · {len(outfits)} 服装", size=10, color=self.ink["text_dim"]),
+            trailing=ft.Row(
+                [ft.Text(f"{count}", size=10, color=self.ink["text_dim"]), chevron],
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
             on_click=toggle,
-            content_padding=ft.Padding.symmetric(horizontal=4, vertical=0),
+            content_padding=ft.Padding.only(left=4, right=2, top=0, bottom=0),
             dense=True,
+            min_height=46,
+            hover_color=self.ink["hover"],
+            bgcolor="#00000000",
         )
+        if state["open"]:
+            self._set_tile_bg(header, True)
+            if header_pending:
+                self._flush_tasks(header_pending)
         return ft.Column([header, body], spacing=0)
+
+    def _set_tile_bg(self, tile, on):
+        try:
+            tile.bgcolor = self.ink["chip"] if on else "#00000000"
+            tile.update()
+        except Exception:
+            pass
 
     def _capture_loop(self):
         """在 async 入口捕获当前事件循环（纯标准库，不依赖 Flet 版本 API）。"""
@@ -813,15 +1223,17 @@ class ComposerApp:
             if target:
                 break
         placeholder = ft.Container(
-            content=ft.Icon(ft.Icons.PERSON, size=24, color=ft.Colors.PRIMARY),
-            width=44,
-            height=44,
+            content=ft.Icon(ft.Icons.PERSON, size=22, color=self.ink["text_dim"]),
+            width=40,
+            height=40,
+            border_radius=12,
+            bgcolor=self.ink["chip"],
             alignment=ft.Alignment.CENTER,
         )
         if target is None:
             self.role_thumb_cache[role] = placeholder
             return placeholder
-        self._queue_thumb(placeholder, target, 44, role)
+        self._queue_thumb(placeholder, target, 40, role)
         return placeholder
 
     def _make_mini_thumb(self, info, size=24, registry=None):
@@ -830,9 +1242,10 @@ class ComposerApp:
         if key in self.role_thumb_cache:
             return self.role_thumb_cache[key]
         placeholder = ft.Container(
-            content=ft.Icon(ft.Icons.IMAGE_OUTLINED, size=max(12, size - 10), color=ft.Colors.ON_SURFACE_VARIANT),
+            content=ft.Icon(ft.Icons.IMAGE_OUTLINED, size=max(12, size - 10), color=self.ink["text_dim"]),
             width=size,
             height=size,
+            border_radius=max(4, size // 4),
             alignment=ft.Alignment.CENTER,
         )
         task = (placeholder, info, size, key)
@@ -842,13 +1255,13 @@ class ComposerApp:
             registry.append(task)
         return placeholder
 
-    def _outfit_tile(self, outfit, infos, header_registry=None, _expand_box=None):
-        state = {"open": False}
+    def _outfit_tile(self, outfit, infos, header_registry=None, _expand_box=None, open_=False):
+        state = {"open": bool(open_)}
         chevron = self._make_chevron(14)
         action_pending = []
         action_tiles = []
 
-        body = ft.Column(spacing=0, visible=False)
+        body = ft.Column(spacing=0, visible=state["open"])
         for info in sorted(infos, key=lambda x: x["filename"]):
             if _is_expr(info["filename"]):
                 continue
@@ -872,21 +1285,31 @@ class ComposerApp:
                         self._select_action(info, tile)
             body.update()
             chevron.update()
+            self._set_tile_bg(header, state["open"])
         if _expand_box is not None:
             _expand_box.append((toggle, body))
 
+        n_actions = len(body.controls)
         thumb_info = next((i for i in infos if not _is_expr(i["filename"])), None)
-        thumb_widget = self._make_mini_thumb(thumb_info, 30, registry=header_registry) if thumb_info else ft.Icon(ft.Icons.FOLDER, size=18, color=ft.Colors.SECONDARY)
+        thumb_widget = self._make_mini_thumb(thumb_info, 30, registry=header_registry) if thumb_info else ft.Icon(ft.Icons.FOLDER, size=18, color=self.ink["text_dim"])
 
         header = ft.ListTile(
             leading=thumb_widget,
-            title=ft.Text(outfit, size=12,
+            title=ft.Text(outfit, size=12, color=self.ink["text"],
                           max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            subtitle=ft.Text(f"{n_actions} 动作", size=10, color=self.ink["text_dim"]),
             trailing=chevron,
             on_click=toggle,
-            content_padding=ft.Padding.only(left=32, right=4, top=0, bottom=0),
+            content_padding=ft.Padding.only(left=30, right=2, top=0, bottom=0),
             dense=True,
+            min_height=42,
+            hover_color=self.ink["hover"],
+            bgcolor="#00000000",
         )
+        if state["open"]:
+            self._set_tile_bg(header, True)
+            if action_pending:
+                self._flush_tasks(action_pending)
         return ft.Column([header, body], spacing=0)
 
     def _action_tile(self, name, info, registry=None):
@@ -896,11 +1319,17 @@ class ComposerApp:
         c = ft.ListTile(
             leading=thumb_widget,
             title=ft.Text(name, size=12,
-                          color=ft.Colors.ON_SURFACE if selected else ft.Colors.ON_SURFACE_VARIANT,
+                          weight=ft.FontWeight.W_700 if selected else ft.FontWeight.W_400,
+                          color=self.ink["accent"] if selected else self.ink["text_dim"],
                           max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            trailing=ft.Container(width=6, height=6, border_radius=3,
+                                  bgcolor=self.ink["accent"] if selected else "#00000000"),
             on_click=lambda e: self._select_action(info, c),
-            content_padding=ft.Padding.only(left=52, right=4, top=0, bottom=0),
+            content_padding=ft.Padding.only(left=30, right=8, top=0, bottom=0),
             dense=True,
+            min_height=38,
+            hover_color=self.ink["hover"],
+            bgcolor=self.ink["sel"] if selected else "#00000000",
             selected=selected,
         )
         return c
@@ -944,6 +1373,7 @@ class ComposerApp:
 
     def _load_base(self, info):
         self.selected_info = info
+        self._stop_play()
         try:
             self.base_imgs = self._read_pil_list(info)
         except Exception as ex:
@@ -954,6 +1384,7 @@ class ComposerApp:
             self._snack("无法解析该 HZC 图像", error=True)
             return
         self.base_idx = 0
+        self._reset_zoom()
         self._show_base_frame()
         self._load_parts(info)
 
@@ -966,6 +1397,11 @@ class ComposerApp:
         self.frame_nav_holder.visible = n > 1
         self.prev_btn.disabled = self.base_idx <= 0
         self.next_btn.disabled = self.base_idx >= n - 1
+        if n > 1:
+            self.frame_slider.max = n
+            self.frame_slider.divisions = n - 1
+            self.frame_slider.value = self.base_idx + 1
+        self.base_meta.value = f"{img.size[0]}×{img.size[1]} · {n} 帧"
         self.page.update()
 
     def _prev_frame(self, e):
@@ -978,12 +1414,71 @@ class ComposerApp:
             self.base_idx += 1
             self._show_base_frame()
 
+    def _on_scrub(self, e):
+        if not self.base_imgs:
+            return
+        try:
+            idx = int(round(float(e.control.value))) - 1
+        except (TypeError, ValueError, AttributeError):
+            return
+        idx = max(0, min(len(self.base_imgs) - 1, idx))
+        if idx != self.base_idx:
+            self.base_idx = idx
+            self._show_base_frame()
+
+    def _spawn(self, coro):
+        """把协程丢回 UI 事件循环执行；没有循环时显式关闭，避免 never-awaited 警告。"""
+        if not asyncio.iscoroutine(coro):
+            return
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+        if loop is not None:
+            loop.create_task(coro)
+        else:
+            coro.close()
+
+    def _reset_zoom(self, e=None):
+        viewer = getattr(self, "base_viewer", None)
+        if viewer is None:
+            return
+        self._spawn(viewer.reset())
+
+    def _toggle_play(self, e):
+        if len(self.base_imgs) < 2:
+            return
+        self._playing = not self._playing
+        self.play_btn.icon = ft.Icons.PAUSE if self._playing else ft.Icons.PLAY_ARROW
+        try:
+            self.play_btn.update()
+        except Exception:
+            pass
+        if self._playing:
+            self._tick()
+
+    def _stop_play(self):
+        self._playing = False
+
+    def _tick(self):
+        if not self._playing or not self.base_imgs:
+            return
+        self.base_idx = (self.base_idx + 1) % len(self.base_imgs)
+        self._show_base_frame()
+        if not self._later(PLAY_INTERVAL, self._tick):
+            self._playing = False
+
     # ── Parts ───────────────────────────────────────────────
 
     def _load_parts(self, info):
         self.part_info = None
         self.part_imgs = []
         self.thumb_refs = []
+        self.nudge_x = 0
+        self.nudge_y = 0
+        self._sync_nudge_sliders()
         self.thumb_list.controls.clear()
         self.thumb_list.visible = False
         self.part_hint.visible = True
@@ -991,6 +1486,8 @@ class ComposerApp:
         self.composed_img = None
         self.result_image.src = TRANSPARENT
         self.result_hint.visible = True
+        self.result_meta.value = ""
+        self.nudge_box.visible = False
         self.save_btn.disabled = True
         self.batch_btn.disabled = True
 
@@ -1020,17 +1517,28 @@ class ComposerApp:
         self._pick_part(0)
 
     def _make_thumb(self, img, idx):
-        data = _thumb_bytes(img, 100)
+        data = _thumb_bytes(img, THUMB)
         selected = idx == self.part_idx
+        ink = self.ink
 
         c = ft.Container(
-            content=ft.Image(src=data, fit=ft.BoxFit.CONTAIN, width=100, height=100),
-            width=104,
-            height=104,
-            bgcolor=ft.Colors.TRANSPARENT,
-            border=ft.Border.all(2, ft.Colors.PRIMARY if selected else ft.Colors.TRANSPARENT),
-            border_radius=10,
+            content=ft.Image(src=data, fit=ft.BoxFit.CONTAIN, width=THUMB, height=THUMB),
+            width=THUMB,
+            height=THUMB,
+            bgcolor="#00000000",
+            border=ft.Border.all(2, ink["accent"] if selected else ink["line_soft"]),
+            border_radius=RADIUS_TILE,
             on_click=lambda e, i=idx: self._pick_part(i),
+            tooltip=_tip(f"第 {idx + 1} 帧"),
+            badge=ft.Badge(
+                label=str(idx + 1),
+                small_size=16,
+                bgcolor=ink["accent"] if selected else ink["chip"],
+                text_color="#ffffff" if selected else ink["text_dim"],
+                alignment=ft.Alignment(-1.0, -1.0),
+                padding=ft.Padding.only(left=4, right=4, top=0, bottom=0),
+                label_visible=True,
+            ),
         )
         self.thumb_refs.append((c, idx))
         return c
@@ -1040,11 +1548,35 @@ class ComposerApp:
             return
         self.part_idx = idx
         for c, i in self.thumb_refs:
-            c.border = ft.Border.all(2, ft.Colors.PRIMARY if i == idx else ft.Colors.TRANSPARENT)
+            c.border = ft.Border.all(2, self.ink["accent"] if i == idx else self.ink["line_soft"])
             try:
                 c.update()
             except Exception:
                 pass
+        self._compose()
+
+    def _on_nudge_x(self, e):
+        self.nudge_x = int(round(self.nudge_x_slider.value or 0))
+        self._compose()
+
+    def _on_nudge_y(self, e):
+        self.nudge_y = int(round(self.nudge_y_slider.value or 0))
+        self._compose()
+
+    def _sync_nudge_sliders(self):
+        for slider, value in ((self.nudge_x_slider, self.nudge_x), (self.nudge_y_slider, self.nudge_y)):
+            if slider is None:
+                return
+            slider.value = value
+            try:
+                slider.update()
+            except Exception:
+                pass
+
+    def _reset_nudge(self, e):
+        self.nudge_x = 0
+        self.nudge_y = 0
+        self._sync_nudge_sliders()
         self._compose()
 
     def _compose(self, e=None):
@@ -1052,18 +1584,54 @@ class ComposerApp:
             return
         if self.part_idx >= len(self.part_imgs) or not self.base_imgs:
             return
+        ox = self.part_info.get("offset_x", 0) + self.nudge_x
+        oy = self.part_info.get("offset_y", 0) + self.nudge_y
         composed = compose_preview(
             self.base_imgs[0],
             self.part_imgs[self.part_idx],
-            self.part_info.get("offset_x", 0),
-            self.part_info.get("offset_y", 0),
+            ox,
+            oy,
         )
         self.composed_img = composed
         self.result_image.src = _img_bytes(composed)
         self.result_hint.visible = False
+        self.result_meta.value = f"{composed.size[0]}×{composed.size[1]} · 偏移 {ox:+d}/{oy:+d}"
+        self.nudge_box.visible = True
         self.save_btn.disabled = False
         self.batch_btn.disabled = False
         self.page.update()
+
+    # ── Keyboard ────────────────────────────────────────────
+
+    async def _on_keyboard(self, e):
+        key = (getattr(e, "key", None) or "").lower()
+        if key == "escape":
+            if self.query:
+                self.query = ""
+                self.filter_box.value = ""
+                self._render_tree()
+            try:
+                self.page.pop_dialog()
+            except Exception:
+                pass
+            return
+        if getattr(e, "control", None) is not None:
+            return  # 焦点在输入框里，不抢键
+        if key in ("left", "right") and len(self.base_imgs) > 1:
+            (self._prev_frame if key == "left" else self._next_frame)(None)
+        elif key in ("bracketleft", "bracketright") and self.part_imgs:
+            delta = -1 if key == "bracketleft" else 1
+            self._pick_part(max(0, min(len(self.part_imgs) - 1, self.part_idx + delta)))
+        elif key == "p":
+            self._toggle_play(None)
+        elif key == "0":
+            self._reset_zoom()
+        elif key == "l":
+            await self._toggle_theme(None)
+        elif e.ctrl and key == "s":
+            await self._save_current(None)
+        elif e.ctrl and key == "o":
+            await self._open_bin(None)
 
     # ── Save / Export ───────────────────────────────────────
 
@@ -1102,8 +1670,8 @@ class ComposerApp:
         self._set_status("正在批量导出…")
 
         base = self.base_imgs[0]
-        ox = self.part_info.get("offset_x", 0)
-        oy = self.part_info.get("offset_y", 0)
+        ox = self.part_info.get("offset_x", 0) + self.nudge_x
+        oy = self.part_info.get("offset_y", 0) + self.nudge_y
         fname = self.selected_info["filename"]
         parts_data = list(self.part_imgs)
 

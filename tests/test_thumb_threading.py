@@ -23,6 +23,7 @@ MAIN_IDENT = threading.get_ident()
 class FakeImage:
     class Resampling:
         LANCZOS = 1
+        NEAREST = 0
 
     def __init__(self, size=(8, 8), mode="RGBA"):
         self.size = tuple(size)
@@ -38,6 +39,13 @@ class FakeImage:
     def merge(cls, mode, bands):
         first = list(bands)[0]
         return cls(getattr(first, "size", (8, 8)), mode)
+
+    @classmethod
+    def new(cls, mode, size, color=None):
+        return cls(size, mode)
+
+    def putpixel(self, xy, value):
+        return None
 
     @staticmethod
     def alpha_composite(a, b):

@@ -23,6 +23,14 @@ except Exception as ex:  # 环境缺依赖时跳过，不算失败
     print(f"UI_SMOKE_SKIP (缺依赖: {ex})")
     sys.exit(0)
 
+# 真实控件的 update() 会沿 parent 链找 ft.Page 实例；这里把 page 解析改成
+# 指向当前 FakePage，于是 app 里所有 update 调用都能真的走一遍（而不是被
+# try/except 静默吞掉），同时不需要起会话。
+import flet.controls.base_control as _bc  # noqa: E402
+
+_CURRENT_PAGE = []
+_bc.BaseControl.page = property(lambda self: _CURRENT_PAGE[-1] if _CURRENT_PAGE else None)
+
 
 class FakeWindow:
     def __init__(self):
@@ -39,10 +47,23 @@ class FakeWindow:
         pass
 
 
+class FakeSession:
+    """记录控件方法调用（InteractiveViewer.reset 之类走 session 的指令）。"""
+
+    def __init__(self):
+        self.calls = []
+
+    async def invoke_method(self, target, method, args=None, timeout=None):
+        self.calls.append((method, args))
+        return None
+
+
 class FakePage:
     """只覆盖 ComposerApp 用到的 page 接口；控件级 update() 由 app 自身 try 兜住。"""
 
     def __init__(self):
+        _CURRENT_PAGE.append(self)
+        self.session = FakeSession()
         self.window = FakeWindow()
         self.overlay = []
         self.services = None
@@ -153,6 +174,14 @@ async def run():
         app._next_frame(None)
         app._prev_frame(None)
     app._pick_part(min(2, len(app.part_imgs) - 1))
+    app._reset_zoom(None)
+    await asyncio.sleep(0.1)
+    assert any(m == "reset" for m, _a in page.session.calls), "复位缩放未真正下发"
+    app.nudge_x_slider.value = 6
+    app._on_nudge_x(None)
+    assert app.nudge_x == 6 and app.composed_img is not None, "对位微调未重算合成"
+    app._reset_nudge(None)
+    assert app.nudge_x == 0
     if hasattr(app, "filter_box"):
         app.filter_box.value = "私服"
         app._on_filter(None)
@@ -182,7 +211,8 @@ async def run():
     # 键盘事件入口（不抛异常即可，具体分派依赖真实 key）
     if app.page.on_keyboard_event is not None:
         for key in ("Left", "Right", "bracketleft", "bracketright", "Escape", "l"):
-            ev = ft.KeyboardEvent(key=key, name=key)
+            ev = ft.KeyboardEvent(name=key, data="", control=None, key=key,
+                                  shift=False, ctrl=False, alt=False, meta=False)
             await app._on_keyboard(ev)
 
     # argv 自动载入路径同样要能建树
