@@ -82,26 +82,9 @@ class FakeImage:
         return (1, 2, 3, 255)
 
 
-class FakeDraw:
-    """和纸纹理用的绘图 stub：只要求 line/point 可调，不校验坐标。"""
-
-    def __init__(self, img):
-        self.img = img
-
-    def line(self, *a, **k):
-        return None
-
-    def point(self, *a, **k):
-        return None
-
-
 pil_mod = types.ModuleType("PIL")
 pil_mod.Image = FakeImage
-draw_mod = types.ModuleType("PIL.ImageDraw")
-draw_mod.Draw = FakeDraw
-pil_mod.ImageDraw = draw_mod
 sys.modules["PIL"] = pil_mod
-sys.modules["PIL.ImageDraw"] = draw_mod
 
 # ---------- Fake flet ----------
 class _Any:

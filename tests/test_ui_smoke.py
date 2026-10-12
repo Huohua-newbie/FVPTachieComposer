@@ -199,17 +199,24 @@ async def run():
             assert c.horizontal_alignment != ft.CrossAxisAlignment.STRETCH, \
                 "Column 在滚动容器里不能用 horizontal_alignment=STRETCH"
 
-    # 设计语言落地检查：和纸是页面最底层的纤维纹理，琉璃是压在纸上的渐变玻璃片。
-    # 二者都只是"能看见"才有意义——没有这两条，所谓和纸/琉璃就是文案。
-    washi = [c for c in nodes
-             if getattr(c, "image", None) is not None
-             and c.image.repeat == ft.ImageRepeat.REPEAT
-             and c.image.src == app._washi]
-    assert washi, "页面底层缺少和纸纹理"
-    glass = [c for c in nodes if getattr(c, "gradient", None) is not None]
-    assert len(glass) >= 3, f"面板没有琉璃质感（渐变面板仅 {len(glass)} 个）"
-    for c in glass:
-        assert c.border.top.color == app.ink["glass_hi"], "琉璃片上沿缺高光边"
+    # 视觉基线：白卡片 + 浅灰页底 + 1px 细描边，禁止材质特效回潮
+    # （和纸纹理/琉璃渐变试过，实测与三栏工具界面不搭，已明确放弃）。
+    from FVPTachieComposerFlet import RADIUS_PANEL
+    assert app._checker, "透明棋盘底缺失"
+    panels = [c for c in nodes
+              if type(c) is ft.Container
+              and getattr(c, "border_radius", None) == RADIUS_PANEL
+              and c.bgcolor == app.ink["panel"]
+              and c.border is not None and c.border.top.width == 1]
+    assert len(panels) >= 3, f"三栏不是实色细描边卡片（只找到 {len(panels)} 个）"
+    for c in panels:
+        assert c.gradient is None, "面板不该再用渐变"
+        assert c.shadow is None, "面板不该再用投影"
+    bare_texture = [c for c in nodes
+                    if getattr(c, "image", None) is not None
+                    and c.image.repeat == ft.ImageRepeat.REPEAT
+                    and getattr(c, "border_radius", None) is None]
+    assert not bare_texture, "页面底层不该再铺满纹理"
 
     # 展开到动作层并选中，跑完 底图 → 差分 → 合成 全链路
     role_col = app.tree_list.controls[0]
@@ -276,8 +283,13 @@ async def run():
     assert picked.animate is not None, "差分切换应有过渡"
 
     snapshot = app.composed_img
+    kept_sel = app.selected_filename
+    kept_base_src = app.base_image.src
     await app._toggle_theme(None)
     assert app.is_dark is True
+    # 重建树时"单动作服装展开即选中"不能触发，否则底图会被悄悄换成别的
+    assert app.selected_filename == kept_sel, "换主题后选中的动作变了"
+    assert app.base_image.src == kept_base_src, "换主题后底图被换成了另一张"
     assert app.tree_list.controls[0].controls[1].visible is True, "换主题把已展开的角色收起了"
     assert app.tree_list.controls[0].controls[1].controls[0].controls[1].visible is True, \
         "换主题把已展开的服装收起了"
@@ -291,6 +303,22 @@ async def run():
     assert app.save_btn.disabled is False and app.batch_btn.disabled is False, \
         "换主题后导出按钮被禁用"
     await app._toggle_theme(None)
+
+    # 方向键：列表项/按钮点过之后会持有焦点，e.control 不为空是常态而不是"在打字"，
+    # 拿它当"焦点被占用"判断会把 ←/→ 全吞掉，帧切换直接失效。
+    class _Key:
+        def __init__(self, key, control=None):
+            self.key = key
+            self.control = control
+            self.ctrl = False
+
+    if len(app.base_imgs) > 1:
+        before = app.base_idx
+        await app._on_keyboard(_Key("Right", control=object()))
+        assert app.base_idx != before, "控件持有焦点时方向键切不了帧"
+        await app._on_keyboard(_Key("Left", control=object()))
+        assert app.base_idx == before, "往回切没恢复"
+
     assert app.is_dark is False and app.composed_img is snapshot
 
     # 导入 / 导出各自记目录：选完导出目录后，再开 bin 不能被带去导出那边

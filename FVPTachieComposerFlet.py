@@ -11,13 +11,12 @@ import asyncio
 import base64
 import io
 import os
-import random
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import flet as ft
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from FVPTachieComposer import (
     compose_preview,
@@ -85,15 +84,11 @@ def pick_drop_path(paths):
 def _palette(dark):
     if dark:
         return {
-            # 和纸（墨纸）+ 琉璃：纸底是暖的，玻璃片是冷的，两层必须能看出是两种材质
-            "page": "#101319",
-            "fiber": "#5a6478",
-            "panel": "#171d26",
-            "panel_glass": "#121722",
-            "glass_hi": "#2f3a4a",
-            "stage": "#0b0e13",
-            "line": "#252d39",
-            "line_soft": "#1c232d",
+            "page": "#101318",
+            "panel": "#1a1e25",
+            "stage": "#0d1014",
+            "line": "#282e38",
+            "line_soft": "#1f242c",
             "text": "#e9edf5",
             "text_dim": "#8e9aae",
             "accent": "#7aa6ff",
@@ -103,33 +98,30 @@ def _palette(dark):
             "sel": "#22334f",
             "badge_bg": "#232c3a",
             "badge_fg": "#b7c3d8",
-            "checker_a": "#151b23",
-            "checker_b": "#10151c",
+            "checker_a": "#171c22",
+            "checker_b": "#12161b",
             "ok_bg": "#1e2b45",
             "ok_fg": "#c8daff",
             "err_bg": "#3a1d24",
             "err_fg": "#ffc9d2",
         }
     return {
-        "page": "#eae6dc",
-        "fiber": "#8b8069",
-        "panel": "#fafbfd",
-        "panel_glass": "#eef1f8",
-        "glass_hi": "#ffffff",
-        "stage": "#f4f6fc",
-        "line": "#d7dbe6",
-        "line_soft": "#e6e9f2",
+        "page": "#eff1f4",
+        "panel": "#ffffff",
+        "stage": "#f6f7f9",
+        "line": "#dfe2e8",
+        "line_soft": "#eceef2",
         "text": "#1b2130",
         "text_dim": "#6b7488",
         "accent": "#3f6ee0",
-        "accent_soft": "#e4ecfd",
-        "chip": "#eef1f9",
-        "hover": "#eef1f8",
-        "sel": "#dde7fd",
+        "accent_soft": "#e8f0fe",
+        "chip": "#f1f3f7",
+        "hover": "#f2f4f8",
+        "sel": "#e3ecfb",
         "badge_bg": "#ffffff",
         "badge_fg": "#5b6780",
-        "checker_a": "#f1f3fa",
-        "checker_b": "#e5e9f4",
+        "checker_a": "#f2f4f7",
+        "checker_b": "#e7eaef",
         "ok_bg": "#e4ecfd",
         "ok_fg": "#2a4f9e",
         "err_bg": "#fbe3e7",
@@ -150,28 +142,6 @@ def _checker_src(a, b, cell=11):
     img.putpixel((1, 0), _rgb(b))
     img.putpixel((0, 1), _rgb(b))
     img = img.resize((cell * 2, cell * 2), Image.Resampling.NEAREST)
-    return _img_src(img)
-
-
-def _washi_src(fiber, size=180, seed=11):
-    """和纸底纹：随机短纤维 + 细颗粒，平铺在页面最底层。
-
-    面板压在纸上是半透的琉璃片，纸纹只从栏缝和页边透出来——
-    这两种材质的对比就是"和纸/琉璃"这套语言唯一被看见的地方。
-    """
-    r, g, b = _rgb(fiber)
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    rnd = random.Random(seed)
-    for _ in range(300):
-        x, y = rnd.randrange(size), rnd.randrange(size)
-        ln = rnd.randint(5, 17)
-        x2 = x + ln * rnd.uniform(-1, 1)
-        y2 = y + ln * rnd.uniform(-0.4, 0.4)
-        d.line([x, y, x2, y2], fill=(r, g, b, rnd.randint(10, 30)), width=1)
-    for _ in range(1500):
-        d.point((rnd.randrange(size), rnd.randrange(size)),
-                fill=(r, g, b, rnd.randint(7, 20)))
     return _img_src(img)
 
 
@@ -270,6 +240,8 @@ class ComposerApp:
         self.open_roles = set()
         self.open_outfits = set()
         self._tree_toggles = {}
+        # 重建树期间屏蔽"展开即选中"等级联副作用，见 _outfit_tile.toggle
+        self._restoring = False
         # 树里所有动作行的选中态控件组；换选时按 filename 统一复原，不记"上一次点了谁"。
         self._action_rows = []
 
@@ -310,7 +282,6 @@ class ComposerApp:
         p = self.page
         self.ink = _palette(self.is_dark)
         self._checker = _checker_src(self.ink["checker_a"], self.ink["checker_b"])
-        self._washi = _washi_src(self.ink["fiber"])
         theme = ft.Theme(
             color_scheme_seed=self.ink["accent"],
             use_material3=True,
@@ -334,27 +305,18 @@ class ComposerApp:
     # ── 通用小构件 ──────────────────────────────────────────
 
     def _panel(self, controls, *, width=None, expand=False, pad_right=6):
-        """琉璃片：上沿一道高光、自上而下微微变暗的渐变，压在纸底上才有厚度感。
-        不用 Material 阴影——三栏工具界面里阴影只会让边界变糊。"""
+        """面板：白卡片压在浅灰页底上，靠 1px 细描边分栏。
+
+        这里刻意不用渐变、纹理和阴影——工具界面要的是边界清楚，
+        材质效果只会让三栏看起来糊在一起。
+        """
         ink = self.ink
         return ft.Container(
             content=ft.Column(controls, spacing=10, expand=True),
             width=width,
             expand=expand,
-            gradient=ft.LinearGradient(
-                begin=ft.Alignment.TOP_CENTER,
-                end=ft.Alignment.BOTTOM_CENTER,
-                # 半透明才有"压在纸上的玻璃片"这层意思：不透明就等于把和纸删了，
-                # 只剩两块颜色打架的色块。
-                colors=[ft.Colors.with_opacity(0.86, ink["panel"]),
-                        ft.Colors.with_opacity(0.76, ink["panel_glass"])],
-            ),
-            border=ft.Border.only(
-                top=ft.BorderSide(1, ink["glass_hi"]),
-                left=ft.BorderSide(1, ink["line"]),
-                right=ft.BorderSide(1, ink["line"]),
-                bottom=ft.BorderSide(1, ink["line"]),
-            ),
+            bgcolor=ink["panel"],
+            border=ft.Border.all(1, ink["line"]),
             border_radius=RADIUS_PANEL,
             padding=ft.Padding.only(left=12, top=10, right=pad_right, bottom=10),
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
@@ -378,7 +340,7 @@ class ComposerApp:
 
     def _stage(self, content):
         """图像舞台：圆角 + 描边 + 棋盘底，并把溢出裁在自己的框里，
-        预览图永远不会糊到相邻区块上。上沿那道高光是琉璃片的受光边。"""
+        预览图永远不会糊到相邻区块上。"""
         ink = self.ink
         return ft.Container(
             content=content,
@@ -386,12 +348,7 @@ class ComposerApp:
             bgcolor=ink["stage"],
             image=ft.DecorationImage(src=self._checker, fit=ft.BoxFit.NONE,
                                      repeat=ft.ImageRepeat.REPEAT, opacity=0.85),
-            border=ft.Border.only(
-                top=ft.BorderSide(1, ink["glass_hi"]),
-                left=ft.BorderSide(1, ink["line_soft"]),
-                right=ft.BorderSide(1, ink["line_soft"]),
-                bottom=ft.BorderSide(1, ink["line_soft"]),
-            ),
+            border=ft.Border.all(1, ink["line_soft"]),
             border_radius=RADIUS_STAGE,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         )
@@ -459,12 +416,6 @@ class ComposerApp:
         )
 
         root = ft.Column([self.title_bar, body, status_bar], spacing=0, expand=True)
-        washi = ft.Container(
-            expand=True,
-            bgcolor=self.ink["page"],
-            image=ft.DecorationImage(src=self._washi, fit=ft.BoxFit.NONE,
-                                     repeat=ft.ImageRepeat.REPEAT),
-        )
         self.drop_hint = ft.Container(
             visible=False,
             content=ft.Container(
@@ -488,7 +439,7 @@ class ComposerApp:
             left=0, right=0, top=0, bottom=0,
         )
         p.add(self._drop_wrap(
-            ft.Stack([washi, root, self.drop_hint], expand=True, fit=ft.StackFit.EXPAND)
+            ft.Stack([root, self.drop_hint], expand=True, fit=ft.StackFit.EXPAND)
         ))
         p.update()
 
@@ -582,7 +533,7 @@ class ComposerApp:
             ),
             height=46,
             padding=ft.Padding.only(left=14, right=8, top=0, bottom=0),
-            bgcolor=ft.Colors.with_opacity(0.82, ink["panel"]),
+            bgcolor=ink["panel"],
             border=ft.Border.only(bottom=ft.BorderSide(1, ink["line"])),
         )
         return ft.WindowDragArea(bar, maximizable=True)
@@ -886,8 +837,13 @@ class ComposerApp:
         self.page.clean()
         self._build()
         if self.input_file:
-            self._render_tree()
-            self._restore_tree_state()
+            self._restoring = True
+            try:
+                self._render_tree()
+                self._restore_tree_state()
+            finally:
+                self._restoring = False
+            self._sync_selected_row()
             self._restore_preview()
             self.status_text.value = f"已加载 {Path(self.input_file).name}"
         self.page.update()
@@ -1015,7 +971,8 @@ class ComposerApp:
                 allow_multiple=False,
                 initial_directory=self.import_dir,
             )
-        except Exception:
+        except Exception as ex:
+            self._snack(f"打开文件对话框失败: {ex}", error=True)
             return
         if not result:
             return
@@ -1030,7 +987,8 @@ class ComposerApp:
                 dialog_title="选择包含 HZC 文件的文件夹",
                 initial_directory=self.import_dir,
             )
-        except Exception:
+        except Exception as ex:
+            self._snack(f"打开文件夹对话框失败: {ex}", error=True)
             return
         if not result:
             return
@@ -1371,7 +1329,9 @@ class ComposerApp:
             if state["open"]:
                 if action_pending:
                     self._flush_tasks(action_pending)
-                if len(action_tiles) == 1:
+                # 单动作服装展开即选中是省一步操作；换主题重建树时不能触发，
+                # 否则会把用户真正选着的那张底图悄悄换掉。
+                if len(action_tiles) == 1 and not self._restoring:
                     tile, info = action_tiles[0]
                     if self.selected_filename != info.get("filename"):
                         self._select_action(info)
@@ -1689,8 +1649,11 @@ class ComposerApp:
             except Exception:
                 pass
             return
-        if getattr(e, "control", None) is not None:
-            return  # 焦点在输入控件上，不抢键
+        # 只让真正在打字的控件抢走按键。列表项/按钮点过之后也会持有焦点，
+        # 拿 control 是否为空判断会把 ←/→ 全吞掉，导致切不了帧。
+        owner = getattr(e, "control", None)
+        if type(owner).__name__ in ("TextField", "SearchBar", "Autocomplete"):
+            return
         if key in ("left", "right") and len(self.base_imgs) > 1:
             (self._prev_frame if key == "left" else self._next_frame)(None)
         elif key == "0":
@@ -1714,7 +1677,8 @@ class ComposerApp:
                 dialog_title="保存当前合成图像", file_name=name,
                 initial_directory=self.export_dir,
             )
-        except Exception:
+        except Exception as ex:
+            self._snack(f"保存对话框失败: {ex}", error=True)
             return
         if not result:
             return
@@ -1738,7 +1702,8 @@ class ComposerApp:
                 dialog_title="选择导出目录",
                 initial_directory=self.export_dir,
             )
-        except Exception:
+        except Exception as ex:
+            self._snack(f"导出对话框失败: {ex}", error=True)
             return
         if not result:
             return
