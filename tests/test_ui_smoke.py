@@ -281,6 +281,11 @@ async def run():
     picked = app.thumb_list.controls[kept_idx]
     assert picked.border.top.color == app.ink["accent"], "选中的差分没有描边提示"
     assert picked.animate is not None, "差分切换应有过渡"
+    # 过渡只许动颜色：差分条/树行会随窗口改宽度，几何一起动就等于拉伸时整条闪
+    assert picked.animate_size is False and picked.animate_position is False, \
+        "缩略图不该把 size/position 也做成隐式动画"
+    assert hl.animate_size is False and hl.animate_position is False, \
+        "树行不该把 size/position 也做成隐式动画"
 
     snapshot = app.composed_img
     kept_sel = app.selected_filename
