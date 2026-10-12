@@ -15,12 +15,20 @@ import flet as ft
 
 from FVPTachieComposerFlet import ComposerApp, _is_expr
 
-BIN_PATH = r"D:\soft\你朱眸里的五彩世界\graph_bs.bin"
+def _bin_path() -> str:
+    """测试用 bin 路径：环境变量优先，其次 tests/preview_bin.txt（本机路径不入库）。"""
+    env = os.environ.get("FVP_PREVIEW_BIN")
+    if env:
+        return env
+    local = Path(__file__).resolve().parent / "preview_bin.txt"
+    if local.exists():
+        return local.read_text(encoding="utf-8").strip()
+    raise SystemExit("缺少 bin 路径：设 FVP_PREVIEW_BIN 或写 tests/preview_bin.txt")
 
 
 async def main(page: ft.Page):
     app = ComposerApp(page)
-    await app._load_bin(BIN_PATH)
+    await app._load_bin(_bin_path())
     await asyncio.sleep(0.8)
 
     role_col = app.tree_list.controls[0]

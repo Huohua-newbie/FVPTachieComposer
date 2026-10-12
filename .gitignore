@@ -11,3 +11,7 @@ dist/
 
 # 入库的正式构建 spec 不忽略
 !FVPTachieComposer.win.spec
+
+# 本机真机预览用的资源路径与截图，不入库
+tests/preview_bin.txt
+tests/image_*.png

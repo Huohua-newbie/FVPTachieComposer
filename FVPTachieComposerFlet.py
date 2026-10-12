@@ -194,6 +194,11 @@ class ComposerApp:
         self.composed_img = None
         self.thumb_refs = []
         self.role_thumb_cache = {}
+        # 树的展开状态记在 app 上而不是 tile 闭包里，
+        # 这样换主题整树重建后能原样展开回去（否则用户展开的角色/服装会被强制收起）。
+        self.open_roles = set()
+        self.open_outfits = set()
+        self._tree_toggles = {}
 
         # UI 事件循环引用（_load_bin/_toggle_theme 中捕获）：
         # 后台缩略图解码完成后，经由它把“替换+刷新”调度回 UI 线程执行，
@@ -203,6 +208,10 @@ class ComposerApp:
         self.file_picker = ft.FilePicker()
         self.clipboard = ft.Clipboard()
         self.page.services = [self.file_picker, self.clipboard]
+        # 导入/导出各自记住自己的目录：Windows 原生对话框按进程记忆最后位置，
+        # 不分别传 initial_directory 的话，导出一选完，下次打开 bin 就被带去导出目录。
+        self.import_dir = None
+        self.export_dir = None
         self._snack_seq = 0
         self._snack_overlay = None
         self._setup_page()
@@ -724,13 +733,13 @@ class ComposerApp:
         self._capture_loop()
         self.is_dark = not self.is_dark
         self.selected_action_ctrl = None
-        self.page.clean()
         self._apply_theme()
+        self.page.clean()
         self._build()
         if self.input_file:
             self._render_tree()
-            if self.selected_info:
-                self._load_base(self.selected_info)
+            self._restore_tree_state()
+            self._restore_preview()
             self.status_text.value = f"已加载 {Path(self.input_file).name}"
         self.page.update()
 
@@ -855,6 +864,7 @@ class ComposerApp:
                 file_type=ft.FilePickerFileType.CUSTOM,
                 allowed_extensions=["bin"],
                 allow_multiple=False,
+                initial_directory=self.import_dir,
             )
         except Exception:
             return
@@ -867,7 +877,10 @@ class ComposerApp:
 
     async def _open_dir(self, e):
         try:
-            result = await self.file_picker.get_directory_path(dialog_title="选择包含 HZC 文件的文件夹")
+            result = await self.file_picker.get_directory_path(
+                dialog_title="选择包含 HZC 文件的文件夹",
+                initial_directory=self.import_dir,
+            )
         except Exception:
             return
         if not result:
@@ -876,6 +889,8 @@ class ComposerApp:
 
     async def _load_bin(self, path):
         self._capture_loop()
+        src = Path(path)
+        self.import_dir = str(src if src.is_dir() else src.parent)
         self._set_status("正在解析…")
 
         def work():
@@ -925,6 +940,8 @@ class ComposerApp:
         self.part_info = None
         self.composed_img = None
         self.thumb_refs = []
+        self.open_roles = set()
+        self.open_outfits = set()
         self.base_image.src = TRANSPARENT
         self.result_image.src = TRANSPARENT
         self.base_hint.visible = True
@@ -945,11 +962,46 @@ class ComposerApp:
 
     def _render_tree(self):
         self.tree_list.controls.clear()
+        self._tree_toggles = {}
         for role, outfits in sorted(self.hierarchy.items()):
             self.tree_list.controls.append(self._role_tile(role, outfits))
         self.tree_list.visible = True
         self.empty_hint.visible = False
         self.page.update()
+
+    def _restore_tree_state(self):
+        """按记录重新展开角色/服装（角色先开，服装的 toggle 才存在）。"""
+        for kind, names, key_of in (("role", self.open_roles, lambda n: ("role", n)),
+                                    ("outfit", self.open_outfits, lambda n: ("outfit", n))):
+            for name in list(names):
+                entry = self._tree_toggles.get(key_of(name))
+                if entry is None:
+                    continue
+                state, tog = entry
+                if not state["open"]:
+                    tog(None)
+
+    def _restore_preview(self):
+        """换主题后按缓存的 PIL 图重建预览：不重新读盘，也不重置帧号/差分选择。"""
+        if self.base_imgs:
+            self._show_base_frame()
+        if self.part_imgs:
+            self.thumb_refs = []
+            self.thumb_list.controls.clear()
+            for idx, img in enumerate(self.part_imgs):
+                self.thumb_list.controls.append(self._make_thumb(img, idx))
+            self.part_count.value = f"{len(self.part_imgs)} 帧"
+            self.part_hint.visible = False
+            self.thumb_list.visible = True
+        if self.composed_img is not None and self.part_info:
+            self.result_image.src = _img_src(self.composed_img)
+            self.result_hint.visible = False
+            ox = self.part_info.get("offset_x", 0)
+            oy = self.part_info.get("offset_y", 0)
+            self.result_meta.value = (f"{self.composed_img.size[0]}×"
+                                      f"{self.composed_img.size[1]} · 偏移 {ox:+d}/{oy:+d}")
+            self.save_btn.disabled = False
+            self.batch_btn.disabled = False
 
     def _make_chevron(self, size=16):
         """带旋转方向动画的展开箭头：收起朝右，展开旋转为朝下。"""
@@ -978,11 +1030,16 @@ class ComposerApp:
 
         body = ft.Column(spacing=0, visible=False)
         for outfit, infos in sorted(outfits.items()):
-            body.controls.append(self._outfit_tile(outfit, infos, header_registry=header_pending,
+            body.controls.append(self._outfit_tile(outfit, infos, role=role,
+                                                   header_registry=header_pending,
                                                    _expand_box=child_toggles))
 
         def toggle(e):
             state["open"] = not state["open"]
+            if state["open"]:
+                self.open_roles.add(role)
+            else:
+                self.open_roles.discard(role)
             body.visible = state["open"]
             self._set_chevron(chevron, state["open"], 16)
             if state["open"]:
@@ -995,6 +1052,8 @@ class ComposerApp:
             body.update()
             chevron.update()
             self._set_tile_bg(header, state["open"])
+
+        self._tree_toggles[("role", role)] = (state, toggle)
 
         thumb_widget = self._get_role_thumbnail(role, outfits)
 
@@ -1133,8 +1192,9 @@ class ComposerApp:
             registry.append(task)
         return placeholder
 
-    def _outfit_tile(self, outfit, infos, header_registry=None, _expand_box=None):
+    def _outfit_tile(self, outfit, infos, role="", header_registry=None, _expand_box=None):
         state = {"open": False}
+        outfit_key = f"{role}/{outfit}"
         chevron = self._make_chevron(14)
         action_pending = []
         action_tiles = []
@@ -1152,6 +1212,10 @@ class ComposerApp:
 
         def toggle(e):
             state["open"] = not state["open"]
+            if state["open"]:
+                self.open_outfits.add(outfit_key)
+            else:
+                self.open_outfits.discard(outfit_key)
             body.visible = state["open"]
             self._set_chevron(chevron, state["open"], 14)
             if state["open"]:
@@ -1164,6 +1228,8 @@ class ComposerApp:
             body.update()
             chevron.update()
             self._set_tile_bg(header, state["open"])
+
+        self._tree_toggles[("outfit", outfit_key)] = (state, toggle)
         if _expand_box is not None:
             _expand_box.append((toggle, body))
 
@@ -1448,11 +1514,15 @@ class ComposerApp:
             return
         name = f"{self.selected_info['filename']}_diff_{self.part_idx:03d}.png"
         try:
-            result = await self.file_picker.save_file(dialog_title="保存当前合成图像", file_name=name)
+            result = await self.file_picker.save_file(
+                dialog_title="保存当前合成图像", file_name=name,
+                initial_directory=self.export_dir,
+            )
         except Exception:
             return
         if not result:
             return
+        self.export_dir = str(Path(result).parent)
         try:
             self.composed_img.save(result, "PNG")
             self._snack(f"已保存: {Path(result).name}", folder=str(Path(result).parent))
@@ -1468,12 +1538,16 @@ class ComposerApp:
             self._snack("底图为空", error=True)
             return
         try:
-            result = await self.file_picker.get_directory_path(dialog_title="选择导出目录")
+            result = await self.file_picker.get_directory_path(
+                dialog_title="选择导出目录",
+                initial_directory=self.export_dir,
+            )
         except Exception:
             return
         if not result:
             return
         save_dir = str(result)
+        self.export_dir = save_dir
         self._set_status("正在批量导出…")
 
         base = self.base_imgs[0]

@@ -203,6 +203,51 @@ async def run():
     tile_src = app.thumb_list.controls[0].content.src
     assert isinstance(tile_src, str), "差分缩略图 src 必须是字符串"
 
+    # 换主题必须保留现场：展开的角色/服装、选中的差分、底图与合成预览
+    app._pick_part(min(2, len(app.part_imgs) - 1))
+    kept_idx = app.part_idx
+    snapshot = app.composed_img
+    await app._toggle_theme(None)
+    assert app.is_dark is True
+    assert app.tree_list.controls[0].controls[1].visible is True, "换主题把已展开的角色收起了"
+    assert app.tree_list.controls[0].controls[1].controls[0].controls[1].visible is True, \
+        "换主题把已展开的服装收起了"
+    assert app.part_idx == kept_idx, "换主题后选中的差分帧被重置"
+    assert app.composed_img is snapshot, "换主题重新读盘重算了（应复用缓存）"
+    assert len(app.thumb_list.controls) == len(app.part_imgs), "换主题后差分条没重建"
+    for name in ("base_image", "result_image"):
+        src = getattr(app, name).src
+        assert isinstance(src, str) and src.startswith("data:image/"), \
+            f"换主题后 {name}.src 丢了，预览区会空"
+    assert app.save_btn.disabled is False and app.batch_btn.disabled is False, \
+        "换主题后导出按钮被禁用"
+    await app._toggle_theme(None)
+    assert app.is_dark is False and app.composed_img is snapshot
+
+    # 导入 / 导出各自记目录：选完导出目录后，再开 bin 不能被带去导出那边
+    seen = {}
+
+    async def fake_pick(**kw):
+        seen["import"] = kw.get("initial_directory")
+        return None
+
+    async def fake_save(**kw):
+        seen["export"] = kw.get("initial_directory")
+        return str(tmp / "export" / "one.png")
+
+    app.file_picker.pick_files = fake_pick
+    app.file_picker.save_file = fake_save
+    (tmp / "export").mkdir(exist_ok=True)
+    await app._open_bin(None)
+    await app._save_current(None)
+    assert seen["import"] == str(tmp), f"导入对话框初始目录不对: {seen['import']}"
+    assert seen["export"] is None, f"导出对话框被导入目录污染: {seen['export']}"
+    assert app.export_dir == str(tmp / "export"), app.export_dir
+    assert app.import_dir == str(tmp), "导出动作改写了导入记忆目录"
+    seen.clear()
+    await app._open_bin(None)
+    assert seen["import"] == str(tmp), "导出之后导入对话框的初始目录被带跑"
+
     # 帧导航 / 部件切换 / 缩放复位
     if len(app.base_imgs) > 1:
         app._next_frame(None)
