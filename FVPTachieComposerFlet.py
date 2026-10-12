@@ -242,6 +242,8 @@ class ComposerApp:
         self._tree_toggles = {}
         # 重建树期间屏蔽"展开即选中"等级联副作用，见 _outfit_tile.toggle
         self._restoring = False
+        # 拖放提示层当前是否显示（动画分两帧走，见 _show_drop_hint）
+        self._drop_hint_shown = False
         # 树里所有动作行的选中态控件组；换选时按 filename 统一复原，不记"上一次点了谁"。
         self._action_rows = []
 
@@ -418,6 +420,8 @@ class ComposerApp:
         root = ft.Column([self.title_bar, body, status_bar], spacing=0, expand=True)
         self.drop_hint = ft.Container(
             visible=False,
+            opacity=0.0,
+            animate=ft.Animation(ANIM_ROW, ft.AnimationCurve.EASE_OUT),
             content=ft.Container(
                 ft.Column(
                     [
@@ -433,8 +437,10 @@ class ComposerApp:
                 border_radius=RADIUS_PANEL,
                 bgcolor=self.ink["panel"],
                 border=ft.Border.all(2, self.ink["accent"]),
+                scale=0.92,
+                animate=ft.Animation(ANIM_ROW, ft.AnimationCurve.EASE_OUT),
             ),
-            bgcolor="#33000000",
+            bgcolor="#40000000",
             alignment=ft.Alignment.CENTER,
             left=0, right=0, top=0, bottom=0,
         )
@@ -455,9 +461,42 @@ class ComposerApp:
         )
 
     def _show_drop_hint(self, on):
-        self.drop_hint.visible = bool(on)
+        """淡入/淡出拖放提示层。
+
+        visible 和 opacity 必须分两帧改：同一帧里既插入又改属性，Flutter 只会
+        按最终状态建成控件，动画没有起点，看着就是"啪"地弹出来。
+        visible 也不能一直留着——这层铺满整扇窗口，隐藏时还会吃掉所有点击。
+        """
+        hint = self.drop_hint
+        if bool(on) == self._drop_hint_shown:
+            return
+        self._drop_hint_shown = bool(on)
+        if on:
+            hint.visible = True
+            self._safe_update(hint)
+            if not self._later(0.02, self._set_drop_hint_alpha, True):
+                self._set_drop_hint_alpha(True)
+        else:
+            self._set_drop_hint_alpha(False)
+            if not self._later(ANIM_ROW / 1000 + 0.03, self._hide_drop_hint):
+                self._hide_drop_hint()
+
+    def _set_drop_hint_alpha(self, on):
+        if self._drop_hint_shown != bool(on):
+            return
+        hint = self.drop_hint
+        hint.opacity = 1.0 if on else 0.0
+        hint.content.scale = 1.0 if on else 0.92
+        self._safe_update(hint)
+
+    def _hide_drop_hint(self):
+        if not self._drop_hint_shown:
+            self.drop_hint.visible = False
+            self._safe_update(self.drop_hint)
+
+    def _safe_update(self, control):
         try:
-            self.drop_hint.update()
+            control.update()
         except Exception:
             pass
 
@@ -491,7 +530,10 @@ class ComposerApp:
         )
 
         self.file_chip = ft.Container(
-            content=ft.Text("未载入文件", size=11, color=ink["text_dim"],
+            # 标题栏随主题重建，初值必须从当前状态推导，
+            # 否则切一次主题就把已加载的文件名刷回"未载入文件"。
+            content=ft.Text(Path(self.input_file).name if self.input_file else "未载入文件",
+                            size=11, color=ink["text_dim"],
                             max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
             padding=ft.Padding.only(left=10, right=10, top=3, bottom=3),
             border_radius=99,
@@ -561,20 +603,11 @@ class ComposerApp:
                         alignment=ft.Alignment.CENTER,
                     ),
                     ft.Text("尚未加载文件", size=13, weight=ft.FontWeight.W_600, color=ink["text"]),
-                    ft.Text("选择一个 .bin 或 HZC 文件夹开始", size=11,
-                            color=ink["text_dim"], text_align=ft.TextAlign.CENTER),
-                    ft.Container(height=4),
-                    ft.FilledButton("打开 BIN", icon=ft.Icons.FOLDER_OPEN, on_click=self._open_bin,
-                                    style=ft.ButtonStyle(
-                                        bgcolor=ink["accent"], color="#ffffff",
-                                        padding=ft.Padding.symmetric(horizontal=16, vertical=10),
-                                        shape=ft.RoundedRectangleBorder(radius=10))),
-                    ft.OutlinedButton("HZC 文件夹", icon=ft.Icons.FOLDER, on_click=self._open_dir,
-                                      style=ft.ButtonStyle(
-                                          color=ink["text_dim"],
-                                          side=ft.BorderSide(1, ink["line"]),
-                                          padding=ft.Padding.symmetric(horizontal=16, vertical=8),
-                                          shape=ft.RoundedRectangleBorder(radius=10))),
+                    # 载入入口只留标题栏那两个图标，空状态不再重复一套按钮，
+                    # 这里只负责告诉用户去哪儿找。
+                    ft.Text("点右上角的 打开 BIN / 打开 HZC 图标\n或按 Ctrl+O 选择文件",
+                            size=11, color=ink["text_dim"],
+                            text_align=ft.TextAlign.CENTER),
                 ],
                 spacing=8,
                 tight=True,
@@ -729,10 +762,13 @@ class ComposerApp:
                                            expand=True, fit=ft.StackFit.EXPAND))
         self.result_meta = self._meta()
 
-        self.save_btn = ft.FilledButton(
+        # 主按钮用"淡底+蓝字"的 tonal，不用实心蓝块：
+        # 整窗是白卡片压浅灰底，一个饱和色大块会把视线从立绘上抢走。
+        self.save_btn = ft.FilledTonalButton(
             "保存当前", icon=ft.Icons.SAVE_ALT, on_click=self._save_current, disabled=True,
             tooltip=_tip("导出这一张 PNG (Ctrl+S)"),
-            style=ft.ButtonStyle(bgcolor=ink["accent"], color="#ffffff",
+            style=ft.ButtonStyle(bgcolor=ink["accent_soft"], color=ink["ok_fg"],
+                                 elevation=0,
                                  padding=ft.Padding.symmetric(horizontal=12, vertical=10),
                                  shape=ft.RoundedRectangleBorder(radius=10)),
             expand=True,
@@ -740,7 +776,9 @@ class ComposerApp:
         self.batch_btn = ft.OutlinedButton(
             "批量导出", icon=ft.Icons.DOWNLOAD, on_click=self._batch_export, disabled=True,
             tooltip=_tip("把该底图的全部差分铺平成 PNG"),
-            style=ft.ButtonStyle(color=ink["text_dim"], side=ft.BorderSide(1, ink["line"]),
+            style=ft.ButtonStyle(color=ink["text"], bgcolor=ink["panel"],
+                                 side=ft.BorderSide(1, ink["line"]),
+                                 elevation=0,
                                  padding=ft.Padding.symmetric(horizontal=12, vertical=9),
                                  shape=ft.RoundedRectangleBorder(radius=10)),
             expand=True,

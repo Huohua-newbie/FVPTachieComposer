@@ -218,6 +218,15 @@ async def run():
                     and getattr(c, "border_radius", None) is None]
     assert not bare_texture, "页面底层不该再铺满纹理"
 
+    # 载入入口只留一套（角色库标题栏的两个图标）。空状态再摆一排按钮既是
+    # 重复控件，实心 accent 大色块也和白卡片打架。
+    from flet.controls.material.button import Button as _Button
+    empty_btns = [c for c in _walk(app.empty_hint) if isinstance(c, _Button)]
+    assert not empty_btns, f"空状态里还有 {len(empty_btns)} 个重复的载入按钮"
+    solid = [c for c in nodes if isinstance(c, _Button)
+             and c.style is not None and c.style.bgcolor == app.ink["accent"]]
+    assert not solid, f"还有实心 accent 大按钮: {[c.data for c in solid]}"
+
     # 展开到动作层并选中，跑完 底图 → 差分 → 合成 全链路
     role_col = app.tree_list.controls[0]
     role_header, role_body = role_col.controls[0], role_col.controls[1]
@@ -307,7 +316,23 @@ async def run():
             f"换主题后 {name}.src 丢了，预览区会空"
     assert app.save_btn.disabled is False and app.batch_btn.disabled is False, \
         "换主题后导出按钮被禁用"
+    # 标题栏的文件名胶囊随主题重建，初值必须从 input_file 推导，
+    # 否则切一次主题就显示"未载入文件"，看着像整个状态被清空。
+    assert app.file_chip.content.value == Path(app.input_file).name, \
+        "换主题后标题栏文件名胶囊丢了"
     await app._toggle_theme(None)
+
+    # 拖放提示层：这层铺满整扇窗口，隐藏时必须真的 visible=False，
+    # 否则它会一直吃掉所有点击；显示/隐藏中间要有透明度变化，不然没有入场动画。
+    app._show_drop_hint(True)
+    assert app.drop_hint.visible is True, "拖放提示没显示"
+    await asyncio.sleep(0.05)          # visible 先落一帧，淡入才有起点
+    assert app.drop_hint.opacity == 1.0 and app.drop_hint.content.scale == 1.0, \
+        "拖放提示没走到最终态"
+    app._show_drop_hint(False)
+    assert app.drop_hint.opacity == 0.0, "拖放提示没淡出"
+    await asyncio.sleep(0.3)           # 淡出走完才收回
+    assert app.drop_hint.visible is False, "拖放提示隐藏后还在吃点击"
 
     # 方向键：列表项/按钮点过之后会持有焦点，e.control 不为空是常态而不是"在打字"，
     # 拿它当"焦点被占用"判断会把 ←/→ 全吞掉，帧切换直接失效。
