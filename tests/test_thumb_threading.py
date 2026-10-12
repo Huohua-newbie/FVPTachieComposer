@@ -82,9 +82,26 @@ class FakeImage:
         return (1, 2, 3, 255)
 
 
+class FakeDraw:
+    """和纸纹理用的绘图 stub：只要求 line/point 可调，不校验坐标。"""
+
+    def __init__(self, img):
+        self.img = img
+
+    def line(self, *a, **k):
+        return None
+
+    def point(self, *a, **k):
+        return None
+
+
 pil_mod = types.ModuleType("PIL")
 pil_mod.Image = FakeImage
+draw_mod = types.ModuleType("PIL.ImageDraw")
+draw_mod.Draw = FakeDraw
+pil_mod.ImageDraw = draw_mod
 sys.modules["PIL"] = pil_mod
+sys.modules["PIL.ImageDraw"] = draw_mod
 
 # ---------- Fake flet ----------
 class _Any:
@@ -209,7 +226,8 @@ async def main():
     await asyncio.sleep(2.0)
     n_action = 0
     for act in obody.controls:
-        aheader = act  # _action_tile 直接返回 ListTile 本体
+        # _action_tile 返回的是外层行容器：Container → Row[导轨, 高亮 Container] → ListTile
+        aheader = act._kwargs["content"]._args[0][1]._kwargs["content"]
         t = aheader._kwargs["leading"]
         if swapped_src(t):
             n_action += 1
@@ -217,10 +235,11 @@ async def main():
     assert n_action == 2, f"动作缩略图仅 {n_action}/2 完成"
 
     # 4) 点击动作整链路（底图/差分/合成）在 stub 下无异常
-    act_header = obody.controls[0]
-    # _select_action 需要 ctrl.update：fake 自带
-    app._select_action(first_outfit_info(app), act_header)
+    act_row = obody.controls[0]
+    app._select_action(first_outfit_info(app))
     assert app.composed_img is not None, "合成结果为空"
+    assert any(e["filename"] == app.selected_filename for e in app._action_rows), \
+        "行登记表没跟上当前选中项"
 
     # 5) 成功横幅 2 秒后自动消除（事件循环定时器）；失败横幅常驻
     app._snack("ok-test")

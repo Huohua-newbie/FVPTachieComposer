@@ -41,7 +41,7 @@ async def main(page: ft.Page):
 
     action_tile = outfit_body.controls[0]
     base = next(i for i in app.file_infos if not _is_expr(i["filename"]))
-    app._select_action(base, action_tile)
+    app._select_action(base)
     await asyncio.sleep(1.5)
     page.update()
     print(f"PREVIEW_READY roles={len(app.hierarchy)} "

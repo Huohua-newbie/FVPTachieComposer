@@ -189,6 +189,18 @@ async def run():
         if isinstance(c, ft.ListTile) and isinstance(c.trailing, ft.Row):
             assert c.trailing.tight, "ListTile.trailing 的 Row 必须 tight=True"
 
+    # 设计语言落地检查：和纸是页面最底层的纤维纹理，琉璃是压在纸上的渐变玻璃片。
+    # 二者都只是"能看见"才有意义——没有这两条，所谓和纸/琉璃就是文案。
+    washi = [c for c in nodes
+             if getattr(c, "image", None) is not None
+             and c.image.repeat == ft.ImageRepeat.REPEAT
+             and c.image.src == app._washi]
+    assert washi, "页面底层缺少和纸纹理"
+    glass = [c for c in nodes if getattr(c, "gradient", None) is not None]
+    assert len(glass) >= 3, f"面板没有琉璃质感（渐变面板仅 {len(glass)} 个）"
+    for c in glass:
+        assert c.border.top.color == app.ink["glass_hi"], "琉璃片上沿缺高光边"
+
     # 展开到动作层并选中，跑完 底图 → 差分 → 合成 全链路
     role_col = app.tree_list.controls[0]
     role_header, role_body = role_col.controls[0], role_col.controls[1]
@@ -202,11 +214,37 @@ async def run():
     action_tile = outfit_body.controls[0]
     info = next(i for i in app.file_infos
                 if i["filename"] == "CHR_翠_基_私服")
-    app._select_action(info, action_tile)
+
+    # 层级：第三级必须比第二级更深，且带一条导轨线，否则"服装/动作"看着像同级
+    from FVPTachieComposerFlet import INDENT_ACTION, INDENT_OUTFIT
+    assert INDENT_ACTION > INDENT_OUTFIT, "动作层缩进必须大于服装层"
+    assert action_tile.margin.left == INDENT_ACTION
+    assert outfit_header.content_padding.left == INDENT_OUTFIT
+    rail, hl = action_tile.content.controls
+    assert rail.width == 1, "动作层缺少导轨线"
+    assert hl.animate is not None, "动作选中态必须有过渡，不能只是闪一下变色"
+
+    app._select_action(info)
     assert app.base_imgs, "底图未加载"
     assert app.part_imgs, "差分部件未加载"
     assert app.composed_img is not None, "合成结果为空"
     assert app.thumb_list.visible, "缩略图条未显示"
+    # 选中态由 filename 决定，不是"点了哪个控件"——所以断言要按文件名找回那一行
+    sel = next(e for e in app._action_rows if e["filename"] == info["filename"])
+    assert sel["hl"].bgcolor == app.ink["sel"], "选中行没有高亮底色"
+    assert sel["hl"].border.left.color == app.ink["accent"], "选中行没有左侧标记条"
+    assert sel["hl"].content.title.weight == ft.FontWeight.W_700, "选中行标题没有加粗"
+
+    # 选中态互斥：换选后上一行必须整体复原（底色/标记条/字重），不能两行同时亮
+    other = next((e for e in app._action_rows
+                  if e["filename"] != info["filename"]), None)
+    if other is not None:
+        info2 = next(i for i in app.file_infos if i["filename"] == other["filename"])
+        app._select_action(info2)
+        assert other["hl"].bgcolor == app.ink["sel"], "新选中的行没有亮起"
+        assert sel["hl"].bgcolor == "#00000000", "上一行的选中态没被清掉"
+        assert sel["hl"].content.title.weight == ft.FontWeight.W_400, "上一行标题仍是加粗"
+        app._select_action(info)  # 换回来，后面的用例继续用这一张
     # 图像源必须是字符串 data URI：src 给 bytes 只在构造时有效，
     # 之后 `img.src = bytes` 不会被重新编码，客户端当成路径解析 → 预览区空白。
     for name in ("base_image", "result_image"):
@@ -219,6 +257,14 @@ async def run():
     # 换主题必须保留现场：展开的角色/服装、选中的差分、底图与合成预览
     app._pick_part(min(2, len(app.part_imgs) - 1))
     kept_idx = app.part_idx
+
+    # 差分角标只做编号：选中与否都不能变蓝，否则 28 格里有一格在抢画面。
+    badges = {t.badge.bgcolor for t in app.thumb_list.controls}
+    assert badges == {app.ink["badge_bg"]}, f"角标颜色被选中态带跑了: {badges}"
+    picked = app.thumb_list.controls[kept_idx]
+    assert picked.border.top.color == app.ink["accent"], "选中的差分没有描边提示"
+    assert picked.animate is not None, "差分切换应有过渡"
+
     snapshot = app.composed_img
     await app._toggle_theme(None)
     assert app.is_dark is True

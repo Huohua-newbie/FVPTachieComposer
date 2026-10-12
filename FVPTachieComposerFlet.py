@@ -11,12 +11,13 @@ import asyncio
 import base64
 import io
 import os
+import random
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import flet as ft
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from FVPTachieComposer import (
     compose_preview,
@@ -40,6 +41,12 @@ THUMB = 104
 PART_STRIP_H = THUMB + GUTTER + 14   # 上沿给序号角标留位，下沿给横向滚动条留槽
 PART_HINT_IDLE = "选择底图后显示差分帧"
 PART_HINT_EMPTY = "该底图没有对应的表情差分"
+
+# 三级树每级递进的缩进量。第三级（动作）必须比第二级（服装）明显更深，
+# 否则"服装 → 动作"读起来像同级，右侧那条导轨就是层级的视觉锚。
+INDENT_OUTFIT = 30
+INDENT_ACTION = 48
+ANIM_ROW = 180
 
 # 拖放是可选能力：OS 级文件拖放必须由 Flutter 客户端里的 desktop_drop 插件承接，
 # 而插件只在 `flet build windows` 产出的自定义客户端里存在——`flet run` 用的
@@ -78,8 +85,12 @@ def pick_drop_path(paths):
 def _palette(dark):
     if dark:
         return {
-            "page": "#0e1116",
-            "panel": "#151a21",
+            # 和纸（墨纸）+ 琉璃：纸底是暖的，玻璃片是冷的，两层必须能看出是两种材质
+            "page": "#101319",
+            "fiber": "#5a6478",
+            "panel": "#171d26",
+            "panel_glass": "#121722",
+            "glass_hi": "#2f3a4a",
             "stage": "#0b0e13",
             "line": "#252d39",
             "line_soft": "#1c232d",
@@ -90,6 +101,8 @@ def _palette(dark):
             "chip": "#1a212b",
             "hover": "#1b222d",
             "sel": "#22334f",
+            "badge_bg": "#232c3a",
+            "badge_fg": "#b7c3d8",
             "checker_a": "#151b23",
             "checker_b": "#10151c",
             "ok_bg": "#1e2b45",
@@ -98,19 +111,23 @@ def _palette(dark):
             "err_fg": "#ffc9d2",
         }
     return {
-        "page": "#eceef5",
-        "panel": "#f9fafd",
+        "page": "#eae6dc",
+        "fiber": "#8b8069",
+        "panel": "#fafbfd",
+        "panel_glass": "#eef1f8",
+        "glass_hi": "#ffffff",
         "stage": "#f4f6fc",
-        "line": "#dcdfec",
-        "line_soft": "#e8ebf4",
+        "line": "#d7dbe6",
+        "line_soft": "#e6e9f2",
         "text": "#1b2130",
-        "text_dim": "#68728a",
+        "text_dim": "#6b7488",
         "accent": "#3f6ee0",
         "accent_soft": "#e4ecfd",
-        "accent_2": "#d8577f",
         "chip": "#eef1f9",
         "hover": "#eef1f8",
         "sel": "#dde7fd",
+        "badge_bg": "#ffffff",
+        "badge_fg": "#5b6780",
         "checker_a": "#f1f3fa",
         "checker_b": "#e5e9f4",
         "ok_bg": "#e4ecfd",
@@ -133,6 +150,28 @@ def _checker_src(a, b, cell=11):
     img.putpixel((1, 0), _rgb(b))
     img.putpixel((0, 1), _rgb(b))
     img = img.resize((cell * 2, cell * 2), Image.Resampling.NEAREST)
+    return _img_src(img)
+
+
+def _washi_src(fiber, size=180, seed=11):
+    """和纸底纹：随机短纤维 + 细颗粒，平铺在页面最底层。
+
+    面板压在纸上是半透的琉璃片，纸纹只从栏缝和页边透出来——
+    这两种材质的对比就是"和纸/琉璃"这套语言唯一被看见的地方。
+    """
+    r, g, b = _rgb(fiber)
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    rnd = random.Random(seed)
+    for _ in range(240):
+        x, y = rnd.randrange(size), rnd.randrange(size)
+        ln = rnd.randint(5, 17)
+        x2 = x + ln * rnd.uniform(-1, 1)
+        y2 = y + ln * rnd.uniform(-0.4, 0.4)
+        d.line([x, y, x2, y2], fill=(r, g, b, rnd.randint(7, 22)), width=1)
+    for _ in range(1300):
+        d.point((rnd.randrange(size), rnd.randrange(size)),
+                fill=(r, g, b, rnd.randint(5, 16)))
     return _img_src(img)
 
 
@@ -217,7 +256,6 @@ class ComposerApp:
         self.hierarchy = {}
         self.selected_info = None
         self.selected_filename = None
-        self.selected_action_ctrl = None
 
         self.base_imgs = []
         self.base_idx = 0
@@ -232,6 +270,8 @@ class ComposerApp:
         self.open_roles = set()
         self.open_outfits = set()
         self._tree_toggles = {}
+        # 树里所有动作行的选中态控件组；换选时按 filename 统一复原，不记"上一次点了谁"。
+        self._action_rows = []
 
         # UI 事件循环引用（_load_bin/_toggle_theme 中捕获）：
         # 后台缩略图解码完成后，经由它把“替换+刷新”调度回 UI 线程执行，
@@ -270,6 +310,7 @@ class ComposerApp:
         p = self.page
         self.ink = _palette(self.is_dark)
         self._checker = _checker_src(self.ink["checker_a"], self.ink["checker_b"])
+        self._washi = _washi_src(self.ink["fiber"])
         theme = ft.Theme(
             color_scheme_seed=self.ink["accent"],
             use_material3=True,
@@ -293,15 +334,24 @@ class ComposerApp:
     # ── 通用小构件 ──────────────────────────────────────────
 
     def _panel(self, controls, *, width=None, expand=False, pad_right=6):
-        """描边式面板：不用 Material 阴影，靠 1px 边线 + 分层底色分区，
-        三栏工具界面里阴影只会让边界变糊。"""
+        """琉璃片：上沿一道高光、自上而下微微变暗的渐变，压在纸底上才有厚度感。
+        不用 Material 阴影——三栏工具界面里阴影只会让边界变糊。"""
         ink = self.ink
         return ft.Container(
             content=ft.Column(controls, spacing=10, expand=True),
             width=width,
             expand=expand,
-            bgcolor=ink["panel"],
-            border=ft.Border.all(1, ink["line"]),
+            gradient=ft.LinearGradient(
+                begin=ft.Alignment.TOP_CENTER,
+                end=ft.Alignment.BOTTOM_CENTER,
+                colors=[ink["panel"], ink["panel_glass"]],
+            ),
+            border=ft.Border.only(
+                top=ft.BorderSide(1, ink["glass_hi"]),
+                left=ft.BorderSide(1, ink["line"]),
+                right=ft.BorderSide(1, ink["line"]),
+                bottom=ft.BorderSide(1, ink["line"]),
+            ),
             border_radius=RADIUS_PANEL,
             padding=ft.Padding.only(left=12, top=10, right=pad_right, bottom=10),
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
@@ -325,7 +375,7 @@ class ComposerApp:
 
     def _stage(self, content):
         """图像舞台：圆角 + 描边 + 棋盘底，并把溢出裁在自己的框里，
-        预览图永远不会糊到相邻区块上。"""
+        预览图永远不会糊到相邻区块上。上沿那道高光是琉璃片的受光边。"""
         ink = self.ink
         return ft.Container(
             content=content,
@@ -333,7 +383,12 @@ class ComposerApp:
             bgcolor=ink["stage"],
             image=ft.DecorationImage(src=self._checker, fit=ft.BoxFit.NONE,
                                      repeat=ft.ImageRepeat.REPEAT, opacity=0.85),
-            border=ft.Border.all(1, ink["line_soft"]),
+            border=ft.Border.only(
+                top=ft.BorderSide(1, ink["glass_hi"]),
+                left=ft.BorderSide(1, ink["line_soft"]),
+                right=ft.BorderSide(1, ink["line_soft"]),
+                bottom=ft.BorderSide(1, ink["line_soft"]),
+            ),
             border_radius=RADIUS_STAGE,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         )
@@ -401,6 +456,12 @@ class ComposerApp:
         )
 
         root = ft.Column([self.title_bar, body, status_bar], spacing=0, expand=True)
+        washi = ft.Container(
+            expand=True,
+            bgcolor=self.ink["page"],
+            image=ft.DecorationImage(src=self._washi, fit=ft.BoxFit.NONE,
+                                     repeat=ft.ImageRepeat.REPEAT),
+        )
         self.drop_hint = ft.Container(
             visible=False,
             content=ft.Container(
@@ -423,7 +484,9 @@ class ComposerApp:
             alignment=ft.Alignment.CENTER,
             left=0, right=0, top=0, bottom=0,
         )
-        p.add(self._drop_wrap(ft.Stack([root, self.drop_hint], expand=True)))
+        p.add(self._drop_wrap(
+            ft.Stack([washi, root, self.drop_hint], expand=True, fit=ft.StackFit.EXPAND)
+        ))
         p.update()
 
     def _drop_wrap(self, content):
@@ -816,7 +879,6 @@ class ComposerApp:
     async def _toggle_theme(self, e):
         self._capture_loop()
         self.is_dark = not self.is_dark
-        self.selected_action_ctrl = None
         self._apply_theme()
         self.page.clean()
         self._build()
@@ -1010,7 +1072,6 @@ class ComposerApp:
         self.hierarchy = hier
         self.selected_info = None
         self.selected_filename = None
-        self.selected_action_ctrl = None
         self._clear_previews()
         self._render_tree()
         hzc = sum(1 for i in infos if i["type"] == "hzc")
@@ -1047,6 +1108,8 @@ class ComposerApp:
     def _render_tree(self):
         self.tree_list.controls.clear()
         self._tree_toggles = {}
+        # 旧行容器已经不在树里了，控件组必须一起丢，否则换选时会去刷废弃控件。
+        self._action_rows = []
         for role, outfits in sorted(self.hierarchy.items()):
             self.tree_list.controls.append(self._role_tile(role, outfits))
         self.tree_list.visible = True
@@ -1308,7 +1371,7 @@ class ComposerApp:
                 if len(action_tiles) == 1:
                     tile, info = action_tiles[0]
                     if self.selected_filename != info.get("filename"):
-                        self._select_action(info, tile)
+                        self._select_action(info)
             body.update()
             chevron.update()
             self._set_tile_bg(header, state["open"])
@@ -1328,7 +1391,7 @@ class ComposerApp:
             subtitle=ft.Text(f"{n_actions} 动作", size=10, color=self.ink["text_dim"]),
             trailing=chevron,
             on_click=toggle,
-            content_padding=ft.Padding.only(left=30, right=2, top=0, bottom=0),
+            content_padding=ft.Padding.only(left=INDENT_OUTFIT, right=2, top=0, bottom=0),
             dense=True,
             min_height=42,
             hover_color=self.ink["hover"],
@@ -1337,43 +1400,85 @@ class ComposerApp:
         return ft.Column([header, body], spacing=0)
 
     def _action_tile(self, name, info, registry=None):
-        selected = info["filename"] == self.selected_filename
+        """第三级：整行往右退到导轨之后，层级关系靠缩进 + 导轨线表达，
+        不靠字号差异（字号再小就看不清了）。"""
+        ink = self.ink
         thumb_widget = self._make_mini_thumb(info, 26, registry=registry)
+        title = ft.Text(name, size=12, color=ink["text_dim"],
+                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+        dot = ft.Container(width=6, height=6, border_radius=3, bgcolor="#00000000")
 
-        c = ft.ListTile(
+        tile = ft.ListTile(
             leading=thumb_widget,
-            title=ft.Text(name, size=12,
-                          weight=ft.FontWeight.W_700 if selected else ft.FontWeight.W_400,
-                          color=self.ink["accent"] if selected else self.ink["text_dim"],
-                          max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-            trailing=ft.Container(width=6, height=6, border_radius=3,
-                                  bgcolor=self.ink["accent"] if selected else "#00000000"),
-            on_click=lambda e: self._select_action(info, c),
-            content_padding=ft.Padding.only(left=30, right=8, top=0, bottom=0),
+            title=title,
+            trailing=dot,
+            on_click=lambda e: self._select_action(info),
+            content_padding=ft.Padding.only(left=8, right=8, top=0, bottom=0),
             dense=True,
             min_height=38,
-            hover_color=self.ink["hover"],
-            bgcolor=self.ink["sel"] if selected else "#00000000",
-            selected=selected,
+            hover_color=ink["hover"],
+            bgcolor="#00000000",
         )
-        return c
+        # 高亮画在外层 Container 上：ListTile 自己不会做 bgcolor 过渡，
+        # 只有带 animate 的容器能让"选中"变成一个滑过去的动作而不是闪一下。
+        hl = ft.Container(
+            content=tile,
+            expand=True,
+            padding=ft.Padding.only(left=6, right=0, top=0, bottom=0),
+            border_radius=RADIUS_TILE,
+            bgcolor="#00000000",
+            border=ft.Border.only(left=ft.BorderSide(2, "#00000000")),
+            animate=ft.Animation(ANIM_ROW, ft.AnimationCurve.EASE_OUT),
+        )
+        rail = ft.Container(width=1, bgcolor=ink["line_soft"])
+        row = ft.Container(
+            content=ft.Row([rail, hl], spacing=6,
+                           vertical_alignment=ft.CrossAxisAlignment.STRETCH),
+            margin=ft.Margin.only(left=INDENT_ACTION, right=4, top=1, bottom=1),
+        )
+        entry = {"hl": hl, "title": title, "dot": dot,
+                 "filename": info["filename"]}
+        self._action_rows.append(entry)
+        self._paint_action_row(entry, info["filename"] == self.selected_filename)
+        return row
 
-    def _select_action(self, info, ctrl):
+    def _paint_action_row(self, entry, on):
+        """选中态集中在这里改：底色/左侧标记条/字重字色/尾部圆点四处必须同步。"""
+        if entry is None:
+            return
+        ink = self.ink
+        entry["hl"].bgcolor = ink["sel"] if on else "#00000000"
+        entry["hl"].border = ft.Border.only(
+            left=ft.BorderSide(2, ink["accent"] if on else "#00000000"))
+        entry["title"].weight = ft.FontWeight.W_700 if on else ft.FontWeight.W_400
+        entry["title"].color = ink["accent"] if on else ink["text_dim"]
+        entry["dot"].bgcolor = ink["accent"] if on else "#00000000"
+        entry["on"] = on
+
+    def _sync_selected_row(self):
+        """按当前 selected_filename 重刷已登记行的选中态，返回真正变了的那些。
+
+        不依赖"记住上一次点了哪一行"：树可以整棵重建（换主题）、
+        选中也可以由 _load_bin 等级联路径改写，任何一条路都不该留下两行同时亮。
+        """
+        changed = []
+        for entry in self._action_rows:
+            on = entry["filename"] == self.selected_filename
+            if entry.get("on") == on:
+                continue
+            self._paint_action_row(entry, on)
+            changed.append(entry)
+        return changed
+
+    def _select_action(self, info):
         if self.selected_filename == info.get("filename"):
             return
-        if self.selected_action_ctrl is not None:
-            try:
-                self.selected_action_ctrl.selected = False
-                self.selected_action_ctrl.update()
-            except Exception:
-                self.selected_action_ctrl = None
-        self.selected_action_ctrl = ctrl
         self.selected_filename = info["filename"]
-        try:
-            ctrl.selected = True
-            ctrl.update()
-        except Exception:
-            self.selected_action_ctrl = None
+        for entry in self._sync_selected_row():
+            try:
+                entry["hl"].update()
+            except Exception:
+                pass
         self._load_base(info)
 
     # ── Base image ──────────────────────────────────────────
@@ -1521,11 +1626,14 @@ class ComposerApp:
             border_radius=RADIUS_TILE,
             on_click=lambda e, i=idx: self._pick_part(i),
             tooltip=_tip(f"第 {idx + 1} 帧"),
+            animate=ft.Animation(ANIM_ROW, ft.AnimationCurve.EASE_OUT),
+            # 角标只做编号，永远保持中性色：选中态已经由描边承担，
+            # 再叠一块主题蓝上去，28 格里就有一格在抢画面。
             badge=ft.Badge(
                 label=str(idx + 1),
                 small_size=16,
-                bgcolor=ink["accent"] if selected else ink["chip"],
-                text_color="#ffffff" if selected else ink["text_dim"],
+                bgcolor=ink["badge_bg"],
+                text_color=ink["badge_fg"],
                 alignment=ft.Alignment.TOP_RIGHT,
                 padding=ft.Padding.only(left=4, right=4, top=0, bottom=0),
                 label_visible=True,
