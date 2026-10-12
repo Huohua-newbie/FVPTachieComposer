@@ -163,15 +163,15 @@ def _washi_src(fiber, size=180, seed=11):
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     rnd = random.Random(seed)
-    for _ in range(240):
+    for _ in range(300):
         x, y = rnd.randrange(size), rnd.randrange(size)
         ln = rnd.randint(5, 17)
         x2 = x + ln * rnd.uniform(-1, 1)
         y2 = y + ln * rnd.uniform(-0.4, 0.4)
-        d.line([x, y, x2, y2], fill=(r, g, b, rnd.randint(7, 22)), width=1)
-    for _ in range(1300):
+        d.line([x, y, x2, y2], fill=(r, g, b, rnd.randint(10, 30)), width=1)
+    for _ in range(1500):
         d.point((rnd.randrange(size), rnd.randrange(size)),
-                fill=(r, g, b, rnd.randint(5, 16)))
+                fill=(r, g, b, rnd.randint(7, 20)))
     return _img_src(img)
 
 
@@ -344,7 +344,10 @@ class ComposerApp:
             gradient=ft.LinearGradient(
                 begin=ft.Alignment.TOP_CENTER,
                 end=ft.Alignment.BOTTOM_CENTER,
-                colors=[ink["panel"], ink["panel_glass"]],
+                # 半透明才有"压在纸上的玻璃片"这层意思：不透明就等于把和纸删了，
+                # 只剩两块颜色打架的色块。
+                colors=[ft.Colors.with_opacity(0.86, ink["panel"]),
+                        ft.Colors.with_opacity(0.76, ink["panel_glass"])],
             ),
             border=ft.Border.only(
                 top=ft.BorderSide(1, ink["glass_hi"]),
@@ -579,7 +582,7 @@ class ComposerApp:
             ),
             height=46,
             padding=ft.Padding.only(left=14, right=8, top=0, bottom=0),
-            bgcolor=ink["panel"],
+            bgcolor=ft.Colors.with_opacity(0.82, ink["panel"]),
             border=ft.Border.only(bottom=ft.BorderSide(1, ink["line"])),
         )
         return ft.WindowDragArea(bar, maximizable=True)
@@ -1423,18 +1426,19 @@ class ComposerApp:
         # 只有带 animate 的容器能让"选中"变成一个滑过去的动作而不是闪一下。
         hl = ft.Container(
             content=tile,
-            expand=True,
-            padding=ft.Padding.only(left=6, right=0, top=0, bottom=0),
             border_radius=RADIUS_TILE,
             bgcolor="#00000000",
             border=ft.Border.only(left=ft.BorderSide(2, "#00000000")),
             animate=ft.Animation(ANIM_ROW, ft.AnimationCurve.EASE_OUT),
         )
-        rail = ft.Container(width=1, bgcolor=ink["line_soft"])
+        # 导轨用行容器的左边线画，不用"一根撑满行高的细条"：
+        # ListView 沿滚动方向不给高度约束，任何 STRETCH/撑满高度的写法都会
+        # 让布局直接抛异常，代价是列表里那一项之后的所有节点全部消失。
         row = ft.Container(
-            content=ft.Row([rail, hl], spacing=6,
-                           vertical_alignment=ft.CrossAxisAlignment.STRETCH),
-            margin=ft.Margin.only(left=INDENT_ACTION, right=4, top=1, bottom=1),
+            content=hl,
+            margin=ft.Margin.only(left=INDENT_ACTION, right=4, top=0, bottom=0),
+            padding=ft.Padding.only(left=11, right=0, top=0, bottom=0),
+            border=ft.Border.only(left=ft.BorderSide(1, ink["line_soft"])),
         )
         entry = {"hl": hl, "title": title, "dot": dot,
                  "filename": info["filename"]}

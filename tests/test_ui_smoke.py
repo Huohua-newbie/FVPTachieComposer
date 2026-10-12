@@ -189,6 +189,16 @@ async def run():
         if isinstance(c, ft.ListTile) and isinstance(c.trailing, ft.Row):
             assert c.trailing.tight, "ListTile.trailing 的 Row 必须 tight=True"
 
+    # 交叉轴 STRETCH 需要"有界高度"，而 ListView/滚动列给不出：
+    # 一旦写出来，布局当场抛异常，列表里该项之后的节点全部消失（真机踩过）。
+    for c in nodes:
+        if isinstance(c, ft.Row):
+            assert c.vertical_alignment != ft.CrossAxisAlignment.STRETCH, \
+                "Row 在滚动容器里不能用 vertical_alignment=STRETCH"
+        if isinstance(c, ft.Column):
+            assert c.horizontal_alignment != ft.CrossAxisAlignment.STRETCH, \
+                "Column 在滚动容器里不能用 horizontal_alignment=STRETCH"
+
     # 设计语言落地检查：和纸是页面最底层的纤维纹理，琉璃是压在纸上的渐变玻璃片。
     # 二者都只是"能看见"才有意义——没有这两条，所谓和纸/琉璃就是文案。
     washi = [c for c in nodes
@@ -220,8 +230,8 @@ async def run():
     assert INDENT_ACTION > INDENT_OUTFIT, "动作层缩进必须大于服装层"
     assert action_tile.margin.left == INDENT_ACTION
     assert outfit_header.content_padding.left == INDENT_OUTFIT
-    rail, hl = action_tile.content.controls
-    assert rail.width == 1, "动作层缺少导轨线"
+    assert action_tile.border.left.width == 1, "动作层缺少导轨线"
+    hl = action_tile.content
     assert hl.animate is not None, "动作选中态必须有过渡，不能只是闪一下变色"
 
     app._select_action(info)

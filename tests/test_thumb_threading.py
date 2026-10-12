@@ -226,8 +226,8 @@ async def main():
     await asyncio.sleep(2.0)
     n_action = 0
     for act in obody.controls:
-        # _action_tile 返回的是外层行容器：Container → Row[导轨, 高亮 Container] → ListTile
-        aheader = act._kwargs["content"]._args[0][1]._kwargs["content"]
+        # _action_tile 返回行容器：Container(导轨边线) → Container(高亮) → ListTile
+        aheader = act._kwargs["content"]._kwargs["content"]
         t = aheader._kwargs["leading"]
         if swapped_src(t):
             n_action += 1
