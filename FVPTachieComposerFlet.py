@@ -1199,6 +1199,9 @@ class ComposerApp:
         try:
             self.role_thumb_cache[cache_key] = widget
             placeholder.content = widget
+            # 占位底色是给"还没解码出来"那一下用的：图到了还留着，
+            # 半透明的立绘就会透出一个人形圆角块，看着像凭空多了个深色描边。
+            placeholder.bgcolor = "#00000000"
             placeholder.update()
         except Exception:
             pass
@@ -1390,9 +1393,6 @@ class ComposerApp:
             bgcolor="#00000000",
             border=ft.Border.only(left=ft.BorderSide(2, "#00000000")),
             animate=ft.Animation(ANIM_ROW, ft.AnimationCurve.EASE_OUT),
-            # 同差分缩略图：树行会随窗口改变宽度，只让颜色/描边参与过渡
-            animate_size=False,
-            animate_position=False,
         )
         # 导轨用行容器的左边线画，不用"一根撑满行高的细条"：
         # ListView 沿滚动方向不给高度约束，任何 STRETCH/撑满高度的写法都会
@@ -1597,8 +1597,6 @@ class ComposerApp:
             # 只动颜色，不动几何：差分条会跟着窗口一起变宽变窄，
             # size/position 也参与隐式动画的话，拉伸过程中每一格都在重排滑动，
             # 看上去就是整条在闪。
-            animate_size=False,
-            animate_position=False,
             # 角标只做编号，永远保持中性色：选中态已经由描边承担，
             # 再叠一块主题蓝上去，28 格里就有一格在抢画面。
             badge=ft.Badge(

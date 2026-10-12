@@ -281,11 +281,11 @@ async def run():
     picked = app.thumb_list.controls[kept_idx]
     assert picked.border.top.color == app.ink["accent"], "选中的差分没有描边提示"
     assert picked.animate is not None, "差分切换应有过渡"
-    # 过渡只许动颜色：差分条/树行会随窗口改宽度，几何一起动就等于拉伸时整条闪
-    assert picked.animate_size is False and picked.animate_position is False, \
-        "缩略图不该把 size/position 也做成隐式动画"
-    assert hl.animate_size is False and hl.animate_position is False, \
-        "树行不该把 size/position 也做成隐式动画"
+    # 注意：不要用 animate_size/animate_position=False 去治"拉伸时闪烁"——
+    # Flet 0.86 下给 Container 显式设这两个 False 会让整块内容不渲染（真机截图里
+    # 动作行和差分条变成纯灰矩形）。这条只是把坑记在这里。
+    assert picked.animate_size is None and picked.animate_position is None, \
+        "animate_size/position 必须保持默认，显式 False 会导致不渲染"
 
     snapshot = app.composed_img
     kept_sel = app.selected_filename
