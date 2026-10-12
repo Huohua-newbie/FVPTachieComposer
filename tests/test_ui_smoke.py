@@ -160,6 +160,19 @@ async def run():
     assert sb.track_visibility is False, "滚动条轨道不应占视觉重量"
     assert (sb.thickness or 0) <= 10, f"滚动条过粗: {sb.thickness}"
 
+    # 拖放入口：默认必须关闭——官方 flet 客户端没有 desktop_drop 插件，
+    # 未 build 的运行时塞 Dropzone 会让整棵控件树渲染失败。
+    from FVPTachieComposerFlet import DROPZONE_ON, pick_drop_path
+    assert DROPZONE_ON is False, "测试环境里拖放不该被启用"
+
+    bin_a, bin_b = str(tmp / "graph_a.bin"), str(tmp / "graph_b.bin")
+    Path(bin_a).touch()
+    assert pick_drop_path([str(tmp), bin_a]) == bin_a, ".bin 应优先于文件夹"
+    assert pick_drop_path([bin_a, str(tmp)]) == bin_a
+    assert pick_drop_path([str(tmp)]) == str(tmp), "只拖文件夹时应返回该目录"
+    assert pick_drop_path([bin_b]) == bin_b, "不存在的 bin 仍要交给 _load_bin 报错"
+    assert pick_drop_path(["", None]) is None, "空路径应返回 None"
+
     # 图像源必须是字符串 data URI：src 给 bytes 只在构造时有效，
     # 之后 `img.src = bytes` 不会被重新编码，客户端当成路径解析 → 预览区空白。
 

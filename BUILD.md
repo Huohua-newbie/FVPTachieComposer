@@ -38,6 +38,18 @@ Compress-Archive -Path dist/FVPTachieComposer.exe -DestinationPath dist/FVPTachi
 (Get-FileHash dist/FVPTachieComposer-v<ver>-win64.zip -Algorithm SHA256).Hash.ToLower() + "  FVPTachieComposer-v<ver>-win64.zip" | Out-File dist/SHA256SUMS.txt -Encoding ascii
 ```
 
+## 拖放载入（可选，需换构建方式）
+
+`FVP_DROPZONE=1` 时整个窗口会被包成拖放目标，拖入 `.bin` 或 HZC 文件夹即载入。
+该能力由 `flet-dropzone`（内部是 Flutter 的 `desktop_drop` 插件）提供，
+**插件必须编译进 Flutter 客户端**，因此：
+
+- `flet run` / 现在的 PyInstaller 产物用的是官方桌面客户端，不认这个控件，
+  所以默认关闭（环境变量未设即完全不改布局）。
+- 要启用就得改走 `flet build windows`（需 Flutter SDK + VS C++ 桌面负载），
+  并在构建环境里 `pip install flet-dropzone`、设 `FVP_DROPZONE=1`。
+  这会替换掉本文件描述的 PyInstaller 单 exe 流程，属于发布管线变更，需单独决策。
+
 ## 构建后验证（必做）
 
 1. `Select-String build/FVPTachieComposer/PKG-00.toc -Pattern 'Shinku.ico'` 有命中；

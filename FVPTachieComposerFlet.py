@@ -41,6 +41,39 @@ PART_STRIP_H = THUMB + GUTTER + 14   # 上沿给序号角标留位，下沿给�
 PART_HINT_IDLE = "选择底图后显示差分帧"
 PART_HINT_EMPTY = "该底图没有对应的表情差分"
 
+# 拖放是可选能力：OS 级文件拖放必须由 Flutter 客户端里的 desktop_drop 插件承接，
+# 而插件只在 `flet build windows` 产出的自定义客户端里存在——`flet run` 用的
+# 官方客户端不认这个控件，硬塞进去会让整棵树渲染失败。
+# 所以默认关闭，构建时设 FVP_DROPZONE=1 显式启用。
+try:
+    import flet_dropzone as _dropzone
+except Exception:
+    _dropzone = None
+DROPZONE_ON = bool(_dropzone) and os.environ.get("FVP_DROPZONE", "").strip().lower() in ("1", "true", "yes")
+
+
+def pick_drop_path(paths):
+    """从拖入的路径里挑出能载入的那个：.bin 优先，其次含 HZC 的文件夹。"""
+    bins, dirs = [], []
+    for p in paths:
+        if not p:
+            continue
+        s = str(p)
+        if s.lower().endswith(".bin"):
+            bins.append(s)
+        else:
+            dirs.append(s)
+    for s in bins:
+        if Path(s).exists():
+            return s
+    for s in dirs:
+        try:
+            if Path(s).is_dir():
+                return s
+        except OSError:
+            continue
+    return bins[0] if bins else None
+
 
 def _palette(dark):
     if dark:
@@ -367,8 +400,59 @@ class ComposerApp:
             padding=ft.Padding.only(left=12, right=12, top=10, bottom=10),
         )
 
-        p.add(ft.Column([self.title_bar, body, status_bar], spacing=0, expand=True))
+        root = ft.Column([self.title_bar, body, status_bar], spacing=0, expand=True)
+        self.drop_hint = ft.Container(
+            visible=False,
+            content=ft.Container(
+                ft.Column(
+                    [
+                        ft.Icon(ft.Icons.DOWNLOAD_FOR_OFFLINE, size=32, color=self.ink["accent"]),
+                        ft.Text("松手即载入", size=13, weight=ft.FontWeight.W_700,
+                                color=self.ink["text"]),
+                    ],
+                    spacing=6,
+                    tight=True,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                padding=ft.Padding.all(22),
+                border_radius=RADIUS_PANEL,
+                bgcolor=self.ink["panel"],
+                border=ft.Border.all(2, self.ink["accent"]),
+            ),
+            bgcolor="#33000000",
+            alignment=ft.Alignment.CENTER,
+            left=0, right=0, top=0, bottom=0,
+        )
+        p.add(self._drop_wrap(ft.Stack([root, self.drop_hint], expand=True)))
         p.update()
+
+    def _drop_wrap(self, content):
+        """把整扇窗口包成拖放目标；未启用（官方客户端没有该插件）时原样返回。"""
+        if not DROPZONE_ON:
+            return content
+        return _dropzone.Dropzone(
+            content=content,
+            on_dropped=self._on_dropped,
+            on_entered=lambda e: self._show_drop_hint(True),
+            on_exited=lambda e: self._show_drop_hint(False),
+        )
+
+    def _show_drop_hint(self, on):
+        self.drop_hint.visible = bool(on)
+        try:
+            self.drop_hint.update()
+        except Exception:
+            pass
+
+    async def _on_dropped(self, e):
+        self._show_drop_hint(False)
+        paths = [getattr(f, "path", None) or getattr(f, "name", None)
+                 for f in (getattr(e, "files", None) or [])]
+        target = pick_drop_path(paths)
+        if not target:
+            self._snack("只能拖入 .bin 文件或 HZC 文件夹", error=True)
+            return
+        await self._load_bin(target)
 
     # ── Title bar ───────────────────────────────────────────
 
