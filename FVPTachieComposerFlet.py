@@ -260,7 +260,7 @@ def _find_expr_info(file_infos, base_name):
 HELP_STEPS = (
     ("打开", "点击「打开 BIN」选择 .bin，或「HZC 文件夹」直接指向解包目录；"
              "也可把 .bin / HZC 文件夹拖到程序图标上直接打开。"
-             + ("或把文件直接拖进左侧「角色库」。" if DROPZONE_ON else "")),
+             + ("或把文件直接拖进窗口。" if DROPZONE_ON else "")),
     ("挑选", "左侧按 角色 → 服装 → 动作 展开，每级都有缩略图。"),
     ("预览", "中间是底图舞台：滚轮缩放、拖拽平移，多帧底图用左右箭头翻帧。"),
     ("合成", "点击「差分部件」里的任意一帧表情，右侧即时合成。"),
@@ -528,8 +528,7 @@ class ComposerApp:
         body = ft.Container(
             content=ft.Row(
                 [
-                    # 只有左栏是拖放目标（Dropzone 就地包一层，见 _drop_wrap）
-                    ft.Container(self._drop_wrap(self.tree_col), width=300),
+                    ft.Container(self.tree_col, width=300),
                     ft.Container(self.base_col, expand=True),
                     ft.Container(self.result_col, width=372),
                 ],
@@ -541,15 +540,16 @@ class ComposerApp:
         )
 
         root = ft.Column([self.title_bar, body, status_bar], spacing=0, expand=True)
-        p.add(root)
+        # 落点是整扇窗口（Dropzone 最外层包一层，见 _drop_wrap）：
+        # 文件一进窗口就该亮反馈，等它挪到角色库栏才动会像没接住。
+        p.add(self._drop_wrap(root))
         p.update()
 
     def _drop_wrap(self, content):
-        """把角色库面板包成拖放目标；未启用（官方客户端没有该插件）时原样返回。
+        """把整扇窗口包成拖放目标；未启用（官方客户端没有该插件）时原样返回。
 
-        落点只在这一栏：语义上"资源入口"就是它，铺满整扇窗口反而会让反馈和
-        它的来源对不上。Dropzone 的 on_entered/on_exited 是区域限定的，
-        所以包在这儿，中、右两栏拖进去就真的毫无反应。
+        落点铺满全窗：文件一进窗口就该有反应（进场亮面板、松手即清场），
+        等它挪到角色库栏才动会让人以为没接住。反馈视觉仍画在角色库面板的画布上（_build_tree_column 的 overlay），落点大、反馈贴着"资源入口"。
         """
         if not DROPZONE_ON:
             return content
@@ -738,12 +738,24 @@ class ComposerApp:
         self._drop_canvas.visible = False
         self._safe_update(self._drop_canvas)
 
+    def _hint_stage(self, on):
+        """提示文字的舞台调度：拖入期间让它上场（树让位），退场后按"有没有树"归位。
+
+        空态时永远是提示在场；载入过就轮到树。只改 visible 不换 Stack 顺序，
+        点击归属不变（提示本来就 expand=True 不吞点击）。
+        """
+        has_tree = bool(self.tree_list.controls)
+        self.tree_list.visible = has_tree and not on
+        self.empty_hint.visible = on or not has_tree
+
     def _drag_entered(self):
         if self._drop_armed:
             return
         self._drop_armed = True
         self._drop_open()
+        self._hint_stage(True)       # 已载入时提示被树盖着：先让树让位
         self._set_hint_state("armed")
+        self.page.update()
 
     def _drag_exited(self):
         if not self._drop_armed:
@@ -751,17 +763,27 @@ class ComposerApp:
         self._drop_armed = False
         self._drop_close()
         self._set_hint_state("idle")
+        self._hint_stage(False)      # 树回来了就归位
+        self.page.update()
 
     def _set_hint_state(self, state):
-        """空状态文案就地改字：idle / armed / reject 三套说法长在同一个容器里。
+        """状态文案就地改字：idle / armed / reject / loading 四套说法长在同一个容器里。
 
         不再新起一层提示——落点上叠东西就又回到"给应用贴取景框"了。
+        loading 是松手后的第一帧反馈：旧树已撤、解析还没回来，这段时间
+        得有个东西占着场子，不然用户以为没松手成功。
         """
         if self._hint_title is None or state == self._hint_state:
             return
         self._hint_state = state
         ink = self.ink
-        if state == "armed":
+        if state == "loading":
+            self._hint_icon.name = ft.Icons.HOURGLASS_TOP
+            self._hint_icon.color = ink["accent"]
+            self._hint_title.value = "正在解析…"
+            self._hint_title.color = ink["accent"]
+            self._hint_sub.value = "松手后马上就好"
+        elif state == "armed":
             self._hint_icon.name = ft.Icons.UPLOAD_FILE
             self._hint_icon.color = ink["accent"]
             self._hint_title.value = "松手即载入"
@@ -788,8 +810,10 @@ class ComposerApp:
         """
         self._drop_tone = "err"
         self._drop_a = 1.0
+        self._hint_stage(True)
         self._set_hint_state("reject")
         self._redraw_drop()
+        self.page.update()
         if not self._later(DROP_REJECT_MS / 1000, self._reject_fade):
             self._reject_fade()
 
@@ -800,6 +824,8 @@ class ComposerApp:
         # 画布没在册（比如拖进来前没触发 enter）就没必要淡出，直接把它清干净
         self._drop_close(immediate=not self._drop_hint_shown)
         self._set_hint_state("idle")
+        self._hint_stage(False)
+        self.page.update()
 
     def _safe_update(self, control):
         try:
@@ -817,8 +843,38 @@ class ComposerApp:
         # 快门：画布立刻收掉，不谢幕——松手之后的确认交给内容本身（角色逐条长出来）。
         self._drop_armed = False
         self._drop_close(immediate=True)
+        # 松手即清场：旧树先撤、"正在解析"当场上场。
+        # 否则要等 to_thread 解析完才换内容，中间那 100ms 左右旧树纹丝不动
+        # （初始态则是一片没有任何反馈的空窗），用户以为没松手成功。
+        self.tree_list.controls.clear()
+        self._tree_toggles = {}
+        self._action_rows = []
+        self._tree_wraps = []
+        self._stagger_i = 0
+        self._hint_stage(True)
+        self._set_hint_state("loading")
+        self.page.update()
+
+        gen0 = self._state_gen
+        ok = await self._load_bin(target)
+        if ok:
+            self._set_hint_state("idle")
+            return
+        if ok is None or self._state_gen != gen0 + 1:
+            # 过期（被载出/被另一次载入接管）：界面归接管者管，这里不越权还原。
+            return
+        # 解析失败：旧数据其实没动过（_load_bin 在写入前就退出了），
+        # 把旧树原样长回来；若本来就是空态，_hint_stage(False) 会把提示还回去。
+        self._restoring = True
+        try:
+            self._render_tree()
+            self._restore_tree_state()
+        finally:
+            self._restoring = False
+        self._sync_selected_row()
         self._set_hint_state("idle")
-        await self._load_bin(target)
+        self._hint_stage(False)
+        self.page.update()
 
     # ── Title bar ───────────────────────────────────────────
 
@@ -924,7 +980,7 @@ class ComposerApp:
         self._hint_title = ft.Text("尚未加载文件", size=13,
                                    weight=ft.FontWeight.W_600, color=ink["text"])
         self._hint_idle_sub = ("点右上角的 打开 BIN / 打开 HZC 图标\n或按 Ctrl+O 选择文件"
-                               + ("\n或直接拖到这里" if DROPZONE_ON else ""))
+                               + ("\n或把文件拖进窗口" if DROPZONE_ON else ""))
         self._hint_sub = ft.Text(self._hint_idle_sub, size=11, color=ink["text_dim"],
                                  text_align=ft.TextAlign.CENTER)
         self._hint_state = "idle"
@@ -1426,6 +1482,9 @@ class ComposerApp:
         gen = self._state_gen
         src = Path(path)
         self.import_dir = str(src if src.is_dir() else src.parent)
+        # 解析失败时状态栏要退回原状——"正在解析…"不能挂在那儿当永久伤。
+        prev_status = self.status_text.value
+        prev_meta = self.status_meta.value
         self._set_status("正在解析…")
         # 快路径不该被打扰：只有解析真的超过 BUSY_DELAY 才补一条"正在解析"，
         # 完成时再用结果替换它（成功 1 秒自退，失败常驻）。
@@ -1459,9 +1518,12 @@ class ComposerApp:
             infos, hier = await asyncio.to_thread(work)
         except Exception as ex:
             self._parsing_gen = None
+            self.status_text.value = prev_status
+            self.status_meta.value = prev_meta
             self._snack(f"解析失败: {ex}", error=True)
             self._busy_seq = None
-            return
+            self.page.update()
+            return False
         self._parsing_gen = None
         if gen != self._state_gen:
             # 解析期间被载出/被另一次载入接管：这份结果已经过期，丢弃。
@@ -1469,7 +1531,7 @@ class ComposerApp:
             if self._snack_is_showing(self._busy_seq):
                 self._dismiss_snack(self._busy_seq)
             self._busy_seq = None
-            return
+            return None
 
         self.input_file = path
         self.file_infos = infos
@@ -1492,6 +1554,7 @@ class ComposerApp:
             self._snack(f"已载入 {Path(path).name} — {len(hier)} 角色 / {hzc} 图像",
                         ttl=1.0)
         self._busy_seq = None
+        return True
 
     def _show_parsing_busy(self, gen, name):
         """解析超过 BUSY_DELAY 才走到这里；已经解析完就不弹任何东西。"""
@@ -1528,6 +1591,8 @@ class ComposerApp:
         self._action_rows = []
         self.tree_list.visible = False
         self.empty_hint.visible = True
+        # 解析中被载出：别把"正在解析"带进初始态。
+        self._set_hint_state("idle")
 
         self.file_chip.content.value = "未载入文件"
         if self.unload_btn is not None:

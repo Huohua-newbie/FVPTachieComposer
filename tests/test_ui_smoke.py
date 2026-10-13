@@ -406,6 +406,63 @@ async def run():
     assert canvas.visible is False, "拒绝后画布没收回，会继续吃掉面板里的点击"
     assert app._hint_title.value == "尚未加载文件", "拒绝退场后文案没还原"
 
+    # 载入着再拖入：提示必须上场——它在 Stack 下层，不给树让位就永远看不见
+    app._drag_entered()
+    assert app.empty_hint.visible is True and app.tree_list.visible is False, \
+        "已载入文件后拖入，提示被树盖住（没让位）"
+    assert app._hint_title.value == "松手即载入"
+    app._drag_exited()
+    assert app.tree_list.visible is True and app.empty_hint.visible is False, \
+        "拖放退出后旧树没回来"
+
+    # 松手即清场：解析在后台跑，这期间旧树必须先撤，提示当场接上，
+    # 不能让用户对着一动不动的旧树干等（初始态同理，不能空窗）。
+    class _DropFile:
+        def __init__(self, p):
+            self.path, self.name = p, Path(p).name
+
+    class _DropEvt:
+        def __init__(self, ps):
+            self.files = [_DropFile(p) for p in ps]
+
+    real_load = app._load_bin
+    seen = {}
+
+    async def hold(path):
+        seen["tree"] = app.tree_list.visible
+        seen["controls"] = len(app.tree_list.controls)
+        seen["hint"] = (app.empty_hint.visible, app._hint_title.value)
+        await asyncio.Event().wait()   # 一直挂着，由测试收场
+
+    app._load_bin = hold
+    try:
+        task = asyncio.create_task(app._on_dropped(_DropEvt([bin_a])))
+        await asyncio.sleep(0.05)
+        assert seen.get("controls") == 0 and seen.get("tree") is False, \
+            "松手后旧树还挂着——要先清场再解析"
+        assert seen.get("hint") == (True, "正在解析…"), \
+            "松手后没有当场反馈，这就是那个空窗期"
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    finally:
+        app._load_bin = real_load
+
+    # 解析失败：旧树原样回来，载入状态/状态栏都不能被坏文件冲掉
+    broken = str(tmp / "broken.bin")
+    Path(broken).write_bytes(b"not a bin")
+    prev_status = app.status_text.value
+    await app._on_dropped(_DropEvt([broken]))
+    assert app.input_file == str(tmp), "坏文件把载入状态冲掉了"
+    assert app.tree_list.controls and app.tree_list.visible is True, \
+        "解析失败后旧树没回来"
+    assert app.empty_hint.visible is False, "解析失败后空态提示冒出来了"
+    assert app.status_text.value == prev_status, \
+        f"状态栏卡在 {app.status_text.value!r}，没回到解析前"
+    assert app._hint_title.value == "尚未加载文件", "失败退场后提示文字没复位"
+
     # 提示横幅：居中下方的小卡片，从底部浮起；外层只定位不吞点击。
     # 成功提示要自己淡出消失，报错才留着手动关。
     app._snack("已载出: demo.bin")
