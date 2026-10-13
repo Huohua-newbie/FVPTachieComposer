@@ -32,6 +32,14 @@ _CURRENT_PAGE = []
 _bc.BaseControl.page = property(lambda self: _CURRENT_PAGE[-1] if _CURRENT_PAGE else None)
 
 
+class _CanvasSize:
+    """假 CanvasResizeEvent：只带宽高，够驱动 _on_drop_resize。"""
+
+    def __init__(self, w, h):
+        self.width = w
+        self.height = h
+
+
 class FakeWindow:
     def __init__(self):
         self.width = 1280
@@ -345,28 +353,37 @@ async def run():
 
     # 拖放提示层：这层铺满整扇窗口，隐藏时必须真的 visible=False，
     # 否则它会一直吃掉所有点击；显示/隐藏中间要有透明度变化，不然没有入场动画。
-    # veil/取景框只淡入淡出，胶囊靠 offset 滑入滑出（两层不同速度才有层次感）。
+    # 内容只有两层：压暗 veil + Canvas 画的虚线高光框。
     app._show_drop_hint(True)
     assert app.drop_hint.visible is True, "拖放提示没显示"
     await asyncio.sleep(0.05)          # visible 先落一帧，淡入才有起点
-    assert app.drop_hint.opacity == 1.0 and app._drop_pill.offset == ft.Offset(0, 0), \
-        "拖放提示没走到最终态"
+    assert app.drop_hint.opacity == 1.0, "拖放提示没淡入到最终态"
+    veil = app.drop_hint.content.controls[0]
+    assert veil.bgcolor.startswith("#") and len(veil.bgcolor) == 9, \
+        f"压暗层颜色不是 #AARRGGBB: {veil.bgcolor}"
+    assert len(app.drop_hint.content.controls) == 2, "拖放提示层不止 veil + 虚线框"
+    app._on_drop_resize(_CanvasSize(900, 600))
+    assert len(app._drop_canvas.shapes) == 2, "虚线框没按画布尺寸画出来"
+    dash = app._drop_canvas.shapes[1]
+    assert dash.paint.stroke_dash_pattern, "外圈不是虚线"
     app._show_drop_hint(False)
     assert app.drop_hint.opacity == 0.0, "拖放提示没淡出"
-    assert app._drop_pill.offset == ft.Offset(0, 22), "胶囊没跟着滑出去"
     await asyncio.sleep(0.3)           # 淡出走完才收回
     assert app.drop_hint.visible is False, "拖放提示隐藏后还在吃点击"
 
-    # 提示横幅：右下角小卡片，不再横跨整窗（那条会吞掉一整排点击）；
+    # 提示横幅：居中下方的小卡片，从底部浮起；外层只定位不吞点击。
     # 成功提示要自己淡出消失，报错才留着手动关。
     app._snack("已载出: demo.bin")
-    assert app._snack_overlay.controls[0].content is app._snack_toast, \
-        "横幅不是单个小卡片（又铺成整宽了）"
+    holder = app._snack_overlay.controls[0]
+    assert holder.content is app._snack_toast, "横幅不是单个小卡片（又铺成整宽了）"
+    assert holder.alignment is not None and holder.left == 0 and holder.right == 0, \
+        "横幅没在窗口底部居中"
+    assert getattr(holder, "bgcolor", None) is None, "定位层有底色会吞掉整条横带的点击"
     assert app._snack_toast.opacity == 0.0, "横幅初始态没留动画起点"
     await asyncio.sleep(0.05)
     assert app._snack_toast.opacity == 1.0 and app._snack_toast.offset == ft.Offset(0, 0), \
         "横幅没走到显示最终态"
-    await asyncio.sleep(2.0)           # 1.6s 自动消除 + 淡出
+    await asyncio.sleep(2.4)           # 2s 自动消除 + 淡出
     assert app._snack_overlay not in app.page.overlay, "成功横幅没有自动消失"
 
     # 方向键：列表项/按钮点过之后会持有焦点，e.control 不为空是常态而不是"在打字"，

@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import flet as ft
+import flet.canvas as fc
 from PIL import Image
 
 from FVPTachieComposer import (
@@ -46,9 +47,11 @@ PART_HINT_EMPTY = "该底图没有对应的表情差分"
 INDENT_OUTFIT = 30
 INDENT_ACTION = 48
 ANIM_ROW = 180
-# 拖放提示：veil/取景框淡入 150ms，胶囊再往上滑 220ms（比 veil 慢一点才有"落定"感）
+# veil 与提示横幅的淡入淡出时长
 ANIM_VEIL = 150
-DROP_IN = 220
+# 拖放提示：虚线框离窗口边缘的留白，以及圆角半径
+DROP_INSET = 14
+DROP_RADIUS = 14
 
 # 拖放能力：OS 级文件拖放必须由 Flutter 客户端里的 desktop_drop 插件承接，
 # 插件只存在于 `flet build windows` 产出的自定义客户端里——官方客户端不认这个
@@ -115,7 +118,7 @@ def pick_drop_path(paths):
 
 def _palette(dark):
     if dark:
-        return {
+        p = {
             "page": "#101318",
             "panel": "#1a1e25",
             "stage": "#0d1014",
@@ -124,8 +127,6 @@ def _palette(dark):
             "text": "#e9edf5",
             "text_dim": "#8e9aae",
             "accent": "#7aa6ff",
-            # accent 底色上的文字色：深色主题的 accent 是浅蓝，配深色字更读得清
-            "on_accent": "#0d1014",
             "accent_soft": "#1e2b45",
             "chip": "#1a212b",
             "hover": "#1b222d",
@@ -139,29 +140,35 @@ def _palette(dark):
             "err_bg": "#3a1d24",
             "err_fg": "#ffc9d2",
         }
-    return {
-        "page": "#eff1f4",
-        "panel": "#ffffff",
-        "stage": "#f6f7f9",
-        "line": "#dfe2e8",
-        "line_soft": "#eceef2",
-        "text": "#1b2130",
-        "text_dim": "#6b7488",
-        "accent": "#3f6ee0",
-        "on_accent": "#ffffff",
-        "accent_soft": "#e8f0fe",
-        "chip": "#f1f3f7",
-        "hover": "#f2f4f8",
-        "sel": "#e3ecfb",
-        "badge_bg": "#ffffff",
-        "badge_fg": "#5b6780",
-        "checker_a": "#f2f4f7",
-        "checker_b": "#e7eaef",
-        "ok_bg": "#e4ecfd",
-        "ok_fg": "#2a4f9e",
-        "err_bg": "#fbe3e7",
-        "err_fg": "#9c2a44",
-    }
+    else:
+        p = {
+            "page": "#eff1f4",
+            "panel": "#ffffff",
+            "stage": "#f6f7f9",
+            "line": "#dfe2e8",
+            "line_soft": "#eceef2",
+            "text": "#1b2130",
+            "text_dim": "#6b7488",
+            "accent": "#3f6ee0",
+            "accent_soft": "#e8f0fe",
+            "chip": "#f1f3f7",
+            "hover": "#f2f4f8",
+            "sel": "#e3ecfb",
+            "badge_bg": "#ffffff",
+            "badge_fg": "#5b6780",
+            "checker_a": "#f2f4f7",
+            "checker_b": "#e7eaef",
+            "ok_bg": "#e4ecfd",
+            "ok_fg": "#2a4f9e",
+            "err_bg": "#fbe3e7",
+            "err_fg": "#9c2a44",
+        }
+    # 拖放覆盖层用色。注意 Flet 的 hex 是 #AARRGGBB（alpha 在最前）：
+    # 把 alpha 拼到 6 位色值后面会被解析成不透明的错色，整屏会变成一坨脏色。
+    # 深色主题本来就暗，压得重一点才看得出"变了"；浅色压太黑会显脏。
+    p["scrim"] = "#7A000000" if dark else "#4D000000"
+    p["accent_glow"] = "#33" + p["accent"].lstrip("#")
+    return p
 
 
 def _rgb(hex_str):
@@ -282,6 +289,8 @@ class ComposerApp:
         self._restoring = False
         # 拖放提示层当前是否显示（动画分两帧走，见 _show_drop_hint）
         self._drop_hint_shown = False
+        # 画布尺寸缓存：Canvas 隐藏时不参与排版，重新显示时得靠它立刻补出虚线框
+        self._drop_size = (0.0, 0.0)
         # 树里所有动作行的选中态控件组；换选时按 filename 统一复原，不记"上一次点了谁"。
         self._action_rows = []
         # 载入代数：载入/载出各 +1。后台解析与缩略图解码都跨"载入中→载出"这段
@@ -462,26 +471,15 @@ class ComposerApp:
         )
 
         root = ft.Column([self.title_bar, body, status_bar], spacing=0, expand=True)
-        # 拖放提示：主题色薄 veil + 一圈"取景框" + 底部滑入的胶囊。
-        # 不用原来的"整屏压暗 + 正中一块面板"：那块面板既盖住正在看的立绘，
-        # 又没有落点暗示，读起来像个突然弹出来的对话框而不是"松手就放这儿"。
-        self._drop_pill = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Icon(ft.Icons.MOVE_TO_INBOX, size=17, color=self.ink["on_accent"]),
-                    ft.Text("松手即载入", size=13, weight=ft.FontWeight.W_700,
-                            color=self.ink["on_accent"]),
-                ],
-                spacing=8,
-                tight=True,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            bgcolor=self.ink["accent"],
-            border_radius=999,
-            padding=ft.Padding.only(left=14, right=16, top=9, bottom=9),
-            offset=ft.Offset(0, 22),
-            animate=ft.Animation(DROP_IN, ft.AnimationCurve.DECELERATE),
-            shadow=ft.BoxShadow(blur_radius=22, spread_radius=0, color="#00000055"),
+        # 拖放提示：整窗压暗 + 一圈高光虚线框，就这两层。
+        # 之前叠的底部胶囊、实线取景框都是多余的视觉噪音——压暗本身已经是
+        # "现在松手"的信号，虚线框标出范围即可，不需要再写字。
+        # 虚线只能用 Canvas 画（Container 的 border 不支持 dash），圆角矩形
+        # 用 Path.Rect + border_radius，dash 走 Paint.stroke_dash_pattern。
+        self._drop_canvas = fc.Canvas(
+            expand=True,
+            shapes=[],
+            on_resize=self._on_drop_resize,
         )
         self.drop_hint = ft.Container(
             visible=False,
@@ -489,14 +487,9 @@ class ComposerApp:
             animate=ft.Animation(ANIM_VEIL, ft.AnimationCurve.EASE_OUT),
             content=ft.Stack(
                 [
-                    # veil 用页面底色半透明，深浅主题都柔和；纯黑 veil 在浅色主题下很脏
                     ft.Container(left=0, right=0, top=0, bottom=0,
-                                 bgcolor=self.ink["page"] + "99"),
-                    ft.Container(left=12, right=12, top=12, bottom=12,
-                                 border=ft.Border.all(2, self.ink["accent"]),
-                                 border_radius=RADIUS_PANEL),
-                    ft.Container(self._drop_pill, left=0, right=0, bottom=40,
-                                 alignment=ft.Alignment.CENTER),
+                                 bgcolor=self.ink["scrim"]),
+                    self._drop_canvas,
                 ],
                 expand=True,
                 fit=ft.StackFit.EXPAND,
@@ -522,6 +515,38 @@ class ComposerApp:
             on_exited=lambda e: self._show_drop_hint(False),
         )
 
+    def _drop_shapes(self, w, h):
+        """按当前画布尺寸画压暗框：一层宽的半透明描边当辉光，上面叠一圈细虚线。"""
+        m = DROP_INSET
+        if w <= m * 2 + 4 or h <= m * 2 + 4:
+            return []
+        box = dict(x=m, y=m, width=w - 2 * m, height=h - 2 * m,
+                   border_radius=ft.BorderRadius.all(DROP_RADIUS))
+        return [
+            fc.Path(
+                elements=[fc.Path.Rect(**box)],
+                paint=ft.Paint(
+                    style=ft.PaintingStyle.STROKE,
+                    stroke_width=7,
+                    color=self.ink["accent_glow"],
+                ),
+            ),
+            fc.Path(
+                elements=[fc.Path.Rect(**box)],
+                paint=ft.Paint(
+                    style=ft.PaintingStyle.STROKE,
+                    stroke_width=2,
+                    color=self.ink["accent"],
+                    stroke_dash_pattern=[12, 9],
+                ),
+            ),
+        ]
+
+    def _on_drop_resize(self, e):
+        self._drop_size = (e.width, e.height)
+        self._drop_canvas.shapes = self._drop_shapes(e.width, e.height)
+        self._safe_update(self._drop_canvas)
+
     def _show_drop_hint(self, on):
         """淡入/淡出拖放提示层。
 
@@ -534,21 +559,24 @@ class ComposerApp:
             return
         self._drop_hint_shown = bool(on)
         if on:
+            # Canvas 隐藏时不参与排版，重新显示时 on_resize 不一定再发一次，
+            # 所以先用上次记下的尺寸把虚线框填好，免得 veil 先亮、框慢一拍。
+            if not self._drop_canvas.shapes:
+                w, h = self._drop_size
+                self._drop_canvas.shapes = self._drop_shapes(w, h)
             hint.visible = True
             self._safe_update(hint)
             if not self._later(0.02, self._set_drop_hint_alpha, True):
                 self._set_drop_hint_alpha(True)
         else:
             self._set_drop_hint_alpha(False)
-            if not self._later(DROP_IN / 1000 + 0.03, self._hide_drop_hint):
+            if not self._later(ANIM_VEIL / 1000 + 0.03, self._hide_drop_hint):
                 self._hide_drop_hint()
 
     def _set_drop_hint_alpha(self, on):
         if self._drop_hint_shown != bool(on):
             return
         self.drop_hint.opacity = 1.0 if on else 0.0
-        # 胶囊自己滑，veil/取景框只淡入淡出：两层不同速度才有层次感
-        self._drop_pill.offset = ft.Offset(0, 0 if on else 22)
         self._safe_update(self.drop_hint)
 
     def _hide_drop_hint(self):
@@ -1018,17 +1046,18 @@ class ComposerApp:
             bgcolor=bg,
             border_radius=12,
             border=ft.Border.all(1, ink["line"]),
-            padding=ft.Padding.only(left=12, right=6, top=7, bottom=7),
-            shadow=ft.BoxShadow(blur_radius=18, spread_radius=0, color="#00000033"),
+            padding=ft.Padding.only(left=14, right=6, top=8, bottom=8),
+            shadow=ft.BoxShadow(blur_radius=22, spread_radius=1, color="#00000055"),
             opacity=0.0,
-            offset=ft.Offset(16, 0),
+            offset=ft.Offset(0, 14),
             animate=ft.Animation(ANIM_VEIL, ft.AnimationCurve.EASE_OUT),
         )
-        # 右下角小卡片：只占自己那一小块。之前居中那条 left=0/right=0 会连着整条
-        # 横带一起吞掉点击，等于把标题栏下方一整排操作区盖住了。
-        # 报错不自动消失（要留时间复制），成功提示 1.6 秒后自己走。
+        # 居中下方、从底部浮起：右下角那版既压着侧栏操作区，又不在视线落点上，
+        # 基本注意不到。外层 Container 只负责定位、没有底色，命中的只有卡片本身，
+        # 不会像整条 left=0/right=0 的横幅那样把一整排控件的点击吞掉。
         overlay = ft.Stack(
-            [ft.Container(toast, right=16, bottom=52)],
+            [ft.Container(toast, left=0, right=0, bottom=38,
+                          alignment=ft.Alignment.CENTER)],
             top=0, left=0, right=0, bottom=0,
         )
         try:
@@ -1041,19 +1070,20 @@ class ComposerApp:
         self.page.overlay.append(overlay)
         self.page.update()
 
-        # 先按初始状态（透明+右偏）建好控件，下一帧再改属性，否则没有动画起点
+        # 先按初始状态（透明+下偏）建好控件，下一帧再改属性，否则没有动画起点
         if not self._later(0.02, self._set_snack_alpha, seq, True):
             self._set_snack_alpha(seq, True)
 
+        # 报错不自动消失（要留时间复制），成功提示 2 秒后自己走
         if not error:
-            self._later(1.6, self._dismiss_snack, seq)
+            self._later(2.0, self._dismiss_snack, seq)
 
     def _set_snack_alpha(self, seq, on):
         if seq != self._snack_seq or self._snack_toast is None:
             return
         toast = self._snack_toast
         toast.opacity = 1.0 if on else 0.0
-        toast.offset = ft.Offset(0 if on else 16, 0)
+        toast.offset = ft.Offset(0, 0 if on else 14)
         self._safe_update(toast)
 
     def _dismiss_snack(self, seq):

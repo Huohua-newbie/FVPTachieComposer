@@ -124,7 +124,14 @@ class _FtModule(types.ModuleType):
         return _Any()
 
 
-sys.modules["flet"] = _FtModule("flet")
+_flet = _FtModule("flet")
+# Canvas/Path 在真实 flet 里属于 flet.canvas 子模块；flet 被换成单文件 stub 后
+# 它不再是"包"，得手工把子模块塞进 sys.modules 并绑到父模块属性上，
+# 否则应用侧 `import flet.canvas as fc` 直接 ModuleNotFoundError。
+_canvas = _FtModule("flet.canvas")
+_flet.canvas = _canvas
+sys.modules["flet"] = _flet
+sys.modules["flet.canvas"] = _canvas
 
 from FVPTachieComposerFlet import ComposerApp
 from FVPTachieComposerFlet import main as app_main  # noqa: E402
