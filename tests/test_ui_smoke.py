@@ -257,7 +257,12 @@ async def run():
     assert not solid, f"还有实心 accent 大按钮: {[c.data for c in solid]}"
 
     # 展开到动作层并选中，跑完 底图 → 差分 → 合成 全链路
-    role_col = app.tree_list.controls[0]
+    def role_column(i=0):
+        """载入那一轮的角色套在动画外壳（错峰入场）里，取下层 tile 先剥壳。"""
+        c = app.tree_list.controls[i]
+        return c.content if isinstance(c, ft.Container) else c
+
+    role_col = role_column()
     role_header, role_body = role_col.controls[0], role_col.controls[1]
     role_header.on_click(None)
     outfit_col = role_body.controls[0]
@@ -333,8 +338,8 @@ async def run():
     # 重建树时"单动作服装展开即选中"不能触发，否则底图会被悄悄换成别的
     assert app.selected_filename == kept_sel, "换主题后选中的动作变了"
     assert app.base_image.src == kept_base_src, "换主题后底图被换成了另一张"
-    assert app.tree_list.controls[0].controls[1].visible is True, "换主题把已展开的角色收起了"
-    assert app.tree_list.controls[0].controls[1].controls[0].controls[1].visible is True, \
+    assert role_column().controls[1].visible is True, "换主题把已展开的角色收起了"
+    assert role_column().controls[1].controls[0].controls[1].visible is True, \
         "换主题把已展开的服装收起了"
     assert app.part_idx == kept_idx, "换主题后选中的差分帧被重置"
     assert app.composed_img is snapshot, "换主题重新读盘重算了（应复用缓存）"
@@ -349,48 +354,57 @@ async def run():
     # 否则切一次主题就显示"未载入文件"，看着像整个状态被清空。
     assert app.file_chip.content.value == Path(app.input_file).name, \
         "换主题后标题栏文件名胶囊丢了"
-    # 换主题会整棵重建，拖放层也在其中。状态不跟着归零的话，
-    # 下一次 enter 会因为"目标态已经等于当前态"而直接早退——遮罩再也不出现。
+    # 换主题会整棵重建，拖放画布也在其中。状态不跟着归零的话，
+    # 下一次 enter 会因为"目标态已经等于当前态"而直接早退——面板再也不亮。
     app._drop_hint_shown = True
+    app._drop_armed = True
     await app._toggle_theme(None)
-    assert app._drop_hint_shown is False, "换主题后拖放层状态残留，下一次拖入不会有反馈"
+    assert app._drop_hint_shown is False and app._drop_armed is False, \
+        "换主题后拖放态残留，下一次拖入不会有反馈"
+    assert app._drop_canvas is not None and app._drop_canvas.visible is False, \
+        "换主题后画布还亮着——它会吃掉面板里所有的点击"
 
-    # 拖放反馈：这层铺满整扇窗口，隐藏时必须真的 visible=False，否则它会一直吃点击；
-    # 显示/隐藏中间要有透明度变化，不然没有入场动画。
-    app._on_drop_resize(_CanvasSize(900, 600))
-    assert len(app._drop_canvas.shapes) == 4, \
-        "画布不止 辉光框/虚线框/光斑辉光/光斑核心 四层"
-    dash = app._drop_canvas.shapes[1]
-    assert dash.paint.stroke_dash_pattern, "外圈不是虚线"
-    app._show_drop_hint(True)
-    assert app.drop_hint.visible is True, "拖放提示没显示"
-    await asyncio.sleep(0.05)          # visible 先落一帧，淡入才有起点
-    assert app.drop_hint.opacity == 1.0, "拖放提示没淡入到最终态"
-    veil = app.drop_hint.content.controls[0]
-    assert veil.bgcolor.startswith("#") and len(veil.bgcolor) == 9, \
-        f"压暗层颜色不是 #AARRGGBB: {veil.bgcolor}"
-    assert len(app.drop_hint.content.controls) == 2, "拖放提示层不止 veil + 画布"
+    # 拖放反馈贴在角色库面板自己身上：画布必须是贴面板四边的定位子节点，
+    # 否则画出来的虚线框和面板描边错开一圈，就又是"给应用贴了个取景框"。
+    app._on_drop_resize(_CanvasSize(300, 700))
+    app._drag_entered()
+    canvas = app._drop_canvas
+    assert app._drop_armed is True and canvas.visible is True, "拖入后面板没进入拖放态"
+    assert (canvas.top, canvas.left, canvas.right, canvas.bottom) == (0, 0, 0, 0), \
+        "画布没贴满面板，虚线框会缩在描边里面一圈"
+    assert len(canvas.shapes) == 5, "画布不止 底纹/辉光边/虚线边/光斑拖尾/光斑核心 五层"
+    wash = canvas.shapes[0]
+    assert wash.paint.style == ft.PaintingStyle.FILL, "底纹不是填充层"
+    assert wash.paint.color.startswith("#") and len(wash.paint.color) == 9, \
+        f"底纹颜色不是 #AARRGGBB: {wash.paint.color}"
+    dash = canvas.shapes[2]
+    assert dash.paint.stroke_dash_pattern, "落点边框不是虚线"
+    assert app._hint_title.value == "松手即载入", "拖入时空状态文案没换"
 
-    # 行进光斑：tick 一次，光斑必须沿框边挪动（这是停留态唯一的动效）
-    before = app._drop_canvas.shapes[3].elements[0].x, \
-        app._drop_canvas.shapes[3].elements[0].y
+    # 淡入：进度逐帧推到 1 后停住（静止是默认，动是点缀）
+    app._drop_gen += 1                  # 掐掉自发排队的计时链，下面手工逐帧推
+    for _ in range(12):                 # DROP_IN_FRAMES=6，多推几帧看过冲和停表
+        app._tick_drop(app._drop_gen)
+        if app._drop_a >= 1.0:
+            break
+    assert app._drop_a == 1.0 and app._drop_dir == 0, "淡入没走到终点或没停下"
+
+    # 行进光斑：tick 一次，光斑必须沿面板边挪动（停留态唯一的动效）
+    before = (canvas.shapes[4].elements[0].x, canvas.shapes[4].elements[0].y)
     app._tick_drop(app._drop_gen)
-    after = app._drop_canvas.shapes[3].elements[0].x, \
-        app._drop_canvas.shapes[3].elements[0].y
+    after = (canvas.shapes[4].elements[0].x, canvas.shapes[4].elements[0].y)
     assert after != before, "光斑没跟着 tick 行进"
     assert app._drop_dist > 0
 
-    # 拒绝态：框变红，veil 不变色
+    # 拒绝态：边框变红、落点旁边就地改红字，不再跑到窗口底部弹横幅
     app._reject_drop()
-    assert app._drop_canvas.shapes[1].paint.color == app.ink["err_frame"], \
-        "拒绝时虚线框没变红"
-    assert app.drop_hint.content.controls[0].bgcolor == app.ink["scrim"], \
-        "拒绝时压暗层跟着变色（太戏剧化）"
-    await asyncio.sleep(0.5)           # 红停 160ms + 淡出 150ms 后才收回
-    assert app.drop_hint.visible is False, "拒绝后遮罩没收回"
-    assert app._snack_overlay in app.page.overlay, "拒绝没弹错误横幅"
-    app._dismiss_snack(app._snack_seq)
-    await asyncio.sleep(0.3)
+    err = "#FF" + app.ink["err_frame"].lstrip("#").upper()
+    assert canvas.shapes[2].paint.color == err, f"拒绝时虚线框没变红: {canvas.shapes[2].paint.color}"
+    assert app._hint_title.value == "拖进来的不是资源", "拒绝时空状态文案没改"
+    assert app._snack_overlay not in app.page.overlay, "拒绝不该弹底部横幅（视线就在落点上）"
+    await asyncio.sleep(0.5)           # 红停 160ms + 淡出 120ms 后才收回
+    assert canvas.visible is False, "拒绝后画布没收回，会继续吃掉面板里的点击"
+    assert app._hint_title.value == "尚未加载文件", "拒绝退场后文案没还原"
 
     # 提示横幅：居中下方的小卡片，从底部浮起；外层只定位不吞点击。
     # 成功提示要自己淡出消失，报错才留着手动关。
@@ -526,6 +540,24 @@ async def run():
     await app._load_bin(str(tmp))
     assert app.input_file == str(tmp) and app.tree_list.visible, "载出后无法再次载入"
     assert app.empty_hint.visible is False and app.unload_btn.visible is True
+
+    # 角色逐条错峰浮入：起步全是透明的外壳，链子把每条推到终点。
+    # 载入的确认长在内容自己身上，不再另起一层提示。
+    from FVPTachieComposerFlet import STAGGER_MS
+    assert len(app._tree_wraps) == len(app.hierarchy), "错峰外壳数量对不上角色数"
+    assert all(w.opacity == 0.0 for w in app._tree_wraps), "错峰起步没给动画留起点"
+    await asyncio.sleep(len(app._tree_wraps) * STAGGER_MS + 0.3)
+    assert all(w.opacity == 1.0 and w.offset == ft.Offset(0, 0)
+               for w in app._tree_wraps), "错峰没把每条角色都浮到位"
+    # 中途又拖进来：剩下的必须直接落到终点，不能留半透明的行
+    app._stagger_i = 0
+    for w in app._tree_wraps:
+        w.opacity = 0.0
+    app._drop_armed = True
+    app._stagger_step()
+    assert all(w.opacity == 1.0 for w in app._tree_wraps), "拖入打断错峰时留下了半透明的角色"
+    app._drop_armed = False
+
     await app._unload_bin(None)  # 幂等收尾：第二次载出同样干净
     assert app.input_file is None and app.empty_hint.visible is True
 

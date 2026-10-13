@@ -158,10 +158,17 @@ def build_fixture():
     return tmp
 
 
+def role_column(wrap):
+    """载入那一轮每个角色外面套了错峰动画的 Container 壳，这里取下层角色 Column。"""
+    first = wrap._args[0] if wrap._args else None
+    return first if isinstance(first, _Any) else wrap
+
+
 def find_tiles(app):
     """返回 [(role_header, role_body, role_toggle), ...] 与 outfit/action 结构。"""
     roles = []
-    for role_col in app.tree_list.controls:
+    for wrap in app.tree_list.controls:
+        role_col = role_column(wrap)
         header, body = role_col._args[0]
         roles.append((header, body, header._kwargs["on_click"]))
     return roles

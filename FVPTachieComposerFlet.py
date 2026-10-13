@@ -48,21 +48,27 @@ PART_HINT_EMPTY = "该底图没有对应的表情差分"
 INDENT_OUTFIT = 30
 INDENT_ACTION = 48
 ANIM_ROW = 180
-# 提示横幅/遮罩的通用淡入淡出时长
+# 提示横幅的通用淡入淡出时长
 ANIM_VEIL = 150
-# 拖放反馈：进场慢（看得清"进入了拖放态"）、退场快（取消不该有戏剧性）
-ANIM_DROP_IN = 180
-ANIM_DROP_OUT = 120
-# 虚线框：离窗口边缘的留白与圆角（和 RADIUS_STAGE 同族，读起来像窗口里又开了一层面板）
-DROP_INSET = 14
-DROP_RADIUS = 14
-# 行进光斑：沿框边爬的拖尾长度、每帧步长与计时器间隔。
-# 步长必须小于拖尾长度，否则光斑会"跳"而不是"爬"。
-DROP_STREAK = 30.0
+# ── 拖放反馈（长在角色库面板上，不是覆盖层）──────────────────
+# Flet 0.86 的 Container 没有 animate_color，bgcolor/border 的隐式动画不可用，
+# 所以拖放态的一切视觉都画在一张 Canvas 上，由 Python 逐帧重算 alpha 和位置。
+# 进场慢（6 帧，看得清"进入拖放态"）、退场快（4 帧，取消不该有戏剧性）。
 DROP_TICK = 0.03
-DROP_STEP = 22.0
+DROP_IN_FRAMES = 6
+DROP_OUT_FRAMES = 4
+# 虚线贴面板内边 0px：画布拿到的是面板扣掉 1px 描边后的内矩形，所以 2px 的描边
+# 正好压在那条灰线上，读起来是"这块面板的边框变了状态"而不是里面又框了一层。
+DROP_INSET = 0.0
+# 行进光斑：拖尾长度与每帧弧长步长。步长必须小于拖尾长度，否则光斑是"跳"不是"爬"；
+# 面板周长约 1100px，12px/帧 ≈ 5s 一圈。
+DROP_STREAK = 30.0
+DROP_STEP = 12.0
 # 拒绝态：红框停留多久再退场
 DROP_REJECT_MS = 160
+# 角色错峰入场：每条间隔与浮起高度
+STAGGER_MS = 0.04
+STAGGER_RISE = 10.0
 # 慢载入才给过程反馈：解析超过这个时长才弹"正在解析"，快路径什么都不弹
 BUSY_DELAY = 0.25
 
@@ -176,15 +182,11 @@ def _palette(dark):
             "err_bg": "#fbe3e7",
             "err_fg": "#9c2a44",
         }
-    # 拖放覆盖层用色。注意 Flet 的 hex 是 #AARRGGBB（alpha 在最前）：
-    # 把 alpha 拼到 6 位色值后面会被解析成不透明的错色，整屏会变成一坨脏色。
-    # 压暗层用中性黑不掺主题色——浅色主题掺色会发脏；深色本来就暗，要压得更重才看得出"变了"。
-    p["scrim"] = "#7A000000" if dark else "#4D000000"
-    # 拒绝态的框用红，但 veil 不变色：红压暗太戏剧化，一个红框足够说"不行"。
-    p["err_frame"] = "#ff5f6d" if dark else "#d0304f"
+    # 拖放态的两色：常态走主题强调色，拒绝态走红。注意 Flet 的 hex 是
+    # #AARRGGBB（alpha 在最前），把 alpha 拼到 6 位色值后面会被解析成不透明的
+    # 错色，整块面板会变成一坨脏色——所有带透明度的色值都由 _drop_rgba 现算。
     p["frame"] = p["accent"]
-    p["frame_glow"] = "#33" + p["accent"].lstrip("#")
-    p["err_frame_glow"] = "#40" + p["err_frame"].lstrip("#")
+    p["err_frame"] = "#ff5f6d" if dark else "#d0304f"
     return p
 
 
@@ -258,7 +260,7 @@ def _find_expr_info(file_infos, base_name):
 HELP_STEPS = (
     ("打开", "点击「打开 BIN」选择 .bin，或「HZC 文件夹」直接指向解包目录；"
              "也可把 .bin / HZC 文件夹拖到程序图标上直接打开。"
-             + ("或直接把文件拖进窗口。" if DROPZONE_ON else "")),
+             + ("或把文件直接拖进左侧「角色库」。" if DROPZONE_ON else "")),
     ("挑选", "左侧按 角色 → 服装 → 动作 展开，每级都有缩略图。"),
     ("预览", "中间是底图舞台：滚轮缩放、拖拽平移，多帧底图用左右箭头翻帧。"),
     ("合成", "点击「差分部件」里的任意一帧表情，右侧即时合成。"),
@@ -302,19 +304,34 @@ class ComposerApp:
         self.open_roles = set()
         self.open_outfits = set()
         self._tree_toggles = {}
+        # 角色错峰入场：本次载入的角色外壳（透明度/位移在 _stagger_next 里逐条推）
+        self._tree_wraps = []
+        self._stagger_i = 0
+        self._stagger_gen = -1
         # 重建树期间屏蔽"展开即选中"等级联副作用，见 _outfit_tile.toggle
         self._restoring = False
-        # 拖放提示层当前是否显示（动画分两帧走，见 _show_drop_hint）
+        # ── 拖放态（画布长在角色库面板上）────────────────────
+        # 文件是否正悬在面板上方；文案和错峰入场都看它。
+        self._drop_armed = False
+        # 画布在册（visible）吗。动画全靠逐帧重绘，见 _drop_open / _tick_drop。
         self._drop_hint_shown = False
-        # 画布尺寸缓存：Canvas 隐藏时不参与排版，重新显示时得靠它立刻补出虚线框
+        # 画布尺寸：Canvas 不参与排版时不会有尺寸，重新亮起来后要靠它补出第一帧
         self._drop_size = (0.0, 0.0)
-        # 拖放反馈的三个可动画量：框的留白（快门收拢）、配色（拒绝变红）、光斑弧长
-        self._drop_inset = float(DROP_INSET)
+        # 整层淡入淡出进度 0→1（算进每个 shape 的颜色 alpha）与它的方向
+        self._drop_a = 0.0
+        self._drop_dir = 0
+        # 配色（accent / err）与光斑弧长
         self._drop_tone = "accent"
         self._drop_dist = 0.0
-        # 计时器代数：+1 即可让所有在途的 tick / tween 自己作废，
+        # 计时器代数：+1 即可让所有在途的 tick / 错峰链自己作废，
         # 不用去 cancel 具体的 call_later 句柄。
         self._drop_gen = 0
+        self._drop_canvas = None
+        self._hint_icon = None
+        self._hint_title = None
+        self._hint_sub = None
+        self._hint_idle_sub = ""
+        self._hint_state = "idle"
         # 树里所有动作行的选中态控件组；换选时按 filename 统一复原，不记"上一次点了谁"。
         self._action_rows = []
         # 载入代数：载入/载出各 +1。后台解析与缩略图解码都跨"载入中→载出"这段
@@ -386,21 +403,36 @@ class ComposerApp:
 
     # ── 通用小构件 ──────────────────────────────────────────
 
-    def _panel(self, controls, *, width=None, expand=False, pad_right=6):
+    def _panel(self, controls, *, width=None, expand=False, pad_right=6, overlay=None):
         """面板：白卡片压在浅灰页底上，靠 1px 细描边分栏。
 
         这里刻意不用渐变、纹理和阴影——工具界面要的是边界清楚，
         材质效果只会让三栏看起来糊在一起。
+
+        overlay 是给"贴在面板外框上的动效层"用的（拖放态的画布）。留白必须
+        从本体挪进内容层，否则 overlay 拿到的是内容矩形，画出来的框会缩在
+        描边里面一圈，看着像另贴了一层。
         """
         ink = self.ink
+        pad = ft.Padding.only(left=12, top=10, right=pad_right, bottom=10)
+        col = ft.Column(controls, spacing=10, expand=True)
+        if overlay is None:
+            content = col
+        else:
+            content = ft.Stack(
+                [ft.Container(content=col, padding=pad), overlay],
+                expand=True,
+                fit=ft.StackFit.EXPAND,
+            )
+            pad = None
         return ft.Container(
-            content=ft.Column(controls, spacing=10, expand=True),
+            content=content,
             width=width,
             expand=expand,
             bgcolor=ink["panel"],
             border=ft.Border.all(1, ink["line"]),
             border_radius=RADIUS_PANEL,
-            padding=ft.Padding.only(left=12, top=10, right=pad_right, bottom=10),
+            padding=pad,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         )
 
@@ -460,6 +492,16 @@ class ComposerApp:
         self._apply_theme()
         p = self.page
 
+        # 拖放反馈的动效全靠逐帧重绘，重建时把状态清干净：
+        # overlay 整棵换掉，残留的 shown/进度会让下一次 enter 不动。
+        self._drop_hint_shown = False
+        self._drop_armed = False
+        self._drop_dir = 0
+        self._drop_a = 0.0
+        self._drop_dist = 0.0
+        self._drop_tone = "accent"
+        self._drop_gen += 1
+
         self.title_bar = self._build_title_bar()
         self.tree_col = self._build_tree_column()
         self.base_col = self._build_base_column()
@@ -486,7 +528,8 @@ class ComposerApp:
         body = ft.Container(
             content=ft.Row(
                 [
-                    ft.Container(self.tree_col, width=300),
+                    # 只有左栏是拖放目标（Dropzone 就地包一层，见 _drop_wrap）
+                    ft.Container(self._drop_wrap(self.tree_col), width=300),
                     ft.Container(self.base_col, expand=True),
                     ft.Container(self.result_col, width=372),
                 ],
@@ -498,42 +541,16 @@ class ComposerApp:
         )
 
         root = ft.Column([self.title_bar, body, status_bar], spacing=0, expand=True)
-        # 拖放提示：整窗压暗 + 一圈高光虚线框 + 一个沿框爬的光斑，就这三层，
-        # 一层只管一件事——压暗说"进入拖放态"，虚线框说"边界在这"，光斑说"还活着，松手吧"。
-        # 之前叠的底部胶囊、实线取景框是三层信息互相抢；虚线只能用 Canvas 画
-        # （Container 的 border 不支持 dash），所以框和光斑共用这一张画布。
-        self._drop_hint_shown = False
-        self._drop_gen += 1
-        self._drop_inset = float(DROP_INSET)
-        self._drop_tone = "accent"
-        self._drop_dist = 0.0
-        self._drop_canvas = fc.Canvas(
-            expand=True,
-            shapes=[],
-            on_resize=self._on_drop_resize,
-        )
-        self.drop_hint = ft.Container(
-            visible=False,
-            opacity=0.0,
-            animate=ft.Animation(ANIM_DROP_IN, ft.AnimationCurve.EASE_OUT),
-            content=ft.Stack(
-                [
-                    ft.Container(left=0, right=0, top=0, bottom=0,
-                                 bgcolor=self.ink["scrim"]),
-                    self._drop_canvas,
-                ],
-                expand=True,
-                fit=ft.StackFit.EXPAND,
-            ),
-            left=0, right=0, top=0, bottom=0,
-        )
-        p.add(self._drop_wrap(
-            ft.Stack([root, self.drop_hint], expand=True, fit=ft.StackFit.EXPAND)
-        ))
+        p.add(root)
         p.update()
 
     def _drop_wrap(self, content):
-        """把整扇窗口包成拖放目标；未启用（官方客户端没有该插件）时原样返回。"""
+        """把角色库面板包成拖放目标；未启用（官方客户端没有该插件）时原样返回。
+
+        落点只在这一栏：语义上"资源入口"就是它，铺满整扇窗口反而会让反馈和
+        它的来源对不上。Dropzone 的 on_entered/on_exited 是区域限定的，
+        所以包在这儿，中、右两栏拖进去就真的毫无反应。
+        """
         if not DROPZONE_ON:
             return content
         # expand 不可省：Dropzone 是 LayoutControl，没有尺寸时 Dart 侧按 0 高度排版，
@@ -542,14 +559,19 @@ class ComposerApp:
             expand=True,
             content=content,
             on_dropped=self._on_dropped,
-            on_entered=lambda e: self._show_drop_hint(True),
-            on_exited=lambda e: self._show_drop_hint(False),
+            on_entered=lambda e: self._drag_entered(),
+            on_exited=lambda e: self._drag_exited(),
         )
 
-    def _frame_colors(self):
-        if self._drop_tone == "err":
-            return self.ink["err_frame"], self.ink["err_frame_glow"]
-        return self.ink["frame"], self.ink["frame_glow"]
+    def _drop_rgba(self, alpha_max=255):
+        """当前色调（accent / err_frame）× 淡入进度，拼成 #AARRGGBB。
+
+        Flet 的 hex 是 alpha 在最前，拼反了会被当成另一个色（近乎不透明），
+        整块面板变成一坨脏色——这里只有一处拼接，别再手写第二处。
+        """
+        rgb = _rgb(self.ink["err_frame" if self._drop_tone == "err" else "frame"])
+        a = max(0, min(255, int(round(alpha_max * self._drop_a))))
+        return "#%02X%02X%02X%02X" % (a, *rgb)
 
     def _frame_point(self, w, h, m, d):
         """圆角矩形周长上的参数化取点：顺时针，从上边直段的起点开始。
@@ -557,7 +579,7 @@ class ComposerApp:
         光斑要贴着框边爬，而 Flet 的 Paint 只有 stroke_dash_pattern、没有
         stroke_dash_offset，没法靠 dash 位移做"行进"，只能自己按弧长算点。
         """
-        r = min(DROP_RADIUS, (w - 2 * m) / 2.0, (h - 2 * m) / 2.0)
+        r = min(RADIUS_PANEL - m, (w - 2 * m) / 2.0, (h - 2 * m) / 2.0)
         lx = max(0.0, w - 2 * m - 2 * r)
         ly = max(0.0, h - 2 * m - 2 * r)
         arc = math.pi * r / 2.0
@@ -607,117 +629,177 @@ class ComposerApp:
         )
 
     def _drop_shapes(self, w, h):
-        """画布的全部内容：辉光框 + 高光虚线框 + 爬行的光斑（辉光 + 核心）。"""
-        m = self._drop_inset
-        if w <= m * 2 + 4 or h <= m * 2 + 4:
+        """画布的全部内容：底纹 + 辉光边 + 虚线边 + 爬行的光斑（拖尾 + 核心）。
+
+        五个形状都贴面板外框走。整层的淡入淡出不走 Container 的隐式动画
+        （0.86 没有 animate_color），而是把进度算进每个 shape 的颜色 alpha，
+        所以一切由 Python 逐帧重绘。
+        """
+        m = DROP_INSET
+        if self._drop_a <= 0.0 or w <= m * 2 + 4 or h <= m * 2 + 4:
             return []
-        line, glow = self._frame_colors()
         box = dict(x=m, y=m, width=w - 2 * m, height=h - 2 * m,
-                   border_radius=ft.BorderRadius.all(DROP_RADIUS))
+                   border_radius=ft.BorderRadius.all(RADIUS_PANEL - m))
         return [
+            # 底纹 = "我在听"。最深只有 18% 的强调色，不能压过面板里的文字。
             fc.Path(
-                elements=[fc.Path.Rect(**box)],
-                paint=ft.Paint(style=ft.PaintingStyle.STROKE,
-                               stroke_width=7, color=glow),
+                elements=[fc.Path.Rect(x=0, y=0, width=w, height=h,
+                                       border_radius=ft.BorderRadius.all(RADIUS_PANEL))],
+                paint=ft.Paint(style=ft.PaintingStyle.FILL,
+                               color=self._drop_rgba(0x2E)),
             ),
             fc.Path(
                 elements=[fc.Path.Rect(**box)],
                 paint=ft.Paint(style=ft.PaintingStyle.STROKE,
-                               stroke_width=2, color=line,
-                               stroke_dash_pattern=[12, 9]),
+                               stroke_width=6, color=self._drop_rgba(0x33)),
             ),
-            self._streak(w, h, m, self._drop_dist,
-                         "#66" + line.lstrip("#"), 9),
-            self._streak(w, h, m, self._drop_dist, line, 2.5),
+            # 虚线边 = "落点就是这块面板"。它替代的是面板那 1px 实描边，
+            # 所以圆角、位置都必须跟面板本体严丝合缝，否则就又是"贴了一层"。
+            fc.Path(
+                elements=[fc.Path.Rect(**box)],
+                paint=ft.Paint(style=ft.PaintingStyle.STROKE,
+                               stroke_width=2, color=self._drop_rgba(),
+                               stroke_dash_pattern=[10, 7]),
+            ),
+            self._streak(w, h, m, self._drop_dist, self._drop_rgba(0x59), 8),
+            self._streak(w, h, m, self._drop_dist, self._drop_rgba(), 2.5),
         ]
 
     def _redraw_drop(self):
+        canvas = self._drop_canvas
+        if canvas is None:
+            return
         w, h = self._drop_size
-        self._drop_canvas.shapes = self._drop_shapes(w, h)
-        self._safe_update(self._drop_canvas)
+        canvas.shapes = self._drop_shapes(w, h)
+        self._safe_update(canvas)
 
     def _on_drop_resize(self, e):
-        self._drop_size = (e.width, e.height)
+        self._drop_size = (float(e.width), float(e.height))
         self._redraw_drop()
 
     def _tick_drop(self, gen):
-        """悬停期间唯一的动效：光斑沿框缓慢爬行，步长小于拖尾长度所以看着是连续的。"""
+        """淡入淡出和光斑爬行共用这一条计时链，只在画布在册时跑。"""
         if gen != self._drop_gen or not self._drop_hint_shown:
             return
+        if self._drop_dir > 0:
+            self._drop_a = min(1.0, self._drop_a + 1.0 / DROP_IN_FRAMES)
+            if self._drop_a >= 1.0:
+                self._drop_dir = 0
+        elif self._drop_dir < 0:
+            self._drop_a = max(0.0, self._drop_a - 1.0 / DROP_OUT_FRAMES)
+            if self._drop_a <= 0.0:
+                # 走完就收画布：Canvas 会吃掉自己矩形内的点击，留着树就点不动了
+                self._drop_dir = 0
+                self._close_drop_canvas()
+                return
         self._drop_dist += DROP_STEP
         self._redraw_drop()
         self._later(DROP_TICK, self._tick_drop, gen)
 
-    def _tween_inset(self, target, gen, steps):
-        """框的留白插值。只在"吸附进场"和"松手快门"两个瞬间各跑几帧，不做常驻插值。"""
-        if gen != self._drop_gen:
+    def _drop_open(self):
+        """进入拖放态：画布先亮起来，淡入交给 _tick_drop 逐帧推。"""
+        if self._drop_canvas is None:
             return
-        cur = self._drop_inset
-        if steps <= 1 or abs(target - cur) < 0.6:
-            self._drop_inset = float(target)
-        else:
-            self._drop_inset = cur + (target - cur) * 0.55
+        self._drop_gen += 1              # 在途的淡出链就此作废
+        self._drop_hint_shown = True
+        self._drop_tone = "accent"
+        self._drop_dir = 1
+        # 起点不能是 0：alpha=0 时形状整个不画，亮起来的第一帧会是空白板，
+        # 白掉一帧的进场看着就是"慢半拍"。从第一帧的量起步。
+        self._drop_a = max(self._drop_a, 1.0 / DROP_IN_FRAMES)
+        self._drop_canvas.visible = True
+        # 亮起来之前没有排版，尺寸靠随后到达的 on_resize（约 10ms）补；
+        # 这里先用上一次记下的尺寸画一帧，免得淡入的头两帧是空的。
         self._redraw_drop()
-        if self._drop_inset != target:
-            self._later(DROP_TICK, self._tween_inset, target, gen, steps - 1)
+        self._safe_update(self._drop_canvas)
+        self._kick_drop()
 
-    def _show_drop_hint(self, on):
-        """armed ↔ idle。
+    def _kick_drop(self):
+        """保证有且在跑的计时链——淡入淡出和光斑爬行都吊在这条链上。"""
+        self._later(DROP_TICK, self._tick_drop, self._drop_gen)
 
-        visible 和 opacity 必须分两帧改：同一帧里既插入又改属性，Flutter 只会
-        按最终状态建成控件，动画没有起点，看着就是"啪"地弹出来。
-        visible 也不能一直留着——这层铺满整扇窗口，隐藏时还会吃掉所有点击。
-        """
-        if bool(on) == self._drop_hint_shown:
+    def _drop_close(self, immediate=False):
+        """退场：淡出后再收。immediate 给"松手快门"用——快门不需要谢幕。"""
+        if self._drop_canvas is None:
             return
-        hint = self.drop_hint
-        if on:
-            self._drop_tone = "accent"
-            # 从略外面一点吸进来：进场是"接住"，退场只是"撤销"
-            self._drop_inset = float(DROP_INSET + 8)
-            # Canvas 隐藏时不参与排版，重新显示时 on_resize 不一定再发一次，
-            # 所以先用上次记下的尺寸把框补好，免得 veil 先亮、框慢一拍。
-            self._redraw_drop()
-            self._drop_hint_shown = True
-            hint.animate = ft.Animation(ANIM_DROP_IN, ft.AnimationCurve.EASE_OUT)
-            hint.visible = True
-            self._safe_update(hint)
-            if not self._later(0.02, self._set_drop_hint_alpha, True):
-                self._set_drop_hint_alpha(True)
-            gen = self._drop_gen
-            self._later(DROP_TICK, self._tick_drop, gen)
-            self._tween_inset(DROP_INSET, gen, 5)
-        else:
-            # 代数 +1：在途的 tick / tween 全部自动作废，不用去 cancel 句柄
+        if immediate or self._drop_a <= 0.0:
             self._drop_gen += 1
-            self._drop_hint_shown = False
-            hint.animate = ft.Animation(ANIM_DROP_OUT, ft.AnimationCurve.EASE_IN)
-            self._set_drop_hint_alpha(False)
-            if not self._later(ANIM_DROP_OUT / 1000 + 0.03, self._hide_drop_hint):
-                self._hide_drop_hint()
+            self._drop_dir = 0
+            self._close_drop_canvas()
+        else:
+            self._drop_dir = -1
+            self._kick_drop()
 
-    def _set_drop_hint_alpha(self, on):
-        if self._drop_hint_shown != bool(on):
+    def _close_drop_canvas(self):
+        self._drop_hint_shown = False
+        if self._drop_canvas is None:
             return
-        self.drop_hint.opacity = 1.0 if on else 0.0
-        self._safe_update(self.drop_hint)
+        self._drop_canvas.shapes = []
+        self._drop_canvas.visible = False
+        self._safe_update(self._drop_canvas)
+
+    def _drag_entered(self):
+        if self._drop_armed:
+            return
+        self._drop_armed = True
+        self._drop_open()
+        self._set_hint_state("armed")
+
+    def _drag_exited(self):
+        if not self._drop_armed:
+            return
+        self._drop_armed = False
+        self._drop_close()
+        self._set_hint_state("idle")
+
+    def _set_hint_state(self, state):
+        """空状态文案就地改字：idle / armed / reject 三套说法长在同一个容器里。
+
+        不再新起一层提示——落点上叠东西就又回到"给应用贴取景框"了。
+        """
+        if self._hint_title is None or state == self._hint_state:
+            return
+        self._hint_state = state
+        ink = self.ink
+        if state == "armed":
+            self._hint_icon.name = ft.Icons.UPLOAD_FILE
+            self._hint_icon.color = ink["accent"]
+            self._hint_title.value = "松手即载入"
+            self._hint_title.color = ink["accent"]
+            self._hint_sub.value = "支持 .bin 或整个 HZC 文件夹"
+        elif state == "reject":
+            self._hint_icon.name = ft.Icons.UPLOAD_FILE
+            self._hint_icon.color = ink["err_frame"]
+            self._hint_title.value = "拖进来的不是资源"
+            self._hint_title.color = ink["err_frame"]
+            self._hint_sub.value = "只能放 .bin 或 HZC 文件夹进来"
+        else:
+            self._hint_icon.name = ft.Icons.FOLDER_OPEN
+            self._hint_icon.color = ink["accent"]
+            self._hint_title.value = "尚未加载文件"
+            self._hint_title.color = ink["text"]
+            self._hint_sub.value = self._hint_idle_sub
+        self._safe_update(self.empty_hint)
 
     def _reject_drop(self):
-        """拖进来的东西不认：框先变红停 160ms 再退场，然后才是错误横幅。
+        """拖进来的东西不认：面板边框变红停 160ms，再淡出。
 
-        veil 不变色——红压暗太戏剧化，一个红框足够说"不行"。
+        不弹底部横幅——报错就该发生在落点旁边，用户的视线正停在那儿。
         """
         self._drop_tone = "err"
+        self._drop_a = 1.0
+        self._set_hint_state("reject")
         self._redraw_drop()
-        self._snack("只能拖入 .bin 文件或 HZC 文件夹", error=True)
-        gen = self._drop_gen
-        if not self._later(DROP_REJECT_MS / 1000, self._show_drop_hint, False):
-            self._show_drop_hint(False)
+        if not self._later(DROP_REJECT_MS / 1000, self._reject_fade):
+            self._reject_fade()
 
-    def _hide_drop_hint(self):
-        if not self._drop_hint_shown:
-            self.drop_hint.visible = False
-            self._safe_update(self.drop_hint)
+    def _reject_fade(self):
+        if self._drop_tone != "err":
+            return          # 这 160ms 里又有新的进入/拖入，本次拒绝不算数
+        self._drop_armed = False
+        # 画布没在册（比如拖进来前没触发 enter）就没必要淡出，直接把它清干净
+        self._drop_close(immediate=not self._drop_hint_shown)
+        self._set_hint_state("idle")
 
     def _safe_update(self, control):
         try:
@@ -732,10 +814,10 @@ class ComposerApp:
         if not target:
             self._reject_drop()
             return
-        # 快门：veil 退场的同时框向内收拢一点，给"被吸进去"一个交代。
-        # 松手之后不再补一层 loading 遮罩——真正的确认是左侧树自己长出来。
-        self._show_drop_hint(False)
-        self._tween_inset(DROP_INSET - 6, self._drop_gen, 4)
+        # 快门：画布立刻收掉，不谢幕——松手之后的确认交给内容本身（角色逐条长出来）。
+        self._drop_armed = False
+        self._drop_close(immediate=True)
+        self._set_hint_state("idle")
         await self._load_bin(target)
 
     # ── Title bar ───────────────────────────────────────────
@@ -829,21 +911,36 @@ class ComposerApp:
             ],
         )
 
+        # 拖放态的画布：贴面板外框画底纹/虚线/光斑。idle 时 shapes 空着且
+        # visible=False——Canvas 会吃掉自己矩形内的点击，留着不关就点不动树。
+        self._drop_canvas = fc.Canvas(
+            top=0, left=0, right=0, bottom=0,
+            shapes=[],
+            visible=False,
+            on_resize=self._on_drop_resize,
+        ) if DROPZONE_ON else None
+
+        self._hint_icon = ft.Icon(ft.Icons.FOLDER_OPEN, size=26, color=ink["accent"])
+        self._hint_title = ft.Text("尚未加载文件", size=13,
+                                   weight=ft.FontWeight.W_600, color=ink["text"])
+        self._hint_idle_sub = ("点右上角的 打开 BIN / 打开 HZC 图标\n或按 Ctrl+O 选择文件"
+                               + ("\n或直接拖到这里" if DROPZONE_ON else ""))
+        self._hint_sub = ft.Text(self._hint_idle_sub, size=11, color=ink["text_dim"],
+                                 text_align=ft.TextAlign.CENTER)
+        self._hint_state = "idle"
+
         self.empty_hint = ft.Container(
             content=ft.Column(
                 [
                     ft.Container(
-                        ft.Icon(ft.Icons.FOLDER_OPEN, size=26, color=ink["accent"]),
+                        self._hint_icon,
                         width=58, height=58, border_radius=20, bgcolor=ink["accent_soft"],
                         alignment=ft.Alignment.CENTER,
                     ),
-                    ft.Text("尚未加载文件", size=13, weight=ft.FontWeight.W_600, color=ink["text"]),
+                    self._hint_title,
                     # 载入入口只留标题栏那两个图标，空状态不再重复一套按钮，
                     # 这里只负责告诉用户去哪儿找（自定义客户端下多一句拖入）。
-                    ft.Text("点右上角的 打开 BIN / 打开 HZC 图标\n或按 Ctrl+O 选择文件"
-                            + ("\n或把文件直接拖进窗口" if DROPZONE_ON else ""),
-                            size=11, color=ink["text_dim"],
-                            text_align=ft.TextAlign.CENTER),
+                    self._hint_sub,
                 ],
                 spacing=8,
                 tight=True,
@@ -863,6 +960,7 @@ class ComposerApp:
         return self._panel(
             [header, ft.Container(expand=True, content=body)],
             pad_right=6,
+            overlay=self._drop_canvas,
         )
 
     # ── Center: base preview + parts ────────────────────────
@@ -1379,7 +1477,10 @@ class ComposerApp:
         self.selected_info = None
         self.selected_filename = None
         self._clear_previews()
-        self._render_tree()
+        # 只在"真的载入了一份新东西"时错峰浮入；换主题走的是默认整棵直出，
+        # 不然每切一次深浅色都要把树重播一遍动画。
+        self._render_tree(stagger=True)
+        self._expand_role_tiles(gen)
         hzc = sum(1 for i in infos if i["type"] == "hzc")
         self.file_chip.content.value = Path(path).name
         if self.unload_btn is not None:
@@ -1462,16 +1563,64 @@ class ComposerApp:
 
     # ── Tree ────────────────────────────────────────────────
 
-    def _render_tree(self):
+    def _render_tree(self, stagger=False):
         self.tree_list.controls.clear()
         self._tree_toggles = {}
         # 旧行容器已经不在树里了，控件组必须一起丢，否则换选时会去刷废弃控件。
         self._action_rows = []
+        self._tree_wraps = []
         for role, outfits in sorted(self.hierarchy.items()):
-            self.tree_list.controls.append(self._role_tile(role, outfits))
+            tile = self._role_tile(role, outfits)
+            if not stagger:
+                self.tree_list.controls.append(tile)
+                continue
+            # 入场动画套一层外壳：ListTile 自己不吃 opacity/offset。
+            # 这里只给 animate=Animation(...)，不显式写 animate_size/position 之类
+            # ——那几个显式开关在这版 flet 上会把整块内容弄得不渲染。
+            wrap = ft.Container(
+                tile,
+                opacity=0.0,
+                offset=ft.Offset(0, STAGGER_RISE),
+                animate=ft.Animation(ANIM_ROW, ft.AnimationCurve.EASE_OUT),
+            )
+            self._tree_wraps.append(wrap)
+            self.tree_list.controls.append(wrap)
         self.tree_list.visible = True
         self.empty_hint.visible = False
         self.page.update()
+
+    def _expand_role_tiles(self, gen):
+        """角色逐条错峰浮入：文件进来了，动的是内容本身，而不是再盖一层提示。
+
+        必须等 _render_tree 的 page.update() 把 opacity=0 送出去之后再推第二帧，
+        同一帧里既创建又改终值，Flutter 只会按最终状态建控件，动画没有起点。
+        """
+        self._stagger_gen = gen
+        self._stagger_i = 0
+        # 起步让出一帧：_render_tree 的 opacity=0 得先落到客户端，动画才有起点
+        self._later(STAGGER_MS, self._stagger_step)
+
+    def _stagger_step(self):
+        if self._stagger_gen != self._state_gen:
+            return                      # 这棵树已被换文件/载出作废，控件都丢了
+        if self._stagger_i >= len(self._tree_wraps):
+            return
+        if self._drop_armed:
+            self._settle_stagger()      # 中途又拖进来：剩下的直接落终点，不留半透明
+            return
+        wrap = self._tree_wraps[self._stagger_i]
+        wrap.opacity = 1.0
+        wrap.offset = ft.Offset(0, 0)
+        self._safe_update(wrap)
+        self._stagger_i += 1
+        self._later(STAGGER_MS, self._stagger_step)
+
+    def _settle_stagger(self):
+        for wrap in self._tree_wraps[self._stagger_i:]:
+            wrap.opacity = 1.0
+            wrap.offset = ft.Offset(0, 0)
+        self._stagger_i = len(self._tree_wraps)
+        self._safe_update(self.tree_list)
 
     def _restore_tree_state(self):
         """按记录重新展开角色/服装（角色先开，服装的 toggle 才存在）。"""

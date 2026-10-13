@@ -40,8 +40,9 @@ Compress-Archive -Path dist/FVPTachieComposer.exe -DestinationPath dist/FVPTachi
 
 ## 拖放载入（`flet build windows` 管线）
 
-把 `.bin` / HZC 文件夹直接拖进窗口即载入。该能力由 `flet-dropzone`
-（内部是 Flutter 的 `desktop_drop` 插件）提供，**插件必须编译进 Flutter 客户端**，
+把 `.bin` / HZC 文件夹直接拖进左侧「角色库」面板即载入（只有这一栏是落点）。
+该能力由 `flet-dropzone`（内部是 Flutter 的 `desktop_drop` 插件）提供，
+**插件必须编译进 Flutter 客户端**，
 所以只有 `flet build windows` 的产物有它；`flet run` 与 PyInstaller 产物用官方桌面
 客户端，不认这个控件。
 

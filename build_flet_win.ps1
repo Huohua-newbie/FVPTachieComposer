@@ -2,7 +2,7 @@
   flet build windows 管线（替代 PyInstaller 单 exe 的另一条发布链）
   ---------------------------------------------------------------------------
   产物：build\windows\FVPTachieComposer.exe + 数据目录（非单文件），
-        desktop_drop 插件被编进自定义 Flutter 客户端 → 支持把文件拖进窗口。
+        desktop_drop 插件被编进自定义 Flutter 客户端 → 支持把文件拖进左侧角色库面板。
   用法：.\build_flet_win.ps1 -Version 2.2.1-beta [-SkipFlutterDoctor]
   备注：PyInstaller 流程仍由 build_win.ps1 + FVPTachieComposer.win.spec 负责，
         两者互不影响（flet 构建只写 build\ 与 dist\ 下各自的子目录）。
