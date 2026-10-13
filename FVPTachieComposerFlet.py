@@ -10,6 +10,7 @@ Run: python FVPTachieComposerFlet.py
 import asyncio
 import base64
 import io
+import math
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -47,11 +48,23 @@ PART_HINT_EMPTY = "该底图没有对应的表情差分"
 INDENT_OUTFIT = 30
 INDENT_ACTION = 48
 ANIM_ROW = 180
-# veil 与提示横幅的淡入淡出时长
+# 提示横幅/遮罩的通用淡入淡出时长
 ANIM_VEIL = 150
-# 拖放提示：虚线框离窗口边缘的留白，以及圆角半径
+# 拖放反馈：进场慢（看得清"进入了拖放态"）、退场快（取消不该有戏剧性）
+ANIM_DROP_IN = 180
+ANIM_DROP_OUT = 120
+# 虚线框：离窗口边缘的留白与圆角（和 RADIUS_STAGE 同族，读起来像窗口里又开了一层面板）
 DROP_INSET = 14
 DROP_RADIUS = 14
+# 行进光斑：沿框边爬的拖尾长度、每帧步长与计时器间隔。
+# 步长必须小于拖尾长度，否则光斑会"跳"而不是"爬"。
+DROP_STREAK = 30.0
+DROP_TICK = 0.03
+DROP_STEP = 22.0
+# 拒绝态：红框停留多久再退场
+DROP_REJECT_MS = 160
+# 慢载入才给过程反馈：解析超过这个时长才弹"正在解析"，快路径什么都不弹
+BUSY_DELAY = 0.25
 
 # 拖放能力：OS 级文件拖放必须由 Flutter 客户端里的 desktop_drop 插件承接，
 # 插件只存在于 `flet build windows` 产出的自定义客户端里——官方客户端不认这个
@@ -165,9 +178,13 @@ def _palette(dark):
         }
     # 拖放覆盖层用色。注意 Flet 的 hex 是 #AARRGGBB（alpha 在最前）：
     # 把 alpha 拼到 6 位色值后面会被解析成不透明的错色，整屏会变成一坨脏色。
-    # 深色主题本来就暗，压得重一点才看得出"变了"；浅色压太黑会显脏。
+    # 压暗层用中性黑不掺主题色——浅色主题掺色会发脏；深色本来就暗，要压得更重才看得出"变了"。
     p["scrim"] = "#7A000000" if dark else "#4D000000"
-    p["accent_glow"] = "#33" + p["accent"].lstrip("#")
+    # 拒绝态的框用红，但 veil 不变色：红压暗太戏剧化，一个红框足够说"不行"。
+    p["err_frame"] = "#ff5f6d" if dark else "#d0304f"
+    p["frame"] = p["accent"]
+    p["frame_glow"] = "#33" + p["accent"].lstrip("#")
+    p["err_frame_glow"] = "#40" + p["err_frame"].lstrip("#")
     return p
 
 
@@ -291,6 +308,13 @@ class ComposerApp:
         self._drop_hint_shown = False
         # 画布尺寸缓存：Canvas 隐藏时不参与排版，重新显示时得靠它立刻补出虚线框
         self._drop_size = (0.0, 0.0)
+        # 拖放反馈的三个可动画量：框的留白（快门收拢）、配色（拒绝变红）、光斑弧长
+        self._drop_inset = float(DROP_INSET)
+        self._drop_tone = "accent"
+        self._drop_dist = 0.0
+        # 计时器代数：+1 即可让所有在途的 tick / tween 自己作废，
+        # 不用去 cancel 具体的 call_later 句柄。
+        self._drop_gen = 0
         # 树里所有动作行的选中态控件组；换选时按 filename 统一复原，不记"上一次点了谁"。
         self._action_rows = []
         # 载入代数：载入/载出各 +1。后台解析与缩略图解码都跨"载入中→载出"这段
@@ -314,6 +338,9 @@ class ComposerApp:
         self._snack_seq = 0
         self._snack_overlay = None
         self._snack_toast = None
+        # busy 横幅：_parsing_gen 非空表示"这一代解析还在途中"，_busy_seq 是那条卡片
+        self._parsing_gen = None
+        self._busy_seq = None
         self._setup_page()
         self._build()
 
@@ -471,11 +498,15 @@ class ComposerApp:
         )
 
         root = ft.Column([self.title_bar, body, status_bar], spacing=0, expand=True)
-        # 拖放提示：整窗压暗 + 一圈高光虚线框，就这两层。
-        # 之前叠的底部胶囊、实线取景框都是多余的视觉噪音——压暗本身已经是
-        # "现在松手"的信号，虚线框标出范围即可，不需要再写字。
-        # 虚线只能用 Canvas 画（Container 的 border 不支持 dash），圆角矩形
-        # 用 Path.Rect + border_radius，dash 走 Paint.stroke_dash_pattern。
+        # 拖放提示：整窗压暗 + 一圈高光虚线框 + 一个沿框爬的光斑，就这三层，
+        # 一层只管一件事——压暗说"进入拖放态"，虚线框说"边界在这"，光斑说"还活着，松手吧"。
+        # 之前叠的底部胶囊、实线取景框是三层信息互相抢；虚线只能用 Canvas 画
+        # （Container 的 border 不支持 dash），所以框和光斑共用这一张画布。
+        self._drop_hint_shown = False
+        self._drop_gen += 1
+        self._drop_inset = float(DROP_INSET)
+        self._drop_tone = "accent"
+        self._drop_dist = 0.0
         self._drop_canvas = fc.Canvas(
             expand=True,
             shapes=[],
@@ -484,7 +515,7 @@ class ComposerApp:
         self.drop_hint = ft.Container(
             visible=False,
             opacity=0.0,
-            animate=ft.Animation(ANIM_VEIL, ft.AnimationCurve.EASE_OUT),
+            animate=ft.Animation(ANIM_DROP_IN, ft.AnimationCurve.EASE_OUT),
             content=ft.Stack(
                 [
                     ft.Container(left=0, right=0, top=0, bottom=0,
@@ -515,62 +546,154 @@ class ComposerApp:
             on_exited=lambda e: self._show_drop_hint(False),
         )
 
+    def _frame_colors(self):
+        if self._drop_tone == "err":
+            return self.ink["err_frame"], self.ink["err_frame_glow"]
+        return self.ink["frame"], self.ink["frame_glow"]
+
+    def _frame_point(self, w, h, m, d):
+        """圆角矩形周长上的参数化取点：顺时针，从上边直段的起点开始。
+
+        光斑要贴着框边爬，而 Flet 的 Paint 只有 stroke_dash_pattern、没有
+        stroke_dash_offset，没法靠 dash 位移做"行进"，只能自己按弧长算点。
+        """
+        r = min(DROP_RADIUS, (w - 2 * m) / 2.0, (h - 2 * m) / 2.0)
+        lx = max(0.0, w - 2 * m - 2 * r)
+        ly = max(0.0, h - 2 * m - 2 * r)
+        arc = math.pi * r / 2.0
+        d %= 2 * lx + 2 * ly + 8 * arc
+
+        def take(n):
+            nonlocal d
+            if d <= n:
+                return True
+            d -= n
+            return False
+
+        if take(lx):                                    # 上直边 →
+            return (m + r + d, m)
+        if take(arc):                                   # 右上圆角
+            a = d / arc * math.pi / 2
+            return (w - m - r + r * math.sin(a), m + r - r * math.cos(a))
+        if take(ly):                                    # 右直边 ↓
+            return (w - m, m + r + d)
+        if take(arc):                                   # 右下圆角
+            a = d / arc * math.pi / 2
+            return (w - m - r + r * math.cos(a), h - m - r + r * math.sin(a))
+        if take(lx):                                    # 下直边 ←
+            return (w - m - r - d, h - m)
+        if take(arc):                                   # 左下圆角
+            a = d / arc * math.pi / 2
+            return (m + r - r * math.sin(a), h - m - r + r * math.cos(a))
+        if take(ly):                                    # 左直边 ↑
+            return (m, h - m - r - d)
+        a = d / arc * math.pi / 2                       # 左上圆角
+        return (m + r - r * math.cos(a), m + r - r * math.sin(a))
+
+    def _streak(self, w, h, m, head, color, width):
+        """一截沿框边爬的拖尾。按弧长采 4 段折线，过圆角时才不会切角。"""
+        pts = [self._frame_point(w, h, m, head - i * DROP_STREAK / 3.0)
+               for i in range(4)]
+        els = [fc.Path.MoveTo(x=pts[0][0], y=pts[0][1])]
+        els += [fc.Path.LineTo(x=p[0], y=p[1]) for p in pts[1:]]
+        return fc.Path(
+            elements=els,
+            paint=ft.Paint(
+                style=ft.PaintingStyle.STROKE,
+                stroke_width=width,
+                stroke_cap=ft.StrokeCap.ROUND,
+                color=color,
+            ),
+        )
+
     def _drop_shapes(self, w, h):
-        """按当前画布尺寸画压暗框：一层宽的半透明描边当辉光，上面叠一圈细虚线。"""
-        m = DROP_INSET
+        """画布的全部内容：辉光框 + 高光虚线框 + 爬行的光斑（辉光 + 核心）。"""
+        m = self._drop_inset
         if w <= m * 2 + 4 or h <= m * 2 + 4:
             return []
+        line, glow = self._frame_colors()
         box = dict(x=m, y=m, width=w - 2 * m, height=h - 2 * m,
                    border_radius=ft.BorderRadius.all(DROP_RADIUS))
         return [
             fc.Path(
                 elements=[fc.Path.Rect(**box)],
-                paint=ft.Paint(
-                    style=ft.PaintingStyle.STROKE,
-                    stroke_width=7,
-                    color=self.ink["accent_glow"],
-                ),
+                paint=ft.Paint(style=ft.PaintingStyle.STROKE,
+                               stroke_width=7, color=glow),
             ),
             fc.Path(
                 elements=[fc.Path.Rect(**box)],
-                paint=ft.Paint(
-                    style=ft.PaintingStyle.STROKE,
-                    stroke_width=2,
-                    color=self.ink["accent"],
-                    stroke_dash_pattern=[12, 9],
-                ),
+                paint=ft.Paint(style=ft.PaintingStyle.STROKE,
+                               stroke_width=2, color=line,
+                               stroke_dash_pattern=[12, 9]),
             ),
+            self._streak(w, h, m, self._drop_dist,
+                         "#66" + line.lstrip("#"), 9),
+            self._streak(w, h, m, self._drop_dist, line, 2.5),
         ]
+
+    def _redraw_drop(self):
+        w, h = self._drop_size
+        self._drop_canvas.shapes = self._drop_shapes(w, h)
+        self._safe_update(self._drop_canvas)
 
     def _on_drop_resize(self, e):
         self._drop_size = (e.width, e.height)
-        self._drop_canvas.shapes = self._drop_shapes(e.width, e.height)
-        self._safe_update(self._drop_canvas)
+        self._redraw_drop()
+
+    def _tick_drop(self, gen):
+        """悬停期间唯一的动效：光斑沿框缓慢爬行，步长小于拖尾长度所以看着是连续的。"""
+        if gen != self._drop_gen or not self._drop_hint_shown:
+            return
+        self._drop_dist += DROP_STEP
+        self._redraw_drop()
+        self._later(DROP_TICK, self._tick_drop, gen)
+
+    def _tween_inset(self, target, gen, steps):
+        """框的留白插值。只在"吸附进场"和"松手快门"两个瞬间各跑几帧，不做常驻插值。"""
+        if gen != self._drop_gen:
+            return
+        cur = self._drop_inset
+        if steps <= 1 or abs(target - cur) < 0.6:
+            self._drop_inset = float(target)
+        else:
+            self._drop_inset = cur + (target - cur) * 0.55
+        self._redraw_drop()
+        if self._drop_inset != target:
+            self._later(DROP_TICK, self._tween_inset, target, gen, steps - 1)
 
     def _show_drop_hint(self, on):
-        """淡入/淡出拖放提示层。
+        """armed ↔ idle。
 
         visible 和 opacity 必须分两帧改：同一帧里既插入又改属性，Flutter 只会
         按最终状态建成控件，动画没有起点，看着就是"啪"地弹出来。
         visible 也不能一直留着——这层铺满整扇窗口，隐藏时还会吃掉所有点击。
         """
-        hint = self.drop_hint
         if bool(on) == self._drop_hint_shown:
             return
-        self._drop_hint_shown = bool(on)
+        hint = self.drop_hint
         if on:
+            self._drop_tone = "accent"
+            # 从略外面一点吸进来：进场是"接住"，退场只是"撤销"
+            self._drop_inset = float(DROP_INSET + 8)
             # Canvas 隐藏时不参与排版，重新显示时 on_resize 不一定再发一次，
-            # 所以先用上次记下的尺寸把虚线框填好，免得 veil 先亮、框慢一拍。
-            if not self._drop_canvas.shapes:
-                w, h = self._drop_size
-                self._drop_canvas.shapes = self._drop_shapes(w, h)
+            # 所以先用上次记下的尺寸把框补好，免得 veil 先亮、框慢一拍。
+            self._redraw_drop()
+            self._drop_hint_shown = True
+            hint.animate = ft.Animation(ANIM_DROP_IN, ft.AnimationCurve.EASE_OUT)
             hint.visible = True
             self._safe_update(hint)
             if not self._later(0.02, self._set_drop_hint_alpha, True):
                 self._set_drop_hint_alpha(True)
+            gen = self._drop_gen
+            self._later(DROP_TICK, self._tick_drop, gen)
+            self._tween_inset(DROP_INSET, gen, 5)
         else:
+            # 代数 +1：在途的 tick / tween 全部自动作废，不用去 cancel 句柄
+            self._drop_gen += 1
+            self._drop_hint_shown = False
+            hint.animate = ft.Animation(ANIM_DROP_OUT, ft.AnimationCurve.EASE_IN)
             self._set_drop_hint_alpha(False)
-            if not self._later(ANIM_VEIL / 1000 + 0.03, self._hide_drop_hint):
+            if not self._later(ANIM_DROP_OUT / 1000 + 0.03, self._hide_drop_hint):
                 self._hide_drop_hint()
 
     def _set_drop_hint_alpha(self, on):
@@ -578,6 +701,18 @@ class ComposerApp:
             return
         self.drop_hint.opacity = 1.0 if on else 0.0
         self._safe_update(self.drop_hint)
+
+    def _reject_drop(self):
+        """拖进来的东西不认：框先变红停 160ms 再退场，然后才是错误横幅。
+
+        veil 不变色——红压暗太戏剧化，一个红框足够说"不行"。
+        """
+        self._drop_tone = "err"
+        self._redraw_drop()
+        self._snack("只能拖入 .bin 文件或 HZC 文件夹", error=True)
+        gen = self._drop_gen
+        if not self._later(DROP_REJECT_MS / 1000, self._show_drop_hint, False):
+            self._show_drop_hint(False)
 
     def _hide_drop_hint(self):
         if not self._drop_hint_shown:
@@ -591,13 +726,16 @@ class ComposerApp:
             pass
 
     async def _on_dropped(self, e):
-        self._show_drop_hint(False)
         paths = [getattr(f, "path", None) or getattr(f, "name", None)
                  for f in (getattr(e, "files", None) or [])]
         target = pick_drop_path(paths)
         if not target:
-            self._snack("只能拖入 .bin 文件或 HZC 文件夹", error=True)
+            self._reject_drop()
             return
+        # 快门：veil 退场的同时框向内收拢一点，给"被吸进去"一个交代。
+        # 松手之后不再补一层 loading 遮罩——真正的确认是左侧树自己长出来。
+        self._show_drop_hint(False)
+        self._tween_inset(DROP_INSET - 6, self._drop_gen, 4)
         await self._load_bin(target)
 
     # ── Title bar ───────────────────────────────────────────
@@ -1003,24 +1141,34 @@ class ComposerApp:
                 pass
         return False
 
-    def _snack(self, msg, error=False, folder=None):
+    def _snack(self, msg, error=False, folder=None, busy=False, ttl=None):
+        """底部居中的过程/结果横幅。
+
+        三种变体：busy（转圈、不自退，只给"真的等了"的操作）、ok（到点自退）、
+        err（常驻、带复制）。返回 seq，调用方可以用 _snack_is_showing(seq) 判断
+        自己那条还在不在，从而决定要不要用结果去替换它。
+        """
         self._snack_seq = getattr(self, "_snack_seq", 0) + 1
         seq = self._snack_seq
         ink = self.ink
-        bg = ink["err_bg"] if error else ink["ok_bg"]
-        fg = ink["err_fg"] if error else ink["ok_fg"]
+        if busy:
+            bg, fg = ink["accent_soft"], ink["text"]
+        else:
+            bg = ink["err_bg"] if error else ink["ok_bg"]
+            fg = ink["err_fg"] if error else ink["ok_fg"]
         # 短文案保持自然宽度，长文案限宽换行——不然会撑成一条横跨整窗的横幅
         label = ft.Text(msg, size=12, color=fg, weight=ft.FontWeight.W_500,
                         max_lines=3, overflow=ft.TextOverflow.ELLIPSIS)
         if len(msg) > 34:
             label = ft.Container(label, width=300)
-        row = [
-            ft.Icon(
-                ft.Icons.ERROR if error else ft.Icons.CHECK_CIRCLE,
-                size=17, color=fg,
-            ),
-            label,
-        ]
+        if busy:
+            # 转圈由 Dart 侧驱动，Python 这边零开销，不用自己排帧
+            lead = ft.ProgressRing(width=16, height=16, stroke_width=2,
+                                   color=ink["accent"])
+        else:
+            lead = ft.Icon(ft.Icons.ERROR if error else ft.Icons.CHECK_CIRCLE,
+                           size=17, color=fg)
+        row = [lead, label]
         if not error and folder:
             async def open_dir(e, _d=folder):
                 self._open_folder(_d)
@@ -1038,9 +1186,10 @@ class ComposerApp:
 
             copy_btn.on_click = copy_err
             row.append(copy_btn)
-        row.append(ft.IconButton(ft.Icons.CLOSE, icon_size=15, icon_color=fg,
-                                 tooltip=_tip("关闭"),
-                                 on_click=lambda e, _s=seq: self._dismiss_snack(_s)))
+        if not busy:
+            row.append(ft.IconButton(ft.Icons.CLOSE, icon_size=15, icon_color=fg,
+                                     tooltip=_tip("关闭"),
+                                     on_click=lambda e, _s=seq: self._dismiss_snack(_s)))
         toast = ft.Container(
             content=ft.Row(row, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             bgcolor=bg,
@@ -1074,9 +1223,18 @@ class ComposerApp:
         if not self._later(0.02, self._set_snack_alpha, seq, True):
             self._set_snack_alpha(seq, True)
 
-        # 报错不自动消失（要留时间复制），成功提示 2 秒后自己走
-        if not error:
-            self._later(2.0, self._dismiss_snack, seq)
+        # 报错不自动消失（要留时间复制）；busy 也不自退，等结果来替换它；
+        # 其余默认 2 秒，慢载入的结果横幅只留 1 秒——它只是"刚才那次没白等"的补话。
+        if busy:
+            self._busy_seq = seq
+        elif not error:
+            self._later(2.0 if ttl is None else ttl, self._dismiss_snack, seq)
+        return seq
+
+    def _snack_is_showing(self, seq):
+        """seq 那条横幅是否还是当前正在显示的那条。"""
+        return seq is not None and seq == self._snack_seq \
+            and self._snack_overlay in self.page.overlay
 
     def _set_snack_alpha(self, seq, on):
         if seq != self._snack_seq or self._snack_toast is None:
@@ -1171,6 +1329,11 @@ class ComposerApp:
         src = Path(path)
         self.import_dir = str(src if src.is_dir() else src.parent)
         self._set_status("正在解析…")
+        # 快路径不该被打扰：只有解析真的超过 BUSY_DELAY 才补一条"正在解析"，
+        # 完成时再用结果替换它（成功 1 秒自退，失败常驻）。
+        self._parsing_gen = gen
+        self._busy_seq = None
+        self._later(BUSY_DELAY, self._show_parsing_busy, gen, Path(path).name)
 
         def work():
             if Path(path).is_dir():
@@ -1197,10 +1360,17 @@ class ComposerApp:
         try:
             infos, hier = await asyncio.to_thread(work)
         except Exception as ex:
+            self._parsing_gen = None
             self._snack(f"解析失败: {ex}", error=True)
+            self._busy_seq = None
             return
+        self._parsing_gen = None
         if gen != self._state_gen:
-            # 解析期间被载出/被另一次载入接管：这份结果已经过期，丢弃
+            # 解析期间被载出/被另一次载入接管：这份结果已经过期，丢弃。
+            # 但"正在解析"的转圈卡片不能留着，否则它会一直转下去。
+            if self._snack_is_showing(self._busy_seq):
+                self._dismiss_snack(self._busy_seq)
+            self._busy_seq = None
             return
 
         self.input_file = path
@@ -1216,6 +1386,17 @@ class ComposerApp:
             self.unload_btn.visible = True
         self._set_status(f"{Path(path).name} — {len(hier)} 角色, {hzc} 图像")
         self._set_status_meta()
+        # 只有真的弹过"正在解析"，才补一句结果；快路径全程安静
+        if self._snack_is_showing(self._busy_seq):
+            self._snack(f"已载入 {Path(path).name} — {len(hier)} 角色 / {hzc} 图像",
+                        ttl=1.0)
+        self._busy_seq = None
+
+    def _show_parsing_busy(self, gen, name):
+        """解析超过 BUSY_DELAY 才走到这里；已经解析完就不弹任何东西。"""
+        if gen != self._parsing_gen:
+            return
+        self._busy_seq = self._snack(f"正在解析 {name}…", busy=True)
 
     async def _unload_bin(self, e=None):
         """载出：卸载当前文件，把应用恢复到刚打开时的初始状态。

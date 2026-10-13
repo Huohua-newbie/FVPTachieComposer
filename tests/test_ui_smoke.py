@@ -349,11 +349,19 @@ async def run():
     # 否则切一次主题就显示"未载入文件"，看着像整个状态被清空。
     assert app.file_chip.content.value == Path(app.input_file).name, \
         "换主题后标题栏文件名胶囊丢了"
+    # 换主题会整棵重建，拖放层也在其中。状态不跟着归零的话，
+    # 下一次 enter 会因为"目标态已经等于当前态"而直接早退——遮罩再也不出现。
+    app._drop_hint_shown = True
     await app._toggle_theme(None)
+    assert app._drop_hint_shown is False, "换主题后拖放层状态残留，下一次拖入不会有反馈"
 
-    # 拖放提示层：这层铺满整扇窗口，隐藏时必须真的 visible=False，
-    # 否则它会一直吃掉所有点击；显示/隐藏中间要有透明度变化，不然没有入场动画。
-    # 内容只有两层：压暗 veil + Canvas 画的虚线高光框。
+    # 拖放反馈：这层铺满整扇窗口，隐藏时必须真的 visible=False，否则它会一直吃点击；
+    # 显示/隐藏中间要有透明度变化，不然没有入场动画。
+    app._on_drop_resize(_CanvasSize(900, 600))
+    assert len(app._drop_canvas.shapes) == 4, \
+        "画布不止 辉光框/虚线框/光斑辉光/光斑核心 四层"
+    dash = app._drop_canvas.shapes[1]
+    assert dash.paint.stroke_dash_pattern, "外圈不是虚线"
     app._show_drop_hint(True)
     assert app.drop_hint.visible is True, "拖放提示没显示"
     await asyncio.sleep(0.05)          # visible 先落一帧，淡入才有起点
@@ -361,15 +369,28 @@ async def run():
     veil = app.drop_hint.content.controls[0]
     assert veil.bgcolor.startswith("#") and len(veil.bgcolor) == 9, \
         f"压暗层颜色不是 #AARRGGBB: {veil.bgcolor}"
-    assert len(app.drop_hint.content.controls) == 2, "拖放提示层不止 veil + 虚线框"
-    app._on_drop_resize(_CanvasSize(900, 600))
-    assert len(app._drop_canvas.shapes) == 2, "虚线框没按画布尺寸画出来"
-    dash = app._drop_canvas.shapes[1]
-    assert dash.paint.stroke_dash_pattern, "外圈不是虚线"
-    app._show_drop_hint(False)
-    assert app.drop_hint.opacity == 0.0, "拖放提示没淡出"
-    await asyncio.sleep(0.3)           # 淡出走完才收回
-    assert app.drop_hint.visible is False, "拖放提示隐藏后还在吃点击"
+    assert len(app.drop_hint.content.controls) == 2, "拖放提示层不止 veil + 画布"
+
+    # 行进光斑：tick 一次，光斑必须沿框边挪动（这是停留态唯一的动效）
+    before = app._drop_canvas.shapes[3].elements[0].x, \
+        app._drop_canvas.shapes[3].elements[0].y
+    app._tick_drop(app._drop_gen)
+    after = app._drop_canvas.shapes[3].elements[0].x, \
+        app._drop_canvas.shapes[3].elements[0].y
+    assert after != before, "光斑没跟着 tick 行进"
+    assert app._drop_dist > 0
+
+    # 拒绝态：框变红，veil 不变色
+    app._reject_drop()
+    assert app._drop_canvas.shapes[1].paint.color == app.ink["err_frame"], \
+        "拒绝时虚线框没变红"
+    assert app.drop_hint.content.controls[0].bgcolor == app.ink["scrim"], \
+        "拒绝时压暗层跟着变色（太戏剧化）"
+    await asyncio.sleep(0.5)           # 红停 160ms + 淡出 150ms 后才收回
+    assert app.drop_hint.visible is False, "拒绝后遮罩没收回"
+    assert app._snack_overlay in app.page.overlay, "拒绝没弹错误横幅"
+    app._dismiss_snack(app._snack_seq)
+    await asyncio.sleep(0.3)
 
     # 提示横幅：居中下方的小卡片，从底部浮起；外层只定位不吞点击。
     # 成功提示要自己淡出消失，报错才留着手动关。
@@ -385,6 +406,19 @@ async def run():
         "横幅没走到显示最终态"
     await asyncio.sleep(2.4)           # 2s 自动消除 + 淡出
     assert app._snack_overlay not in app.page.overlay, "成功横幅没有自动消失"
+
+    # 过程反馈：代数不符（解析早就完了）不弹；还在途中才弹，而且绝不自退。
+    app._parsing_gen = 7
+    app._show_parsing_busy(8, "x.bin")
+    assert app._busy_seq is None and not app.page.overlay, "快路径也被弹了横幅"
+    app._show_parsing_busy(7, "x.bin")
+    assert app._busy_seq == app._snack_seq, "慢路径没弹\"正在解析\""
+    await asyncio.sleep(2.4)
+    assert app._snack_overlay in app.page.overlay, "busy 卡片不该自己消失"
+    app._dismiss_snack(app._busy_seq)
+    await asyncio.sleep(0.3)
+    assert app._snack_overlay not in app.page.overlay
+    app._parsing_gen = None
 
     # 方向键：列表项/按钮点过之后会持有焦点，e.control 不为空是常态而不是"在打字"，
     # 拿它当"焦点被占用"判断会把 ←/→ 全吞掉，帧切换直接失效。
