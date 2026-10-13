@@ -46,6 +46,9 @@ PART_HINT_EMPTY = "该底图没有对应的表情差分"
 INDENT_OUTFIT = 30
 INDENT_ACTION = 48
 ANIM_ROW = 180
+# 拖放提示：veil/取景框淡入 150ms，胶囊再往上滑 220ms（比 veil 慢一点才有"落定"感）
+ANIM_VEIL = 150
+DROP_IN = 220
 
 # 拖放能力：OS 级文件拖放必须由 Flutter 客户端里的 desktop_drop 插件承接，
 # 插件只存在于 `flet build windows` 产出的自定义客户端里——官方客户端不认这个
@@ -121,6 +124,8 @@ def _palette(dark):
             "text": "#e9edf5",
             "text_dim": "#8e9aae",
             "accent": "#7aa6ff",
+            # accent 底色上的文字色：深色主题的 accent 是浅蓝，配深色字更读得清
+            "on_accent": "#0d1014",
             "accent_soft": "#1e2b45",
             "chip": "#1a212b",
             "hover": "#1b222d",
@@ -143,6 +148,7 @@ def _palette(dark):
         "text": "#1b2130",
         "text_dim": "#6b7488",
         "accent": "#3f6ee0",
+        "on_accent": "#ffffff",
         "accent_soft": "#e8f0fe",
         "chip": "#f1f3f7",
         "hover": "#f2f4f8",
@@ -298,6 +304,7 @@ class ComposerApp:
         self.export_dir = None
         self._snack_seq = 0
         self._snack_overlay = None
+        self._snack_toast = None
         self._setup_page()
         self._build()
 
@@ -455,30 +462,45 @@ class ComposerApp:
         )
 
         root = ft.Column([self.title_bar, body, status_bar], spacing=0, expand=True)
+        # 拖放提示：主题色薄 veil + 一圈"取景框" + 底部滑入的胶囊。
+        # 不用原来的"整屏压暗 + 正中一块面板"：那块面板既盖住正在看的立绘，
+        # 又没有落点暗示，读起来像个突然弹出来的对话框而不是"松手就放这儿"。
+        self._drop_pill = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.MOVE_TO_INBOX, size=17, color=self.ink["on_accent"]),
+                    ft.Text("松手即载入", size=13, weight=ft.FontWeight.W_700,
+                            color=self.ink["on_accent"]),
+                ],
+                spacing=8,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=self.ink["accent"],
+            border_radius=999,
+            padding=ft.Padding.only(left=14, right=16, top=9, bottom=9),
+            offset=ft.Offset(0, 22),
+            animate=ft.Animation(DROP_IN, ft.AnimationCurve.DECELERATE),
+            shadow=ft.BoxShadow(blur_radius=22, spread_radius=0, color="#00000055"),
+        )
         self.drop_hint = ft.Container(
             visible=False,
             opacity=0.0,
-            animate=ft.Animation(ANIM_ROW, ft.AnimationCurve.EASE_OUT),
-            content=ft.Container(
-                ft.Column(
-                    [
-                        ft.Icon(ft.Icons.DOWNLOAD_FOR_OFFLINE, size=32, color=self.ink["accent"]),
-                        ft.Text("松手即载入", size=13, weight=ft.FontWeight.W_700,
-                                color=self.ink["text"]),
-                    ],
-                    spacing=6,
-                    tight=True,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                padding=ft.Padding.all(22),
-                border_radius=RADIUS_PANEL,
-                bgcolor=self.ink["panel"],
-                border=ft.Border.all(2, self.ink["accent"]),
-                scale=0.92,
-                animate=ft.Animation(ANIM_ROW, ft.AnimationCurve.EASE_OUT),
+            animate=ft.Animation(ANIM_VEIL, ft.AnimationCurve.EASE_OUT),
+            content=ft.Stack(
+                [
+                    # veil 用页面底色半透明，深浅主题都柔和；纯黑 veil 在浅色主题下很脏
+                    ft.Container(left=0, right=0, top=0, bottom=0,
+                                 bgcolor=self.ink["page"] + "99"),
+                    ft.Container(left=12, right=12, top=12, bottom=12,
+                                 border=ft.Border.all(2, self.ink["accent"]),
+                                 border_radius=RADIUS_PANEL),
+                    ft.Container(self._drop_pill, left=0, right=0, bottom=40,
+                                 alignment=ft.Alignment.CENTER),
+                ],
+                expand=True,
+                fit=ft.StackFit.EXPAND,
             ),
-            bgcolor="#40000000",
-            alignment=ft.Alignment.CENTER,
             left=0, right=0, top=0, bottom=0,
         )
         p.add(self._drop_wrap(
@@ -518,16 +540,16 @@ class ComposerApp:
                 self._set_drop_hint_alpha(True)
         else:
             self._set_drop_hint_alpha(False)
-            if not self._later(ANIM_ROW / 1000 + 0.03, self._hide_drop_hint):
+            if not self._later(DROP_IN / 1000 + 0.03, self._hide_drop_hint):
                 self._hide_drop_hint()
 
     def _set_drop_hint_alpha(self, on):
         if self._drop_hint_shown != bool(on):
             return
-        hint = self.drop_hint
-        hint.opacity = 1.0 if on else 0.0
-        hint.content.scale = 1.0 if on else 0.92
-        self._safe_update(hint)
+        self.drop_hint.opacity = 1.0 if on else 0.0
+        # 胶囊自己滑，veil/取景框只淡入淡出：两层不同速度才有层次感
+        self._drop_pill.offset = ft.Offset(0, 0 if on else 22)
+        self._safe_update(self.drop_hint)
 
     def _hide_drop_hint(self):
         if not self._drop_hint_shown:
@@ -959,13 +981,17 @@ class ComposerApp:
         ink = self.ink
         bg = ink["err_bg"] if error else ink["ok_bg"]
         fg = ink["err_fg"] if error else ink["ok_fg"]
+        # 短文案保持自然宽度，长文案限宽换行——不然会撑成一条横跨整窗的横幅
+        label = ft.Text(msg, size=12, color=fg, weight=ft.FontWeight.W_500,
+                        max_lines=3, overflow=ft.TextOverflow.ELLIPSIS)
+        if len(msg) > 34:
+            label = ft.Container(label, width=300)
         row = [
             ft.Icon(
                 ft.Icons.ERROR if error else ft.Icons.CHECK_CIRCLE,
                 size=17, color=fg,
             ),
-            ft.Text(msg, size=12, color=fg, weight=ft.FontWeight.W_500,
-                    expand=True, max_lines=3, overflow=ft.TextOverflow.ELLIPSIS),
+            label,
         ]
         if not error and folder:
             async def open_dir(e, _d=folder):
@@ -994,10 +1020,15 @@ class ComposerApp:
             border=ft.Border.all(1, ink["line"]),
             padding=ft.Padding.only(left=12, right=6, top=7, bottom=7),
             shadow=ft.BoxShadow(blur_radius=18, spread_radius=0, color="#00000033"),
+            opacity=0.0,
+            offset=ft.Offset(16, 0),
+            animate=ft.Animation(ANIM_VEIL, ft.AnimationCurve.EASE_OUT),
         )
-        # 定位在标题栏下方并居中：不再横跨整窗、也不再压住窗口按钮
+        # 右下角小卡片：只占自己那一小块。之前居中那条 left=0/right=0 会连着整条
+        # 横带一起吞掉点击，等于把标题栏下方一整排操作区盖住了。
+        # 报错不自动消失（要留时间复制），成功提示 1.6 秒后自己走。
         overlay = ft.Stack(
-            [ft.Container(toast, top=56, left=0, right=0, alignment=ft.Alignment.CENTER)],
+            [ft.Container(toast, right=16, bottom=52)],
             top=0, left=0, right=0, bottom=0,
         )
         try:
@@ -1006,14 +1037,36 @@ class ComposerApp:
         except Exception:
             pass
         self._snack_overlay = overlay
+        self._snack_toast = toast
         self.page.overlay.append(overlay)
         self.page.update()
 
+        # 先按初始状态（透明+右偏）建好控件，下一帧再改属性，否则没有动画起点
+        if not self._later(0.02, self._set_snack_alpha, seq, True):
+            self._set_snack_alpha(seq, True)
+
         if not error:
-            # 成功横幅 2 秒后自动消除：走事件循环定时器，全程 UI 线程
-            self._later(2.0, self._dismiss_snack, seq)
+            self._later(1.6, self._dismiss_snack, seq)
+
+    def _set_snack_alpha(self, seq, on):
+        if seq != self._snack_seq or self._snack_toast is None:
+            return
+        toast = self._snack_toast
+        toast.opacity = 1.0 if on else 0.0
+        toast.offset = ft.Offset(0 if on else 16, 0)
+        self._safe_update(toast)
 
     def _dismiss_snack(self, seq):
+        try:
+            if seq != self._snack_seq or self._snack_overlay not in self.page.overlay:
+                return
+            self._set_snack_alpha(seq, False)
+            if not self._later(ANIM_VEIL / 1000 + 0.03, self._remove_snack, seq):
+                self._remove_snack(seq)
+        except Exception:
+            pass
+
+    def _remove_snack(self, seq):
         try:
             if seq == self._snack_seq and self._snack_overlay in self.page.overlay:
                 self.page.overlay.remove(self._snack_overlay)

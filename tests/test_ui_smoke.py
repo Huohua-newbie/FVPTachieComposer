@@ -345,15 +345,29 @@ async def run():
 
     # 拖放提示层：这层铺满整扇窗口，隐藏时必须真的 visible=False，
     # 否则它会一直吃掉所有点击；显示/隐藏中间要有透明度变化，不然没有入场动画。
+    # veil/取景框只淡入淡出，胶囊靠 offset 滑入滑出（两层不同速度才有层次感）。
     app._show_drop_hint(True)
     assert app.drop_hint.visible is True, "拖放提示没显示"
     await asyncio.sleep(0.05)          # visible 先落一帧，淡入才有起点
-    assert app.drop_hint.opacity == 1.0 and app.drop_hint.content.scale == 1.0, \
+    assert app.drop_hint.opacity == 1.0 and app._drop_pill.offset == ft.Offset(0, 0), \
         "拖放提示没走到最终态"
     app._show_drop_hint(False)
     assert app.drop_hint.opacity == 0.0, "拖放提示没淡出"
+    assert app._drop_pill.offset == ft.Offset(0, 22), "胶囊没跟着滑出去"
     await asyncio.sleep(0.3)           # 淡出走完才收回
     assert app.drop_hint.visible is False, "拖放提示隐藏后还在吃点击"
+
+    # 提示横幅：右下角小卡片，不再横跨整窗（那条会吞掉一整排点击）；
+    # 成功提示要自己淡出消失，报错才留着手动关。
+    app._snack("已载出: demo.bin")
+    assert app._snack_overlay.controls[0].content is app._snack_toast, \
+        "横幅不是单个小卡片（又铺成整宽了）"
+    assert app._snack_toast.opacity == 0.0, "横幅初始态没留动画起点"
+    await asyncio.sleep(0.05)
+    assert app._snack_toast.opacity == 1.0 and app._snack_toast.offset == ft.Offset(0, 0), \
+        "横幅没走到显示最终态"
+    await asyncio.sleep(2.0)           # 1.6s 自动消除 + 淡出
+    assert app._snack_overlay not in app.page.overlay, "成功横幅没有自动消失"
 
     # 方向键：列表项/按钮点过之后会持有焦点，e.control 不为空是常态而不是"在打字"，
     # 拿它当"焦点被占用"判断会把 ←/→ 全吞掉，帧切换直接失效。
@@ -408,11 +422,15 @@ async def run():
     app._snack("冒烟横幅")
     assert len(page.overlay) == 1, "横幅未挂载"
     app._dismiss_snack(app._snack_seq)
+    await asyncio.sleep(0.3)           # 淡出走完才摘掉，不再瞬间消失
     assert not page.overlay, "横幅未移除"
     app._snack("报错横幅", error=True)
     app._dismiss_snack(-1)
+    await asyncio.sleep(0.3)
     assert len(page.overlay) == 1, "错误横幅不应被别的序号消掉"
     app._dismiss_snack(app._snack_seq)
+    await asyncio.sleep(0.3)
+    assert not page.overlay, "手动关闭后错误横幅未移除"
 
     app._help(None)
     assert page.dialogs, "帮助对话框未弹出"
