@@ -38,17 +38,54 @@ Compress-Archive -Path dist/FVPTachieComposer.exe -DestinationPath dist/FVPTachi
 (Get-FileHash dist/FVPTachieComposer-v<ver>-win64.zip -Algorithm SHA256).Hash.ToLower() + "  FVPTachieComposer-v<ver>-win64.zip" | Out-File dist/SHA256SUMS.txt -Encoding ascii
 ```
 
-## 拖放载入（可选，需换构建方式）
+## 拖放载入（`flet build windows` 管线）
 
-`FVP_DROPZONE=1` 时整个窗口会被包成拖放目标，拖入 `.bin` 或 HZC 文件夹即载入。
-该能力由 `flet-dropzone`（内部是 Flutter 的 `desktop_drop` 插件）提供，
-**插件必须编译进 Flutter 客户端**，因此：
+把 `.bin` / HZC 文件夹直接拖进窗口即载入。该能力由 `flet-dropzone`
+（内部是 Flutter 的 `desktop_drop` 插件）提供，**插件必须编译进 Flutter 客户端**，
+所以只有 `flet build windows` 的产物有它；`flet run` 与 PyInstaller 产物用官方桌面
+客户端，不认这个控件。
 
-- `flet run` / 现在的 PyInstaller 产物用的是官方桌面客户端，不认这个控件，
-  所以默认关闭（环境变量未设即完全不改布局）。
-- 要启用就得改走 `flet build windows`（需 Flutter SDK + VS C++ 桌面负载），
-  并在构建环境里 `pip install flet-dropzone`、设 `FVP_DROPZONE=1`。
-  这会替换掉本文件描述的 PyInstaller 单 exe 流程，属于发布管线变更，需单独决策。
+开关逻辑见 `FVPTachieComposerFlet._dropzone_on()`：打包产物里 `FLET_PLATFORM` 必被
+注入 → 自动启用；`FVP_DROPZONE=0/1` 可强制关/开（给 `FLET_VIEW_PATH` 指向自定义客
+户端的开发态兜底）。
+
+构建（需 Flutter SDK + VS C++ 桌面负载；**必须用 PowerShell 7**，见下）：
+
+```powershell
+pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.1-beta>
+```
+
+## 跑 `build_flet_win.ps1` 要用 pwsh，不能用 powershell
+
+脚本是 UTF-8 无 BOM 且含中文注释。Windows PowerShell 5.1（`powershell.exe`）按系统
+ANSI 代码页（中文机为 GBK）解码 `.ps1`，多字节序列会吃掉引号和换行，报一串
+`表达式或语句中包含意外的标记` 的解析错误——脚本根本没执行，产物时间戳不变。
+PowerShell 7（`pwsh`）默认按 UTF-8 读，才正常。
+
+## 打包产物白屏排查（2026-10-13 实录）
+
+现象：`build\windows\FVPTachieComposer.exe` 起来后整窗纯白，无报错、无异常。
+
+结论：**`Dropzone` 是 `LayoutControl`，没给任何尺寸时 Dart 侧按 0 高度排版，整棵子树
+静默消失**——Python 不抛异常、客户端不报错、日志一个字都没有。修法是
+`Dropzone(expand=True, ...)`（见 `_drop_wrap`）。
+
+排查时值得记住的三条：
+
+1. **嵌入式产物有日志出口**，不是"双击就没输出"。启动脚本把 Python 的 stdout/stderr
+   tee 到 `%LOCALAPPDATA%\Your Company\FVPTachieComposer\console.log`（路径由
+   `FLET_APP_CONSOLE` 给出）；未捕获异常会打进这个文件并触发客户端的错误屏。
+   所以"白屏 + 日志为空"= Python 活着，问题在 Dart 侧排版/建树，别去猜导入失败。
+2. **不用重编 flutter 就能改代码验证**。客户端用 `importlib.util.find_spec(模块名)`
+   定位入口，而 `find_spec` 对同名文件优先取 `.py` 再取 `.pyc`。于是可以：把
+   `build\windows\app\<模块>.pyc` 改名挪开 → 放一个同名 `.py` 诊断壳 → 把真实源码复制
+   成 `app\RealApp.py` 让壳去 `import RealApp` → 直接 `Start-Process` 跑 exe 读日志。
+   验证完记得删掉 `.py` 并还原 `.pyc`。
+3. **用现成的开关做对照实验**比读代码快：`FVP_DROPZONE=0` 立即正常，直接把范围锁到
+   拖放层；再单独加 `expand=True` 复现正常，根因即确认。
+
+顺带：`Problem getting monitor brightness` 是 `screen_brightness_windows` 插件的噪音，
+与白屏无关。
 
 ## 构建后验证（必做）
 
