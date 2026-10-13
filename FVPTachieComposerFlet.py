@@ -41,7 +41,7 @@ RADIUS_TILE = 10
 THUMB = 104
 PART_STRIP_H = THUMB + GUTTER + 14   # 上沿给序号角标留位，下沿给横向滚动条留槽
 PART_HINT_IDLE = "选择底图后显示差分帧"
-PART_HINT_EMPTY = "该底图没有对应的表情差分"
+PART_HINT_EMPTY = "该底图没有对应的表情差分，将直接导出底图"
 
 # 三级树每级递进的缩进量。第三级（动作）必须比第二级（服装）明显更深，
 # 否则"服装 → 动作"读起来像同级，右侧那条导轨就是层级的视觉锚。
@@ -297,6 +297,8 @@ class ComposerApp:
         self.part_imgs = []
         self.part_idx = 0
         self.composed_img = None
+        # 没有表情差分可用：结果面板与导出链路都走「直接导出底图」这条退路
+        self.base_only = False
         self.thumb_refs = []
         self.role_thumb_cache = {}
         # 树的展开状态记在 app 上而不是 tile 闭包里，
@@ -1607,6 +1609,7 @@ class ComposerApp:
         self.part_imgs = []
         self.part_info = None
         self.composed_img = None
+        self.base_only = False
         self.thumb_refs = []
         self.open_roles = set()
         self.open_outfits = set()
@@ -1718,6 +1721,14 @@ class ComposerApp:
             oy = self.part_info.get("offset_y", 0)
             self.result_meta.value = (f"{self.composed_img.size[0]}×"
                                       f"{self.composed_img.size[1]} · 偏移 {ox:+d}/{oy:+d}")
+            self.save_btn.disabled = False
+            self.batch_btn.disabled = False
+        elif self.base_only and self.base_imgs:
+            # 无差分底图模式：镜像与两按钮由 _show_base_frame 之外单独兜底
+            img = self.base_imgs[self.base_idx]
+            self.result_image.src = _img_src(img)
+            self.result_hint.visible = False
+            self.result_meta.value = f"{img.size[0]}×{img.size[1]} · 底图（无表情差分）"
             self.save_btn.disabled = False
             self.batch_btn.disabled = False
 
@@ -2107,6 +2118,10 @@ class ComposerApp:
         self.prev_btn.disabled = self.base_idx <= 0
         self.next_btn.disabled = self.base_idx >= n - 1
         self.base_meta.value = f"{img.size[0]}×{img.size[1]} · {n} 帧"
+        if self.base_only:
+            # 没有差分时右栏是底图镜像：换帧要跟手，否则导出的和看到的对不上
+            self.result_image.src = _img_src(img)
+            self.result_meta.value = f"{img.size[0]}×{img.size[1]} · 底图（无表情差分）"
         self.page.update()
 
     def _prev_frame(self, e):
@@ -2151,6 +2166,20 @@ class ComposerApp:
 
     # ── Parts ───────────────────────────────────────────────
 
+    def _enter_base_only(self):
+        """没有差分可用：按当前底图帧铺出结果面板，让「保存/批量导出」走底图这条退路。"""
+        self.base_only = True
+        if not self.base_imgs:
+            self.page.update()
+            return
+        img = self.base_imgs[self.base_idx]
+        self.result_image.src = _img_src(img)
+        self.result_hint.visible = False
+        self.result_meta.value = f"{img.size[0]}×{img.size[1]} · 底图（无表情差分）"
+        self.save_btn.disabled = False
+        self.batch_btn.disabled = False
+        self.page.update()
+
     def _load_parts(self, info):
         self.part_info = None
         self.part_imgs = []
@@ -2161,6 +2190,8 @@ class ComposerApp:
         self.part_hint_text.value = PART_HINT_IDLE
         self.part_count.value = ""
         self.composed_img = None
+        # 换底图就先退出「直接导出底图」模式，是否再进由下面两个早退分支决定
+        self.base_only = False
         self.result_image.src = TRANSPARENT
         self.result_hint.visible = True
         self.result_meta.value = ""
@@ -2170,7 +2201,7 @@ class ComposerApp:
         part_info = _find_expr_info(self.file_infos, info["filename"])
         if not part_info:
             self.part_hint_text.value = PART_HINT_EMPTY
-            self.page.update()
+            self._enter_base_only()
             return
 
         try:
@@ -2180,7 +2211,8 @@ class ComposerApp:
             self.page.update()
             return
         if not imgs:
-            self.page.update()
+            self.part_hint_text.value = PART_HINT_EMPTY
+            self._enter_base_only()
             return
 
         self.part_info = part_info
@@ -2290,10 +2322,17 @@ class ComposerApp:
     # ── Save / Export ───────────────────────────────────────
 
     async def _save_current(self, e):
-        if not self.composed_img or not self.selected_info:
+        # 无差分模式下没有合成结果，直接导出当前底图帧
+        img = self.composed_img
+        if img is None and self.base_only and self.base_imgs:
+            img = self.base_imgs[self.base_idx]
+        if img is None or not self.selected_info:
             self._snack("请先选择底图并合成", error=True)
             return
-        name = f"{self.selected_info['filename']}_diff_{self.part_idx:03d}.png"
+        if self.composed_img is not None:
+            name = f"{self.selected_info['filename']}_diff_{self.part_idx:03d}.png"
+        else:
+            name = f"{self.selected_info['filename']}_base_{self.base_idx:03d}.png"
         try:
             result = await self.file_picker.save_file(
                 dialog_title="保存当前合成图像", file_name=name,
@@ -2306,14 +2345,15 @@ class ComposerApp:
             return
         self.export_dir = str(Path(result).parent)
         try:
-            self.composed_img.save(result, "PNG")
+            img.save(result, "PNG")
             self._snack(f"已保存: {Path(result).name}", folder=str(Path(result).parent))
             self._set_status(str(result))
         except Exception as ex:
             self._snack(f"保存失败: {ex}", error=True)
 
     async def _batch_export(self, e):
-        if not self.part_info or not self.selected_info or not self.part_imgs:
+        # 无差分模式下放行：铺平底图全部帧，文件名走 _base_ 而非 _diff_
+        if not self.selected_info or (not self.base_only and (not self.part_info or not self.part_imgs)):
             self._snack("请先选择底图并合成", error=True)
             return
         if not self.base_imgs:
@@ -2334,16 +2374,21 @@ class ComposerApp:
         self._set_status("正在批量导出…")
 
         base = self.base_imgs[0]
-        ox = self.part_info.get("offset_x", 0)
-        oy = self.part_info.get("offset_y", 0)
+        ox = self.part_info.get("offset_x", 0) if self.part_info else 0
+        oy = self.part_info.get("offset_y", 0) if self.part_info else 0
         fname = self.selected_info["filename"]
-        parts_data = list(self.part_imgs)
+        # 无差分模式：不合成，铺平底图全部帧
+        parts_data = list(self.part_imgs) if not self.base_only else list(self.base_imgs)
 
         def one(args):
             idx, p = args
             try:
-                composed = compose_preview(base, p, ox, oy)
-                out = Path(save_dir) / f"{fname}_diff_{idx:03d}.png"
+                if self.base_only:
+                    composed = p
+                    out = Path(save_dir) / f"{fname}_base_{idx:03d}.png"
+                else:
+                    composed = compose_preview(base, p, ox, oy)
+                    out = Path(save_dir) / f"{fname}_diff_{idx:03d}.png"
                 composed.save(out, "PNG")
                 return True
             except Exception:

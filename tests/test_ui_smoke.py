@@ -115,7 +115,11 @@ def make_hzc(path, image_type=1, w=8, h=8, frames=1):
     struct.pack_into("<I", head, 32, frames)
     bpp = 3 if image_type == 0 else 4
     need = w * h * bpp * (frames if image_type == 2 else 1)
-    path.write_bytes(bytes(head) + zlib.compress(bytes((i * 7) % 256 for i in range(need))))
+    stride = w * h * bpp
+    # 纯线性序列的周期是 256，正好等于一帧的字节数，多帧会解出一堆一模一样的画面。
+    # 混进帧号（i // stride）并取 251 为周期，翻帧断言才能真的看出画面变了。
+    body = bytes(((i % 251) * 7 + (i // stride) * 53) % 256 for i in range(need))
+    path.write_bytes(bytes(head) + zlib.compress(body))
 
 
 def build_fixture():
@@ -124,7 +128,10 @@ def build_fixture():
         for outfit in ("私服", "制服"):
             for action in ("基", "喜"):
                 make_hzc(tmp / f"CHR_{role}_{action}_{outfit}.hzc")
-                make_hzc(tmp / f"CHR_{role}_{action}_{outfit}_表情.hzc", image_type=2, frames=3)
+                make_hzc(tmp / f"CHR_{role}_{action}_{outfit}_表情.hzc",
+                         image_type=2, frames=3)
+    # 没有 _表情 变体的多帧底图：走「直接导出底图」那条退路
+    make_hzc(tmp / "CHR_翠_无_私服.hzc", image_type=2, frames=3)
     return tmp
 
 
@@ -576,6 +583,71 @@ async def run():
         sys.argv = old_argv
     assert app2.input_file == str(tmp)
     assert page2.added, "argv 启动路径未建树"
+
+    # ── 无表情差分 → 直接导出底图 ──────────────────────────────
+    # 只让看不让导出的状态是不完整的：没有 _表情 变体（或载入的不是立绘）时，
+    # 结果面板要镜像当前底图帧，保存/批量导出都退到底图本身。
+    from FVPTachieComposerFlet import PART_HINT_EMPTY
+    nodiff = next(i for i in app.file_infos if i["filename"] == "CHR_翠_无_私服")
+    app._select_action(nodiff)
+    assert app.base_only is True, "没有差分时应进入「直接导出底图」模式"
+    assert app.part_imgs == [] and app.composed_img is None, "无差分模式不该留下合成结果"
+    assert app.part_hint_text.value == PART_HINT_EMPTY, "左栏没说明会导出底图"
+    assert app.result_hint.visible is False, "底图模式下结果面板还是占位图"
+    assert app.save_btn.disabled is False and app.batch_btn.disabled is False, \
+        "无差分模式下导出按钮被禁用（只能看不能导）"
+    mirrored = app.result_image.src
+    assert isinstance(mirrored, str) and mirrored.startswith("data:image/"), \
+        "底图模式右栏没镜像成 data URI"
+    assert mirrored == app.base_image.src, "右栏镜像的不是当前底图帧——看到的和导出的对不上"
+
+    # 换帧要跟手：所见即所导
+    app._next_frame(None)
+    assert app.base_idx == 1
+    assert app.result_image.src != mirrored, "翻帧后右栏还停在上一帧"
+    assert app.result_image.src == app.base_image.src, "翻帧后右栏没跟着底图走"
+    assert "底图（无表情差分）" in app.result_meta.value
+
+    # 保存命名走 _base_ 且用当前底图帧号。
+    # 注意要挂在实例上：上面「导入/导出记目录」那一步已经把 save_file 换成了
+    # 实例属性，类级别的补丁会被它挡住。
+    picked_names = []
+    batch_dir = tmp / "batch"
+    batch_dir.mkdir(exist_ok=True)
+
+    async def fake_base_save(dialog_title=None, file_name=None,
+                             initial_directory=None, **kw):
+        picked_names.append(file_name)
+        return str(tmp / file_name)
+
+    async def fake_base_dir(dialog_title=None, initial_directory=None, **kw):
+        return str(batch_dir)
+
+    app.file_picker.save_file = fake_base_save
+    app.file_picker.get_directory_path = fake_base_dir
+    try:
+        await app._save_current(None)
+        assert picked_names == ["CHR_翠_无_私服_base_001.png"], \
+            f"底图导出命名不对: {picked_names}"
+        assert (tmp / picked_names[0]).exists(), "底图没真正写盘"
+
+        await app._batch_export(None)
+        assert sorted(p.name for p in batch_dir.glob("*.png")) == \
+            [f"CHR_翠_无_私服_base_{i:03d}.png" for i in range(3)], \
+            "无差分批量导出没有铺平底图全部帧"
+    finally:
+        del app.file_picker.save_file
+        del app.file_picker.get_directory_path
+
+    # 换主题后底图模式必须原样回来，按钮不能重新变灰
+    kept_base_src = app.base_image.src
+    await app._toggle_theme(None)
+    assert app.base_only is True, "换主题把「直接导出底图」模式弄丢了"
+    assert app.base_idx == 1, "换主题后底图帧号被重置"
+    assert app.base_image.src == kept_base_src
+    assert app.result_image.src == app.base_image.src, "换主题后右栏没跟住底图"
+    assert app.save_btn.disabled is False and app.batch_btn.disabled is False, \
+        "换主题后底图模式的导出按钮又灰了"
 
     # 载出：卸载后必须回到"刚打开时"的空状态，且能再次载入（回初始态的回归防线）
     await app._unload_bin(None)
