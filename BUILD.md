@@ -1,7 +1,19 @@
 # 构建说明（权威构建命令）
 
-Release 构建统一走 GitHub Actions（`.github/workflows/release.yml`），
-本文件仅记录手动后备流程。
+发布包**只有一条链**：本机跑 `flet build windows`（见下方「拖放载入」一节）。
+自 v2.2.2-beta 起不再用 GitHub Actions 在线构建——拖放插件必须编进 Flutter 客户端，
+而发布产物就是这条链的产物；PyInstaller 链保留在仓库里只作本地后备，不再出现在发布页。
+
+发布动作（本机执行）：
+
+```powershell
+pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.2-beta>
+git tag -a v<版本号> -m "FVP Tachie Composer v<版本号>"; git push origin v<版本号>
+gh release create v<版本号> dist\FVPTachieComposer-<版本号>-win64-flet.zip dist\SHA256SUMS.txt `
+  --title "FVP Tachie Composer v<版本号>" --notes-file <面向用户的说明.md> --latest
+```
+
+> `SHA256SUMS.txt` 由构建脚本生成，只留发布页上真有的那几个包。
 
 ## 环境要求
 
@@ -14,7 +26,10 @@ pip install -r requirements.txt pyinstaller
 
 > 注意：不要混用其它 Pillow 大版本构建正式产物；版本变更先改 `requirements.txt` 并跑 `.github/selfcheck.py` 回归。
 
-## 构建命令（仓库根目录执行）
+## 后备链：PyInstaller 单 exe（不发布）
+
+官方桌面客户端不认 `Dropzone`，这条链的产物没有「拖进窗口载入」。只在想要
+单文件版时本地构建，发布页不放这个包。
 
 ```powershell
 .\build_win.ps1 -Version <版本号，如 2.1.2-beta>
@@ -28,7 +43,7 @@ pip install -r requirements.txt pyinstaller
 
 - 体积裁剪逻辑（excludes / DLL 同源去重 / 去 libmpv）全部收敛在
   `FVPTachieComposer.win.spec` 的 `_slim()` 与 `excludes` 中，`build_win.ps1`
-  与 CI 共用同一份，保证本地/云端构建一致。
+  后备链只读这一份 spec，改体积策略不会漏改第二处。
 - `--icon` 写 exe 程序图标；`--add-data` 把图标打进包供运行时窗口图标读取（`_app_icon()` 走 `_MEIPASS`）。
 
 ## 打包与校验
@@ -38,7 +53,7 @@ Compress-Archive -Path dist/FVPTachieComposer.exe -DestinationPath dist/FVPTachi
 (Get-FileHash dist/FVPTachieComposer-v<ver>-win64.zip -Algorithm SHA256).Hash.ToLower() + "  FVPTachieComposer-v<ver>-win64.zip" | Out-File dist/SHA256SUMS.txt -Encoding ascii
 ```
 
-## 拖放载入（`flet build windows` 管线）
+## 发布链：`flet build windows`（拖放载入）
 
 把 `.bin` / HZC 文件夹直接拖进左侧「角色库」面板即载入（只有这一栏是落点）。
 该能力由 `flet-dropzone`（内部是 Flutter 的 `desktop_drop` 插件）提供，
@@ -90,6 +105,13 @@ PowerShell 7（`pwsh`）默认按 UTF-8 读，才正常。
 
 ## 构建后验证（必做）
 
+发布链（`build\windows`）：
+
+1. `build\windows\desktop_drop_plugin.dll` 存在（脚本已断言，缺了拖入功能是哑的）；
+2. `build\windows\app\FVPTachieComposerFlet.pyc` 时间戳晚于本次改动；
+3. 双击 `build\windows\FVPTachieComposer.exe`，按 `TESTING.md` 跑冒烟清单，通过后才放行发布。
+
+后备链（PyInstaller）：
+
 1. `Select-String build/FVPTachieComposer/PKG-00.toc -Pattern 'Shinku.ico'` 有命中；
-2. 用 `[System.Drawing.Icon]::ExtractAssociatedIcon()` 提取 exe 图标，与默认图标比对确认非 Python 默认；
-3. 按 `TESTING.md` 跑冒烟清单，通过后才放行发布。
+2. 用 `[System.Drawing.Icon]::ExtractAssociatedIcon()` 提取 exe 图标，与默认图标比对确认非 Python 默认。
