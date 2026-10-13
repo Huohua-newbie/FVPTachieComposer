@@ -490,7 +490,10 @@ class ComposerApp:
         """把整扇窗口包成拖放目标；未启用（官方客户端没有该插件）时原样返回。"""
         if not DROPZONE_ON:
             return content
+        # expand 不可省：Dropzone 是 LayoutControl，没有尺寸时 Dart 侧按 0 高度排版，
+        # 整棵树静默消失（白屏、无异常、无日志）。
         return _dropzone.Dropzone(
+            expand=True,
             content=content,
             on_dropped=self._on_dropped,
             on_entered=lambda e: self._show_drop_hint(True),
