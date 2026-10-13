@@ -47,15 +47,44 @@ INDENT_OUTFIT = 30
 INDENT_ACTION = 48
 ANIM_ROW = 180
 
-# 拖放是可选能力：OS 级文件拖放必须由 Flutter 客户端里的 desktop_drop 插件承接，
-# 而插件只在 `flet build windows` 产出的自定义客户端里存在——`flet run` 用的
-# 官方客户端不认这个控件，硬塞进去会让整棵树渲染失败。
-# 所以默认关闭，构建时设 FVP_DROPZONE=1 显式启用。
+# 拖放能力：OS 级文件拖放必须由 Flutter 客户端里的 desktop_drop 插件承接，
+# 插件只存在于 `flet build windows` 产出的自定义客户端里——官方客户端不认这个
+# 控件，硬塞进去会让整棵树渲染失败。所以能不能开，取决于"客户端是谁"：
+#   1. FVP_DROPZONE=0/1 显式强制（给 FLET_VIEW_PATH 指向的自定义客户端兜底）；
+#   2. 打包产物里 Python 与 Flutter 同进程，FLET_PLATFORM 必被注入 → 肯定带插件；
+#   3. 开发态：flet_desktop 按 cwd/build/windows/*.exe → FLET_VIEW_PATH → 官方缓存
+#      的顺序选客户端，所以只要 build/windows 下有 exe，跑起来就会用它 → 开；
+#   4. 其余（官方客户端 / PyInstaller 产物）→ 关。
 try:
     import flet_dropzone as _dropzone
 except Exception:
     _dropzone = None
-DROPZONE_ON = bool(_dropzone) and os.environ.get("FVP_DROPZONE", "").strip().lower() in ("1", "true", "yes")
+
+
+def _custom_client_available():
+    if os.environ.get("FLET_PLATFORM", "").strip():
+        return True
+    try:
+        win_dir = Path.cwd() / "build" / "windows"
+        return win_dir.is_dir() and any(
+            p.suffix.lower() == ".exe" for p in win_dir.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def _dropzone_on():
+    if _dropzone is None:
+        return False
+    flag = os.environ.get("FVP_DROPZONE", "").strip().lower()
+    if flag in ("0", "false", "no"):
+        return False
+    if flag in ("1", "true", "yes"):
+        return True
+    return _custom_client_available()
+
+
+DROPZONE_ON = _dropzone_on()
 
 
 def pick_drop_path(paths):
@@ -198,11 +227,13 @@ def _find_expr_info(file_infos, base_name):
 
 HELP_STEPS = (
     ("打开", "点击「打开 BIN」选择 .bin，或「HZC 文件夹」直接指向解包目录；"
-             "也可把 .bin / HZC 文件夹拖到程序图标上直接打开。"),
+             "也可把 .bin / HZC 文件夹拖到程序图标上直接打开。"
+             + ("或直接把文件拖进窗口。" if DROPZONE_ON else "")),
     ("挑选", "左侧按 角色 → 服装 → 动作 展开，每级都有缩略图。"),
     ("预览", "中间是底图舞台：滚轮缩放、拖拽平移，多帧底图用左右箭头翻帧。"),
     ("合成", "点击「差分部件」里的任意一帧表情，右侧即时合成。"),
     ("导出", "「保存当前」导出一张 PNG，「批量导出」把该底图的全部差分一次性铺平。"),
+    ("载出", "点角色库标题栏的载出图标或按 Ctrl+W，卸载当前文件回到初始状态。"),
 )
 
 HELP_KEYS = (
@@ -210,6 +241,7 @@ HELP_KEYS = (
     ("0", "复位缩放"),
     ("Ctrl+S", "保存当前合成图"),
     ("Ctrl+O", "打开 BIN"),
+    ("Ctrl+W", "载出（回到初始状态）"),
     ("L", "切换深浅主题"),
     ("Esc", "关闭对话框"),
 )
@@ -246,6 +278,11 @@ class ComposerApp:
         self._drop_hint_shown = False
         # 树里所有动作行的选中态控件组；换选时按 filename 统一复原，不记"上一次点了谁"。
         self._action_rows = []
+        # 载入代数：载入/载出各 +1。后台解析与缩略图解码都跨"载入中→载出"这段
+        # 时间，靠它判定结果是否已经过期——否则载出之后迟到的回调会把状态写回来。
+        self._state_gen = 0
+        # 载出按钮（_build_tree_column 建）；仅在已载入时可见
+        self.unload_btn = None
 
         # UI 事件循环引用（_load_bin/_toggle_theme 中捕获）：
         # 后台缩略图解码完成后，经由它把“替换+刷新”调度回 UI 线程执行，
@@ -584,6 +621,12 @@ class ComposerApp:
 
     def _build_tree_column(self):
         ink = self.ink
+        # 载出：卸载当前 bin，回到刚打开时的空状态。载入前不显示，
+        # 否则"载出"在一个什么都没载的界面上是个死按钮。
+        unload_btn = ft.IconButton(ft.Icons.EJECT, on_click=self._unload_bin,
+                                   tooltip=_tip("载出 (Ctrl+W)"), icon_size=19,
+                                   icon_color=ink["text_dim"], visible=bool(self.input_file))
+        self.unload_btn = unload_btn
         header = self._section(
             ft.Icons.PEOPLE, "角色库",
             right=[
@@ -591,6 +634,7 @@ class ComposerApp:
                               tooltip=_tip("打开 BIN (Ctrl+O)"), icon_size=19, icon_color=ink["accent"]),
                 ft.IconButton(ft.Icons.FOLDER, on_click=self._open_dir,
                               tooltip=_tip("打开 HZC 文件夹"), icon_size=19, icon_color=ink["accent"]),
+                unload_btn,
             ],
         )
 
@@ -604,8 +648,9 @@ class ComposerApp:
                     ),
                     ft.Text("尚未加载文件", size=13, weight=ft.FontWeight.W_600, color=ink["text"]),
                     # 载入入口只留标题栏那两个图标，空状态不再重复一套按钮，
-                    # 这里只负责告诉用户去哪儿找。
-                    ft.Text("点右上角的 打开 BIN / 打开 HZC 图标\n或按 Ctrl+O 选择文件",
+                    # 这里只负责告诉用户去哪儿找（自定义客户端下多一句拖入）。
+                    ft.Text("点右上角的 打开 BIN / 打开 HZC 图标\n或按 Ctrl+O 选择文件"
+                            + ("\n或把文件直接拖进窗口" if DROPZONE_ON else ""),
                             size=11, color=ink["text_dim"],
                             text_align=ft.TextAlign.CENTER),
                 ],
@@ -1034,6 +1079,9 @@ class ComposerApp:
 
     async def _load_bin(self, path):
         self._capture_loop()
+        # 新一轮载入使上一轮（含进行中的解析/缩略图）全部作废
+        self._state_gen += 1
+        gen = self._state_gen
         src = Path(path)
         self.import_dir = str(src if src.is_dir() else src.parent)
         self._set_status("正在解析…")
@@ -1065,6 +1113,9 @@ class ComposerApp:
         except Exception as ex:
             self._snack(f"解析失败: {ex}", error=True)
             return
+        if gen != self._state_gen:
+            # 解析期间被载出/被另一次载入接管：这份结果已经过期，丢弃
+            return
 
         self.input_file = path
         self.file_infos = infos
@@ -1075,8 +1126,48 @@ class ComposerApp:
         self._render_tree()
         hzc = sum(1 for i in infos if i["type"] == "hzc")
         self.file_chip.content.value = Path(path).name
+        if self.unload_btn is not None:
+            self.unload_btn.visible = True
         self._set_status(f"{Path(path).name} — {len(hier)} 角色, {hzc} 图像")
         self._set_status_meta()
+
+    async def _unload_bin(self, e=None):
+        """载出：卸载当前文件，把应用恢复到刚打开时的初始状态。
+
+        import_dir/export_dir 是对话框的记忆位置，不属于"载入态"，保留；
+        其余由 _load_bin 写入的状态全部复位，UI 回到 empty_hint 空状态。
+        """
+        if not self.input_file:
+            self._snack("当前没有载入任何文件")
+            return
+        old = Path(self.input_file).name
+        # 作废在途解析与缩略图解码，迟到的回调会因代数不符而自弃
+        self._state_gen += 1
+
+        self.input_file = None
+        self.file_infos = []
+        self.hierarchy = {}
+        self.selected_info = None
+        self.selected_filename = None
+        self.base_idx = 0
+        self.part_idx = 0
+        self.role_thumb_cache = {}
+
+        self._clear_previews()
+        # _render_tree 只会把 empty_hint 藏起来，恢复必须在这里做（回初始态的根因点）
+        self.tree_list.controls.clear()
+        self._tree_toggles = {}
+        self._action_rows = []
+        self.tree_list.visible = False
+        self.empty_hint.visible = True
+
+        self.file_chip.content.value = "未载入文件"
+        if self.unload_btn is not None:
+            self.unload_btn.visible = False
+        self.status_meta.value = ""
+        self._set_status("就绪")
+        self.page.update()
+        self._snack(f"已载出: {old}")
 
     def _clear_previews(self):
         self.base_imgs = []
@@ -1246,6 +1337,8 @@ class ComposerApp:
 
     def _queue_thumb(self, placeholder, info, size, cache_key):
         """后台线程只做解码；完成后经事件循环把替换+刷新调度回 UI 线程。"""
+        gen = self._state_gen  # 解码期间若载出/换文件，结果作废
+
         def job():
             try:
                 img = self._read_first_frame(info)
@@ -1257,6 +1350,8 @@ class ComposerApp:
                 widget = _make_thumb_widget(img, size)
             except Exception:
                 return
+            if gen != self._state_gen:
+                return  # 已载出（或换了文件）：占位控件不再属于当前树，缓存也已清
             loop = getattr(self, "_loop", None)
             if loop is not None:
                 try:
@@ -1708,6 +1803,8 @@ class ComposerApp:
             await self._save_current(None)
         elif e.ctrl and key == "o":
             await self._open_bin(None)
+        elif e.ctrl and key == "w":
+            await self._unload_bin(None)
 
     # ── Save / Export ───────────────────────────────────────
 

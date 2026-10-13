@@ -2,5 +2,6 @@ flet[desktop]==0.86.5
 Pillow==12.2.0
 # 构建所需：含 PyInstaller hook（收录 Flutter 桌面客户端），缺失则打出的包无 UI 运行时
 flet-cli==0.86.5
-# 可选：拖放载入（需 FVP_DROPZONE=1 且改用 `flet build windows` 产出自定义客户端）
-# flet-dropzone==0.4.0
+# 拖放载入：flet build windows 产出自定义客户端（desktop_drop 编进 Flutter 侧）；
+# 只在自定义客户端/FLET_PLATFORM 下才会启用 Dropzone（见 FVPTachieComposerFlet._dropzone_on）
+flet-dropzone==0.4.0

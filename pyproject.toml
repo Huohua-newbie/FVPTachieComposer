@@ -1,0 +1,54 @@
+# `flet build windows` 管线的项目元数据。
+# PyInstaller 流程仍读 requirements.txt，两条链互不影响（flet build 只要看到
+# [project].dependencies 就会忽略 requirements.txt，所以依赖在这里再声明一遍）。
+[project]
+name = "FVPTachieComposer"
+# 只喂给 flutter 的 --build-name，必须是 x.y.z；-beta 标识由 tag 和包名承担
+version = "2.2.1"
+description = "FVP Tachie Composer —— 差分立绘预览与合成工具"
+# 绑定开发机的 3.13（flet 默认会跳到 3.14.x）
+requires-python = ">=3.13,<3.14"
+
+# 刻意不带 flet[desktop]：嵌入式运行时 Python 与 Flutter 同进程（is_embedded()
+# 会跳过 flet_desktop），带上官方客户端只会白塞 ~70MB。
+dependencies = [
+    "flet==0.86.5",
+    "Pillow==12.2.0",
+    "flet-dropzone==0.4.0",
+]
+
+[tool.flet.flutter.pubspec.dependency_overrides]
+# 模板钉死 jni:1.0.0（其生成代码的版本断言是 JniVersionCheck(1,0)），而
+# path_provider_android 拉的 jni_flutter 被 pub 解析到最新的 1.0.4+1，它的断言是
+# (1,1) → flutter 编译时 Constant evaluation error (G8388A750)。
+# 钉回 1.0.2（断言 (1,0)，与 jni 1.0.0 同期），回到 flet 0.86.5 发布时的组合。
+# 这里只写一个键：flet 按 section 内 update() 合并，模板的 flet/jni/screen_retriever
+# 三个 override 会保留（build_base.py:1692-1700）。
+jni_flutter = "1.0.2"
+
+[tool.flet.app]
+# 入口：仓库根下的 FVPTachieComposerFlet.py（默认找 main.py）
+module = "FVPTachieComposerFlet"
+
+# 0.86.5 的 app 打包默认只排除 "build"（修复在 flet 1.0.2，见 flet-dev/flet#6839），
+# .venv/.git/tests 都会被整个打进包，必须在这里列干净。
+# 注意：exclude 是**精确相对路径**匹配，不支持 glob。
+exclude = [
+    ".git",
+    ".github",
+    ".venv",
+    ".flet",
+    ".idea",
+    "__pycache__",
+    "assets",
+    "build",
+    "dist",
+    "docs",
+    "tests",
+    "BUILD.md",
+    "TESTING.md",
+    "README.md",
+    "run_hot.py",
+    "build_win.ps1",
+    "FVPTachieComposer.win.spec",
+]

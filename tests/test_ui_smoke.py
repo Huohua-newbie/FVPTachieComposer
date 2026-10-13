@@ -160,10 +160,31 @@ async def run():
     assert sb.track_visibility is False, "滚动条轨道不应占视觉重量"
     assert (sb.thickness or 0) <= 10, f"滚动条过粗: {sb.thickness}"
 
-    # 拖放入口：默认必须关闭——官方 flet 客户端没有 desktop_drop 插件，
+    # 拖放入口：门控必须跟着"客户端是谁"走——官方客户端没有 desktop_drop 插件，
     # 未 build 的运行时塞 Dropzone 会让整棵控件树渲染失败。
-    from FVPTachieComposerFlet import DROPZONE_ON, pick_drop_path
-    assert DROPZONE_ON is False, "测试环境里拖放不该被启用"
+    import os as _os
+
+    from FVPTachieComposerFlet import (
+        DROPZONE_ON,
+        _custom_client_available,
+        _dropzone,
+        _dropzone_on,
+        pick_drop_path,
+    )
+
+    assert DROPZONE_ON is (bool(_dropzone) and _custom_client_available()), \
+        "DROPZONE_ON 应由 flet_dropzone 可导入 + 自定义客户端可用共同决定"
+    _saved_flag = _os.environ.pop("FVP_DROPZONE", None)
+    try:
+        _os.environ["FVP_DROPZONE"] = "0"
+        assert _dropzone_on() is False, "FVP_DROPZONE=0 必须强制关闭"
+        if _dropzone is not None:
+            _os.environ["FVP_DROPZONE"] = "1"
+            assert _dropzone_on() is True, "FVP_DROPZONE=1 应强制开启"
+    finally:
+        _os.environ.pop("FVP_DROPZONE", None)
+        if _saved_flag is not None:
+            _os.environ["FVP_DROPZONE"] = _saved_flag
 
     bin_a, bin_b = str(tmp / "graph_a.bin"), str(tmp / "graph_b.bin")
     Path(bin_a).touch()
@@ -415,6 +436,29 @@ async def run():
         sys.argv = old_argv
     assert app2.input_file == str(tmp)
     assert page2.added, "argv 启动路径未建树"
+
+    # 载出：卸载后必须回到"刚打开时"的空状态，且能再次载入（回初始态的回归防线）
+    await app._unload_bin(None)
+    assert app.input_file is None, "载出后 input_file 未清空"
+    assert app.file_infos == [] and app.hierarchy == {}, "载出后解析状态未清空"
+    assert app.selected_info is None and app.selected_filename is None, "载出后选中态未清空"
+    assert app.base_imgs == [] and app.part_imgs == [] and app.composed_img is None, \
+        "载出后预览状态未清空"
+    assert app.base_idx == 0 and app.part_idx == 0, "载出后帧号未复位"
+    assert app.tree_list.visible is False and not app.tree_list.controls, "载出后树还挂着"
+    assert app.empty_hint.visible is True, "载出后空状态提示没恢复（回不到初始态）"
+    assert app.file_chip.content.value == "未载入文件", "载出后标题栏文件名胶囊没复位"
+    assert app.unload_btn.visible is False, "载出后载出按钮还在显示"
+    assert app.save_btn.disabled is True and app.batch_btn.disabled is True, \
+        "载出后导出按钮没被禁用"
+    assert app.role_thumb_cache == {}, "载出后缩略图缓存没清"
+    assert app.status_text.value == "就绪", f"载出后状态栏没复位: {app.status_text.value}"
+    # 再载入要能照常建树、载出按钮回来
+    await app._load_bin(str(tmp))
+    assert app.input_file == str(tmp) and app.tree_list.visible, "载出后无法再次载入"
+    assert app.empty_hint.visible is False and app.unload_btn.visible is True
+    await app._unload_bin(None)  # 幂等收尾：第二次载出同样干净
+    assert app.input_file is None and app.empty_hint.visible is True
 
     print("UI_SMOKE_OK")
 
