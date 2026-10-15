@@ -68,7 +68,7 @@ Compress-Archive -Path dist/FVPTachieComposer.exe -DestinationPath dist/FVPTachi
 构建（需 Flutter SDK + VS C++ 桌面负载；**必须用 PowerShell 7**，见下）：
 
 ```powershell
-pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.1-beta>
+pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.3-beta>
 ```
 
 ## 跑 `build_flet_win.ps1` 要用 pwsh，不能用 powershell
