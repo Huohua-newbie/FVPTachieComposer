@@ -4,6 +4,9 @@ import zlib
 from PIL import Image
 import os
 import ctypes
+import logging
+
+log = logging.getLogger("fvptachie.core")
 
 # 说明：本文件是解析/合成核心 + 命令行批处理入口（main），不含 GUI。
 # 现役界面是 FVPTachieComposerFlet.py（Flet）。
@@ -21,7 +24,7 @@ def parse_hzc_header(header_bytes):
 
 	magic = header_bytes[0:4].decode('ascii', errors='ignore')
 	if magic != "hzc1":
-		print(f"警告: 魔数不是 'hzc1'，实际为 {magic}")
+		log.warning("魔数不是 'hzc1'，实际为 %s", magic)
 
 	original_size = struct.unpack('<I', header_bytes[4:8])[0]
 	image_type = struct.unpack('<H', header_bytes[18:20])[0]
@@ -101,7 +104,7 @@ def convert_hzc_data(hzc_data, original_filename, base_output_dir):
 	:return: 字典包含处理信息
 	"""
 	if len(hzc_data) < 44:
-		print(f"错误: 文件数据过小，不是有效的 HZC 文件")
+		log.error("文件数据过小，不是有效的 HZC 文件")
 		return None
 
 	header = parse_hzc_header(hzc_data[:44])
@@ -122,7 +125,7 @@ def convert_hzc_data(hzc_data, original_filename, base_output_dir):
 	try:
 		decompressed = zlib.decompress(compressed_data)
 	except zlib.error as e:
-		print(f"解压失败 {original_filename}: {e}")
+		log.error("解压失败 %s: %s", original_filename, e)
 		return None
 
 	saved_paths = []
@@ -135,7 +138,7 @@ def convert_hzc_data(hzc_data, original_filename, base_output_dir):
 			start = i * bytes_per_frame
 			frame_data = transformed[start:start+bytes_per_frame]
 			if len(frame_data) < bytes_per_frame:
-				print(f"警告: 帧 {i} 数据不足，跳过")
+				log.warning("帧 %s 数据不足，跳过", i)
 				continue
 			img = Image.frombytes('RGBA', (width, height), frame_data)
 			out_filename = f"{original_filename}_{i:03d}.png"
@@ -150,7 +153,7 @@ def convert_hzc_data(hzc_data, original_filename, base_output_dir):
 			mode = 'RGB'
 			expected = width * height * bytes_per_pixel
 			if len(decompressed) != expected:
-				print(f"警告: 数据大小不匹配，预期 {expected}，实际 {len(decompressed)}")
+				log.warning("数据大小不匹配，预期 %s，实际 %s", expected, len(decompressed))
 			img = Image.frombytes(mode, (width, height), decompressed)
 			b, g, r = img.split()
 			img = Image.merge("RGB", (r, g, b))
@@ -338,7 +341,7 @@ def compose_differentials(base_output_dir, converted_infos):
 		# 底图 PNG 路径
 		base_img_path = base_dir / f"{base_filename}.png"
 		if not base_img_path.exists():
-			print(f"警告: 底图文件不存在 {base_img_path}")
+			log.warning("底图文件不存在 %s", base_img_path)
 			continue
 
 		# 对应的表情部件文件夹（与底图同父目录，名为 base_filename + '_表情'）
@@ -350,7 +353,7 @@ def compose_differentials(base_output_dir, converted_infos):
 		offset_x = emotion_info['offset_x']
 		offset_y = emotion_info['offset_y']
 		if offset_x is None or offset_y is None:
-			print(f"警告: 部件文件夹 {emotion_folder} 缺少偏移信息，跳过")
+			log.warning("部件文件夹 %s 缺少偏移信息，跳过", emotion_folder)
 			continue
 
 		# 创建输出子文件夹 diff
@@ -576,6 +579,10 @@ def main(argv=None):
 		help="跳过交互筛选，处理全部文件",
 	)
 	args = parser.parse_args(argv)
+
+	# 库本身不配 handler；CLI 场景把 WARNING 及以上打到 stderr，别让警告默默消失
+	if not logging.getLogger().handlers:
+		logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 
 	input_path = Path(args.input)
 	if not input_path.is_file():

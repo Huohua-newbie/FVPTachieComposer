@@ -10,6 +10,7 @@ Run: python FVPTachieComposerFlet.py
 import asyncio
 import base64
 import io
+import logging
 import math
 import os
 import sys
@@ -27,6 +28,19 @@ from FVPTachieComposer import (
     hzc_decode_first_frame,
     parse_bin_info_extended,
     parse_dir_infos,
+)
+
+# ── 日志 ──────────────────────────────────────────────────
+# 桌面打包态没有控制台（flet 客户端会把 stdout/stderr 转存到 console.log）。
+# 默认只放 WARNING 及以上（被吞的异常走 log.debug，需要时设 FVP_DEBUG=1 或
+# FVP_LOG_LEVEL=INFO/DEBUG 才打全），打进 stderr 也就是 console.log——出问题时能
+# 回溯，正常运行不刷屏。
+log = logging.getLogger("fvptachie")
+log.addHandler(logging.NullHandler())
+_LOG_LEVEL = os.environ.get("FVP_LOG_LEVEL") or ("DEBUG" if os.environ.get("FVP_DEBUG") else "WARNING")
+logging.basicConfig(
+    level=getattr(logging, _LOG_LEVEL.upper(), logging.WARNING),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
 TRANSPARENT = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
@@ -229,11 +243,13 @@ def _expr_suffixes():
         try:
             raw = "表情".encode(enc)
         except Exception:
+            log.debug("忽略异常（_expr_suffixes）", exc_info=True)
             continue
         for dst in ("gbk", "big5", "cp1252"):
             try:
                 cands.add(raw.decode(dst))
             except Exception:
+                log.debug("忽略异常（_expr_suffixes）", exc_info=True)
                 pass
     return tuple(cands)
 
@@ -834,6 +850,7 @@ class ComposerApp:
         try:
             control.update()
         except Exception:
+            log.debug("忽略异常（_safe_update）", exc_info=True)
             pass
 
     async def _on_dropped(self, e):
@@ -1295,6 +1312,7 @@ class ComposerApp:
                 loop.call_later(delay, callback, *args)
                 return True
             except Exception:
+                log.debug("忽略异常（_later）", exc_info=True)
                 pass
         return False
 
@@ -1339,6 +1357,7 @@ class ComposerApp:
                     _b.text = "已复制"
                     _b.update()
                 except Exception:
+                    log.debug("忽略异常（_snack）", exc_info=True)
                     pass
 
             copy_btn.on_click = copy_err
@@ -1370,6 +1389,7 @@ class ComposerApp:
             if self._snack_overlay in self.page.overlay:
                 self.page.overlay.remove(self._snack_overlay)
         except Exception:
+            log.debug("忽略异常（_snack）", exc_info=True)
             pass
         self._snack_overlay = overlay
         self._snack_toast = toast
@@ -1409,6 +1429,7 @@ class ComposerApp:
             if not self._later(ANIM_VEIL / 1000 + 0.03, self._remove_snack, seq):
                 self._remove_snack(seq)
         except Exception:
+            log.debug("忽略异常（_dismiss_snack）", exc_info=True)
             pass
 
     def _remove_snack(self, seq):
@@ -1417,6 +1438,7 @@ class ComposerApp:
                 self.page.overlay.remove(self._snack_overlay)
                 self.page.update()
         except Exception:
+            log.debug("忽略异常（_remove_snack）", exc_info=True)
             pass
 
     def _open_folder(self, path):
@@ -1829,6 +1851,7 @@ class ComposerApp:
             tile.bgcolor = self.ink["chip"] if on else "#00000000"
             tile.update()
         except Exception:
+            log.debug("忽略异常（_set_tile_bg）", exc_info=True)
             pass
 
     def _capture_loop(self):
@@ -1848,6 +1871,7 @@ class ComposerApp:
             placeholder.bgcolor = "#00000000"
             placeholder.update()
         except Exception:
+            log.debug("忽略异常（_push_thumb）", exc_info=True)
             pass
 
     def _queue_thumb(self, placeholder, info, size, cache_key):
@@ -1858,12 +1882,14 @@ class ComposerApp:
             try:
                 img = self._read_first_frame(info)
             except Exception:
+                log.debug("忽略异常（job）", exc_info=True)
                 return
             if img is None:
                 return
             try:
                 widget = _make_thumb_widget(img, size)
             except Exception:
+                log.debug("忽略异常（job）", exc_info=True)
                 return
             if gen != self._state_gen:
                 return  # 已载出（或换了文件）：占位控件不再属于当前树，缓存也已清
@@ -1873,6 +1899,7 @@ class ComposerApp:
                     loop.call_soon_threadsafe(self._push_thumb, placeholder, widget, cache_key)
                     return
                 except Exception:
+                    log.debug("忽略异常（job）", exc_info=True)
                     pass
             self._push_thumb(placeholder, widget, cache_key)
         _THUMB_POOL.submit(job)
@@ -1885,6 +1912,7 @@ class ComposerApp:
                 try:
                     placeholder.content = cached
                 except Exception:
+                    log.debug("忽略异常（_flush_tasks）", exc_info=True)
                     pass
             else:
                 self._queue_thumb(placeholder, info, size, key)
@@ -2093,6 +2121,7 @@ class ComposerApp:
             try:
                 entry["hl"].update()
             except Exception:
+                log.debug("忽略异常（_sync_selected_row）", exc_info=True)
                 pass
         # 解码可能几十毫秒到几百毫秒，丢回事件循环 await，别卡住点击响应
         await self._load_base(info)
@@ -2193,6 +2222,7 @@ class ComposerApp:
             try:
                 await coro
             except Exception:
+                log.debug("忽略异常（_spawn）", exc_info=True)
                 pass
 
         loop.create_task(quiet())
@@ -2352,6 +2382,7 @@ class ComposerApp:
             try:
                 self.page.pop_dialog()
             except Exception:
+                log.debug("忽略异常（_compose）", exc_info=True)
                 pass
             return
         # 只让真正在打字的控件抢走按键。列表项/按钮点过之后也会持有焦点，
@@ -2445,6 +2476,7 @@ class ComposerApp:
                 composed.save(out, "PNG")
                 return True
             except Exception:
+                log.debug("忽略异常（one）", exc_info=True)
                 return False
 
         def work():
