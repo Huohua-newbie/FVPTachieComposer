@@ -296,273 +296,13 @@ HELP_KEYS = (
 )
 
 
-class ComposerApp:
-    def __init__(self, page: ft.Page):
-        self.page = page
-        self.is_dark = False
-        self.ink = _palette(False)
+class DropFeedbackMixin:
+    """拖放反馈：整扇窗口的落点、提示文案与动画画布。
 
-        self.input_file = None
-        self.file_infos = []
-        self.hierarchy = {}
-        self.selected_info = None
-        self.selected_filename = None
-
-        self.base_imgs = []
-        self.base_idx = 0
-        self.part_info = None
-        self.part_imgs = []
-        self.part_idx = 0
-        self.composed_img = None
-        # 没有表情差分可用：结果面板与导出链路都走「直接导出底图」这条退路
-        self.base_only = False
-        self.thumb_refs = []
-        self.role_thumb_cache = {}
-        # 树的展开状态记在 app 上而不是 tile 闭包里，
-        # 这样换主题整树重建后能原样展开回去（否则用户展开的角色/服装会被强制收起）。
-        self.open_roles = set()
-        self.open_outfits = set()
-        self._tree_toggles = {}
-        # 角色错峰入场：本次载入的角色外壳（透明度/位移在 _stagger_next 里逐条推）
-        self._tree_wraps = []
-        self._stagger_i = 0
-        self._stagger_gen = -1
-        # 重建树期间屏蔽"展开即选中"等级联副作用，见 _outfit_tile.toggle
-        self._restoring = False
-        # ── 拖放态（画布长在角色库面板上）────────────────────
-        # 文件是否正悬在面板上方；文案和错峰入场都看它。
-        self._drop_armed = False
-        # 画布在册（visible）吗。动画全靠逐帧重绘，见 _drop_open / _tick_drop。
-        self._drop_hint_shown = False
-        # 画布尺寸：Canvas 不参与排版时不会有尺寸，重新亮起来后要靠它补出第一帧
-        self._drop_size = (0.0, 0.0)
-        # 整层淡入淡出进度 0→1（算进每个 shape 的颜色 alpha）与它的方向
-        self._drop_a = 0.0
-        self._drop_dir = 0
-        # 配色（accent / err）与光斑弧长
-        self._drop_tone = "accent"
-        self._drop_dist = 0.0
-        # 计时器代数：+1 即可让所有在途的 tick / 错峰链自己作废，
-        # 不用去 cancel 具体的 call_later 句柄。
-        self._drop_gen = 0
-        self._drop_canvas = None
-        self._hint_icon = None
-        self._hint_title = None
-        self._hint_sub = None
-        self._hint_idle_sub = ""
-        self._hint_state = "idle"
-        # 树里所有动作行的选中态控件组；换选时按 filename 统一复原，不记"上一次点了谁"。
-        self._action_rows = []
-        # 载入代数：载入/载出各 +1。后台解析与缩略图解码都跨"载入中→载出"这段
-        # 时间，靠它判定结果是否已经过期——否则载出之后迟到的回调会把状态写回来。
-        self._state_gen = 0
-        # 载出按钮（_build_tree_column 建）；仅在已载入时可见
-        self.unload_btn = None
-
-        # UI 事件循环引用（_load_bin/_toggle_theme 中捕获）：
-        # 后台缩略图解码完成后，经由它把“替换+刷新”调度回 UI 线程执行，
-        # 避免后台线程直接碰控件导致的更新丢失。
-        self._loop = None
-
-        self.file_picker = ft.FilePicker()
-        self.clipboard = ft.Clipboard()
-        self.page.services = [self.file_picker, self.clipboard]
-        # 导入/导出各自记住自己的目录：Windows 原生对话框按进程记忆最后位置，
-        # 不分别传 initial_directory 的话，导出一选完，下次打开 bin 就被带去导出目录。
-        self.import_dir = None
-        self.export_dir = None
-        self._snack_seq = 0
-        self._snack_overlay = None
-        self._snack_toast = None
-        # busy 横幅：_parsing_gen 非空表示"这一代解析还在途中"，_busy_seq 是那条卡片
-        self._parsing_gen = None
-        self._busy_seq = None
-        self._setup_page()
-        self._build()
-
-    def _setup_page(self):
-        p = self.page
-        p.title = "FVP Tachie Composer"
-        p.window.width = 1280
-        p.window.height = 760
-        p.window.min_width = 1020
-        p.window.min_height = 600
-        p.window.title_bar_hidden = True
-        icon = _app_icon()
-        if icon:
-            p.window.icon = icon
-        p.padding = 0
-        p.spacing = 0
-        p.on_keyboard_event = self._on_keyboard
-        self._apply_theme()
-
-    def _apply_theme(self):
-        p = self.page
-        self.ink = _palette(self.is_dark)
-        self._checker = _checker_src(self.ink["checker_a"], self.ink["checker_b"])
-        theme = ft.Theme(
-            color_scheme_seed=self.ink["accent"],
-            use_material3=True,
-            scrollbar_theme=ft.ScrollbarTheme(
-                thumb_visibility=True,
-                track_visibility=False,
-                thickness=6,
-                radius=8,
-                min_thumb_length=36,
-                interactive=True,
-                cross_axis_margin=3,
-                main_axis_margin=6,
-                thumb_color=ft.Colors.with_opacity(0.45, ft.Colors.ON_SURFACE_VARIANT),
-            ),
-        )
-        p.theme = theme
-        p.dark_theme = theme
-        p.theme_mode = ft.ThemeMode.DARK if self.is_dark else ft.ThemeMode.LIGHT
-        p.bgcolor = self.ink["page"]
-
-    # ── 通用小构件 ──────────────────────────────────────────
-
-    def _panel(self, controls, *, width=None, expand=False, pad_right=6, overlay=None):
-        """面板：白卡片压在浅灰页底上，靠 1px 细描边分栏。
-
-        这里刻意不用渐变、纹理和阴影——工具界面要的是边界清楚，
-        材质效果只会让三栏看起来糊在一起。
-
-        overlay 是给"贴在面板外框上的动效层"用的（拖放态的画布）。留白必须
-        从本体挪进内容层，否则 overlay 拿到的是内容矩形，画出来的框会缩在
-        描边里面一圈，看着像另贴了一层。
-        """
-        ink = self.ink
-        pad = ft.Padding.only(left=12, top=10, right=pad_right, bottom=10)
-        col = ft.Column(controls, spacing=10, expand=True)
-        if overlay is None:
-            content = col
-        else:
-            content = ft.Stack(
-                [ft.Container(content=col, padding=pad), overlay],
-                expand=True,
-                fit=ft.StackFit.EXPAND,
-            )
-            pad = None
-        return ft.Container(
-            content=content,
-            width=width,
-            expand=expand,
-            bgcolor=ink["panel"],
-            border=ft.Border.all(1, ink["line"]),
-            border_radius=RADIUS_PANEL,
-            padding=pad,
-            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-        )
-
-    def _section(self, icon, title, right=None):
-        ink = self.ink
-        return ft.Row(
-            [
-                ft.Container(
-                    ft.Icon(icon, size=15, color=ink["accent"]),
-                    width=24, height=24, border_radius=8, bgcolor=ink["accent_soft"],
-                    alignment=ft.Alignment.CENTER,
-                ),
-                ft.Text(title, size=13, weight=ft.FontWeight.W_700, color=ink["text"], expand=True),
-                *(right or []),
-            ],
-            spacing=8,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-
-    def _stage(self, content):
-        """图像舞台：圆角 + 描边 + 棋盘底，并把溢出裁在自己的框里，
-        预览图永远不会糊到相邻区块上。"""
-        ink = self.ink
-        return ft.Container(
-            content=content,
-            expand=True,
-            bgcolor=ink["stage"],
-            image=ft.DecorationImage(src=self._checker, fit=ft.BoxFit.NONE,
-                                     repeat=ft.ImageRepeat.REPEAT, opacity=0.85),
-            border=ft.Border.all(1, ink["line_soft"]),
-            border_radius=RADIUS_STAGE,
-            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-        )
-
-    def _meta(self, text=""):
-        return ft.Text(text, size=11, color=self.ink["text_dim"],
-                       max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
-
-    def _kbd(self, text):
-        """快捷键键帽。"""
-        ink = self.ink
-        return ft.Container(
-            content=ft.Text(text, size=10, weight=ft.FontWeight.W_700, color=ink["text_dim"],
-                            font_family="Consolas"),
-            padding=ft.Padding.only(left=7, right=7, top=3, bottom=4),
-            border_radius=6,
-            bgcolor=ink["chip"],
-            border=ft.Border.only(
-                left=ft.BorderSide(1, ink["line"]),
-                top=ft.BorderSide(1, ink["line"]),
-                right=ft.BorderSide(1, ink["line_soft"]),
-                bottom=ft.BorderSide(2, ink["line_soft"]),
-            ),
-        )
-
-    def _build(self):
-        self._apply_theme()
-        p = self.page
-
-        # 拖放反馈的动效全靠逐帧重绘，重建时把状态清干净：
-        # overlay 整棵换掉，残留的 shown/进度会让下一次 enter 不动。
-        self._drop_hint_shown = False
-        self._drop_armed = False
-        self._drop_dir = 0
-        self._drop_a = 0.0
-        self._drop_dist = 0.0
-        self._drop_tone = "accent"
-        self._drop_gen += 1
-
-        self.title_bar = self._build_title_bar()
-        self.tree_col = self._build_tree_column()
-        self.base_col = self._build_base_column()
-        self.result_col = self._build_result_column()
-        self.status_text = ft.Text("就绪", size=11, color=self.ink["text_dim"],
-                                   max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
-        self.status_meta = ft.Text("", size=11, color=self.ink["text_dim"])
-
-        status_bar = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Container(width=6, height=6, border_radius=3, bgcolor=self.ink["accent"]),
-                    ft.Container(self.status_text, expand=True),
-                    self.status_meta,
-                ],
-                spacing=8,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            height=30,
-            padding=ft.Padding.only(left=16, right=16, top=0, bottom=2),
-            border=ft.Border.only(top=ft.BorderSide(1, self.ink["line_soft"])),
-        )
-
-        body = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Container(self.tree_col, width=300),
-                    ft.Container(self.base_col, expand=True),
-                    ft.Container(self.result_col, width=372),
-                ],
-                expand=True,
-                spacing=10,
-            ),
-            expand=True,
-            padding=ft.Padding.only(left=12, right=12, top=10, bottom=10),
-        )
-
-        root = ft.Column([self.title_bar, body, status_bar], spacing=0, expand=True)
-        # 落点是整扇窗口（Dropzone 最外层包一层，见 _drop_wrap）：
-        # 文件一进窗口就该亮反馈，等它挪到角色库栏才动会像没接住。
-        p.add(self._drop_wrap(root))
-        p.update()
+    只依赖宿主实例上已有的状态与控件（``_drop_canvas`` / ``empty_hint`` /
+    ``tree_list`` / ``_hint_*`` / ``_state_gen`` …），因此以 mixin 形式挂在
+    ``ComposerApp`` 上，状态归属不变。
+    """
 
     def _drop_wrap(self, content):
         """把整扇窗口包成拖放目标；未启用（官方客户端没有该插件）时原样返回。
@@ -895,6 +635,274 @@ class ComposerApp:
         self._set_hint_state("idle")
         self._hint_stage(False)
         self.page.update()
+
+class ComposerApp(DropFeedbackMixin):
+    def __init__(self, page: ft.Page):
+        self.page = page
+        self.is_dark = False
+        self.ink = _palette(False)
+
+        self.input_file = None
+        self.file_infos = []
+        self.hierarchy = {}
+        self.selected_info = None
+        self.selected_filename = None
+
+        self.base_imgs = []
+        self.base_idx = 0
+        self.part_info = None
+        self.part_imgs = []
+        self.part_idx = 0
+        self.composed_img = None
+        # 没有表情差分可用：结果面板与导出链路都走「直接导出底图」这条退路
+        self.base_only = False
+        self.thumb_refs = []
+        self.role_thumb_cache = {}
+        # 树的展开状态记在 app 上而不是 tile 闭包里，
+        # 这样换主题整树重建后能原样展开回去（否则用户展开的角色/服装会被强制收起）。
+        self.open_roles = set()
+        self.open_outfits = set()
+        self._tree_toggles = {}
+        # 角色错峰入场：本次载入的角色外壳（透明度/位移在 _stagger_next 里逐条推）
+        self._tree_wraps = []
+        self._stagger_i = 0
+        self._stagger_gen = -1
+        # 重建树期间屏蔽"展开即选中"等级联副作用，见 _outfit_tile.toggle
+        self._restoring = False
+        # ── 拖放态（画布长在角色库面板上）────────────────────
+        # 文件是否正悬在面板上方；文案和错峰入场都看它。
+        self._drop_armed = False
+        # 画布在册（visible）吗。动画全靠逐帧重绘，见 _drop_open / _tick_drop。
+        self._drop_hint_shown = False
+        # 画布尺寸：Canvas 不参与排版时不会有尺寸，重新亮起来后要靠它补出第一帧
+        self._drop_size = (0.0, 0.0)
+        # 整层淡入淡出进度 0→1（算进每个 shape 的颜色 alpha）与它的方向
+        self._drop_a = 0.0
+        self._drop_dir = 0
+        # 配色（accent / err）与光斑弧长
+        self._drop_tone = "accent"
+        self._drop_dist = 0.0
+        # 计时器代数：+1 即可让所有在途的 tick / 错峰链自己作废，
+        # 不用去 cancel 具体的 call_later 句柄。
+        self._drop_gen = 0
+        self._drop_canvas = None
+        self._hint_icon = None
+        self._hint_title = None
+        self._hint_sub = None
+        self._hint_idle_sub = ""
+        self._hint_state = "idle"
+        # 树里所有动作行的选中态控件组；换选时按 filename 统一复原，不记"上一次点了谁"。
+        self._action_rows = []
+        # 载入代数：载入/载出各 +1。后台解析与缩略图解码都跨"载入中→载出"这段
+        # 时间，靠它判定结果是否已经过期——否则载出之后迟到的回调会把状态写回来。
+        self._state_gen = 0
+        # 载出按钮（_build_tree_column 建）；仅在已载入时可见
+        self.unload_btn = None
+
+        # UI 事件循环引用（_load_bin/_toggle_theme 中捕获）：
+        # 后台缩略图解码完成后，经由它把“替换+刷新”调度回 UI 线程执行，
+        # 避免后台线程直接碰控件导致的更新丢失。
+        self._loop = None
+
+        self.file_picker = ft.FilePicker()
+        self.clipboard = ft.Clipboard()
+        self.page.services = [self.file_picker, self.clipboard]
+        # 导入/导出各自记住自己的目录：Windows 原生对话框按进程记忆最后位置，
+        # 不分别传 initial_directory 的话，导出一选完，下次打开 bin 就被带去导出目录。
+        self.import_dir = None
+        self.export_dir = None
+        self._snack_seq = 0
+        self._snack_overlay = None
+        self._snack_toast = None
+        # busy 横幅：_parsing_gen 非空表示"这一代解析还在途中"，_busy_seq 是那条卡片
+        self._parsing_gen = None
+        self._busy_seq = None
+        self._setup_page()
+        self._build()
+
+    def _setup_page(self):
+        p = self.page
+        p.title = "FVP Tachie Composer"
+        p.window.width = 1280
+        p.window.height = 760
+        p.window.min_width = 1020
+        p.window.min_height = 600
+        p.window.title_bar_hidden = True
+        icon = _app_icon()
+        if icon:
+            p.window.icon = icon
+        p.padding = 0
+        p.spacing = 0
+        p.on_keyboard_event = self._on_keyboard
+        self._apply_theme()
+
+    def _apply_theme(self):
+        p = self.page
+        self.ink = _palette(self.is_dark)
+        self._checker = _checker_src(self.ink["checker_a"], self.ink["checker_b"])
+        theme = ft.Theme(
+            color_scheme_seed=self.ink["accent"],
+            use_material3=True,
+            scrollbar_theme=ft.ScrollbarTheme(
+                thumb_visibility=True,
+                track_visibility=False,
+                thickness=6,
+                radius=8,
+                min_thumb_length=36,
+                interactive=True,
+                cross_axis_margin=3,
+                main_axis_margin=6,
+                thumb_color=ft.Colors.with_opacity(0.45, ft.Colors.ON_SURFACE_VARIANT),
+            ),
+        )
+        p.theme = theme
+        p.dark_theme = theme
+        p.theme_mode = ft.ThemeMode.DARK if self.is_dark else ft.ThemeMode.LIGHT
+        p.bgcolor = self.ink["page"]
+
+    # ── 通用小构件 ──────────────────────────────────────────
+
+    def _panel(self, controls, *, width=None, expand=False, pad_right=6, overlay=None):
+        """面板：白卡片压在浅灰页底上，靠 1px 细描边分栏。
+
+        这里刻意不用渐变、纹理和阴影——工具界面要的是边界清楚，
+        材质效果只会让三栏看起来糊在一起。
+
+        overlay 是给"贴在面板外框上的动效层"用的（拖放态的画布）。留白必须
+        从本体挪进内容层，否则 overlay 拿到的是内容矩形，画出来的框会缩在
+        描边里面一圈，看着像另贴了一层。
+        """
+        ink = self.ink
+        pad = ft.Padding.only(left=12, top=10, right=pad_right, bottom=10)
+        col = ft.Column(controls, spacing=10, expand=True)
+        if overlay is None:
+            content = col
+        else:
+            content = ft.Stack(
+                [ft.Container(content=col, padding=pad), overlay],
+                expand=True,
+                fit=ft.StackFit.EXPAND,
+            )
+            pad = None
+        return ft.Container(
+            content=content,
+            width=width,
+            expand=expand,
+            bgcolor=ink["panel"],
+            border=ft.Border.all(1, ink["line"]),
+            border_radius=RADIUS_PANEL,
+            padding=pad,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+        )
+
+    def _section(self, icon, title, right=None):
+        ink = self.ink
+        return ft.Row(
+            [
+                ft.Container(
+                    ft.Icon(icon, size=15, color=ink["accent"]),
+                    width=24, height=24, border_radius=8, bgcolor=ink["accent_soft"],
+                    alignment=ft.Alignment.CENTER,
+                ),
+                ft.Text(title, size=13, weight=ft.FontWeight.W_700, color=ink["text"], expand=True),
+                *(right or []),
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def _stage(self, content):
+        """图像舞台：圆角 + 描边 + 棋盘底，并把溢出裁在自己的框里，
+        预览图永远不会糊到相邻区块上。"""
+        ink = self.ink
+        return ft.Container(
+            content=content,
+            expand=True,
+            bgcolor=ink["stage"],
+            image=ft.DecorationImage(src=self._checker, fit=ft.BoxFit.NONE,
+                                     repeat=ft.ImageRepeat.REPEAT, opacity=0.85),
+            border=ft.Border.all(1, ink["line_soft"]),
+            border_radius=RADIUS_STAGE,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+        )
+
+    def _meta(self, text=""):
+        return ft.Text(text, size=11, color=self.ink["text_dim"],
+                       max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+
+    def _kbd(self, text):
+        """快捷键键帽。"""
+        ink = self.ink
+        return ft.Container(
+            content=ft.Text(text, size=10, weight=ft.FontWeight.W_700, color=ink["text_dim"],
+                            font_family="Consolas"),
+            padding=ft.Padding.only(left=7, right=7, top=3, bottom=4),
+            border_radius=6,
+            bgcolor=ink["chip"],
+            border=ft.Border.only(
+                left=ft.BorderSide(1, ink["line"]),
+                top=ft.BorderSide(1, ink["line"]),
+                right=ft.BorderSide(1, ink["line_soft"]),
+                bottom=ft.BorderSide(2, ink["line_soft"]),
+            ),
+        )
+
+    def _build(self):
+        self._apply_theme()
+        p = self.page
+
+        # 拖放反馈的动效全靠逐帧重绘，重建时把状态清干净：
+        # overlay 整棵换掉，残留的 shown/进度会让下一次 enter 不动。
+        self._drop_hint_shown = False
+        self._drop_armed = False
+        self._drop_dir = 0
+        self._drop_a = 0.0
+        self._drop_dist = 0.0
+        self._drop_tone = "accent"
+        self._drop_gen += 1
+
+        self.title_bar = self._build_title_bar()
+        self.tree_col = self._build_tree_column()
+        self.base_col = self._build_base_column()
+        self.result_col = self._build_result_column()
+        self.status_text = ft.Text("就绪", size=11, color=self.ink["text_dim"],
+                                   max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+        self.status_meta = ft.Text("", size=11, color=self.ink["text_dim"])
+
+        status_bar = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Container(width=6, height=6, border_radius=3, bgcolor=self.ink["accent"]),
+                    ft.Container(self.status_text, expand=True),
+                    self.status_meta,
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            height=30,
+            padding=ft.Padding.only(left=16, right=16, top=0, bottom=2),
+            border=ft.Border.only(top=ft.BorderSide(1, self.ink["line_soft"])),
+        )
+
+        body = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Container(self.tree_col, width=300),
+                    ft.Container(self.base_col, expand=True),
+                    ft.Container(self.result_col, width=372),
+                ],
+                expand=True,
+                spacing=10,
+            ),
+            expand=True,
+            padding=ft.Padding.only(left=12, right=12, top=10, bottom=10),
+        )
+
+        root = ft.Column([self.title_bar, body, status_bar], spacing=0, expand=True)
+        # 落点是整扇窗口（Dropzone 最外层包一层，见 _drop_wrap）：
+        # 文件一进窗口就该亮反馈，等它挪到角色库栏才动会像没接住。
+        p.add(self._drop_wrap(root))
+        p.update()
 
     # ── Title bar ───────────────────────────────────────────
 
@@ -1918,7 +1926,8 @@ class ComposerApp:
                 self._queue_thumb(placeholder, info, size, key)
         tasks.clear()
 
-    def _read_first_frame(self, info):
+    def _read_hzc_bytes(self, info):
+        """取一条记录的原始字节与解码头：独立 .hzc 直接读，否则从 bin 里按偏移读。"""
         src = info.get("path")
         if src:
             with open(src, "rb") as f:
@@ -1933,6 +1942,10 @@ class ComposerApp:
             "height": info.get("height", 0),
             "frame_count": info.get("frame_count", 1),
         }
+        return data, header
+
+    def _read_first_frame(self, info):
+        data, header = self._read_hzc_bytes(info)
         return hzc_decode_first_frame(data, header)
 
     def _get_role_thumbnail(self, role, outfits):
@@ -2129,20 +2142,7 @@ class ComposerApp:
     # ── Base image ──────────────────────────────────────────
 
     def _read_pil_list(self, info):
-        src = info.get("path")
-        if src:
-            with open(src, "rb") as f:
-                data = f.read()
-        else:
-            with open(self.input_file, "rb") as f:
-                f.seek(info["offset"])
-                data = f.read(info["size"])
-        header = {
-            "image_type": info.get("image_type", 0),
-            "width": info.get("width", 0),
-            "height": info.get("height", 0),
-            "frame_count": info.get("frame_count", 1),
-        }
+        data, header = self._read_hzc_bytes(info)
         return hzc_data_to_pil_list(data, header)
 
     async def _load_base(self, info):
