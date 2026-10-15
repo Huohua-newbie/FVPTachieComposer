@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 import struct
 import zlib
@@ -14,7 +16,7 @@ log = logging.getLogger("fvptachie.core")
 
 
 # ---------- HZC 文件解析与转换 ----------
-def parse_hzc_header(header_bytes):
+def parse_hzc_header(header_bytes: bytes) -> dict:
 	"""
 	解析 HZC 文件头（44 字节）
 	返回字典包含关键信息
@@ -46,7 +48,7 @@ def parse_hzc_header(header_bytes):
 		'offset_y': offset_y,
 	}
 
-def transform_bytes_bytearray(data):
+def transform_bytes_bytearray(data: bytes) -> bytes:
 	"""
 	字节变换函数（仅用于多帧 HZC）：每4个字节一组，交换位置0和2
 	使用扩展切片在 C 层完成交换，避免逐字节 Python 循环。
@@ -57,7 +59,7 @@ def transform_bytes_bytearray(data):
 	return bytes(byte_arr)
 
 
-def hzc_decode_first_frame(hzc_data, header_info):
+def hzc_decode_first_frame(hzc_data: bytes, header_info: dict) -> Image.Image | None:
 	"""
 	仅解码多帧 HZC 的第一帧（供缩略图等场景）：
 	zlib 增量解压到首帧所需字节即停，跳过其余帧的解压与 PIL 构建。
@@ -95,7 +97,7 @@ def hzc_decode_first_frame(hzc_data, header_info):
 	b, g, r, a = img.split()
 	return Image.merge("RGBA", (r, g, b, a))
 
-def convert_hzc_data(hzc_data, original_filename, base_output_dir):
+def convert_hzc_data(hzc_data: bytes, original_filename: str, base_output_dir: str | Path) -> dict | None:
 	"""
 	将 HZC 二进制数据转换为 PNG 图片
 	:param hzc_data: 完整的 HZC 文件数据
@@ -181,7 +183,7 @@ def convert_hzc_data(hzc_data, original_filename, base_output_dir):
 	}
 
 # ---------- bin 文件解析 ----------
-def parse_bin_info(input_file: str):
+def parse_bin_info(input_file: str) -> list[dict]:
 	"""
 	解析.bin文件，返回文件信息列表。
 	每个元素为字典：{'filename': 文件名（不含扩展名）, 'offset': 绝对偏移, 'size': 大小, 'type': 类型}
@@ -247,7 +249,7 @@ def parse_bin_info(input_file: str):
 		return file_infos
 
 # ---------- 层级细分选择 ----------
-def interactive_filter_by_parts(file_infos):
+def interactive_filter_by_parts(file_infos: list[dict]) -> list[dict]:
 	"""
 	根据文件名下划线分割部分进行多级筛选。
 	返回筛选后的 file_infos 列表。
@@ -299,7 +301,7 @@ def interactive_filter_by_parts(file_infos):
 	return current_list
 
 # ---------- 提取并转换符合条件的文件 ----------
-def extract_and_convert_by_condition(input_file, file_infos, output_dir, condition_func):
+def extract_and_convert_by_condition(input_file: str, file_infos: list[dict], output_dir: str | Path, condition_func) -> list[dict]:
 	"""
 	从 bin 文件中读取符合条件的数据，并立即转换为 PNG
 	返回转换后的信息列表（每个元素是 convert_hzc_data 的返回值）
@@ -319,7 +321,7 @@ def extract_and_convert_by_condition(input_file, file_infos, output_dir, conditi
 	return results
 
 # ---------- 差分合成 ----------
-def compose_differentials(base_output_dir, converted_infos):
+def compose_differentials(base_output_dir: str | Path, converted_infos: list[dict]) -> None:
 	"""
 	根据转换后的信息，对每个底图及其对应的表情部件进行差分合成
 	:param base_output_dir: 基础输出目录（同 convert_hzc_data 中的 base_output_dir）
@@ -400,7 +402,7 @@ def compose_differentials(base_output_dir, converted_infos):
 	print("差分合成完成！")
 
 # ---------- 扩展解析：获取 HZC 头部信息 ----------
-def parse_hzc_header_from_bytes(header_bytes):
+def parse_hzc_header_from_bytes(header_bytes: bytes) -> dict | None:
 	"""从44字节头部解析信息"""
 	if len(header_bytes) < 44:
 		return None
@@ -423,7 +425,7 @@ def parse_hzc_header_from_bytes(header_bytes):
 		'frame_count': frame_count
 	}
 
-def parse_bin_info_extended(input_file):
+def parse_bin_info_extended(input_file: str) -> list[dict]:
 	"""调用原 parse_bin_info 并补充 HZC 头部信息"""
 	base_infos = parse_bin_info(input_file)  # 原函数返回列表，每个元素含 filename, offset, size, type
 	with open(input_file, 'rb') as f:
@@ -441,7 +443,7 @@ def parse_bin_info_extended(input_file):
 	return base_infos
 
 # ---------- 解析散装 HZC 文件夹 ----------
-def parse_dir_infos(folder):
+def parse_dir_infos(folder: str | Path) -> list[dict]:
 	"""
 	递归扫描文件夹，识别 HZC 图像文件（按 .hzc 后缀或 hzc1 文件头），
 	返回与 parse_bin_info_extended 兼容的信息列表。
@@ -473,7 +475,7 @@ def parse_dir_infos(folder):
 	return infos
 
 # ---------- 将 HZC 数据转换为 PIL 图像列表 ----------
-def hzc_data_to_pil_list(hzc_data, header_info):
+def hzc_data_to_pil_list(hzc_data: bytes, header_info: dict) -> list[Image.Image]:
 	"""
 	根据 HZC 数据和头部信息，返回 PIL Image 列表
 	header_info 应包含 image_type, width, height, frame_count
@@ -524,7 +526,7 @@ def hzc_data_to_pil_list(hzc_data, header_info):
 		return [img]
 
 # ---------- 合成差分图像 ----------
-def compose_preview(base_img, part_img, offset_x, offset_y):
+def compose_preview(base_img: Image.Image, part_img: Image.Image, offset_x: int, offset_y: int) -> Image.Image:
 	"""将部件图像合成到底图上，返回合成后的 PIL Image"""
 	base = base_img.convert('RGBA')
 	part = part_img.convert('RGBA')
@@ -555,7 +557,7 @@ def compose_preview(base_img, part_img, offset_x, offset_y):
 	return result
 
 # ---------- 命令行入口 ----------
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
 	"""命令行批处理：把一个 .bin 里的贴图导出成 PNG，并合成表情差分。
 
 	    py -3.13 FVPTachieComposer.py <资源.bin> [-o 输出目录] [--all]

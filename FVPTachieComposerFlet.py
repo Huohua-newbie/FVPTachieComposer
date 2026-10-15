@@ -7,6 +7,8 @@ Dependencies: flet>=0.86  Pillow>=10
 Run: python FVPTachieComposerFlet.py
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import io
@@ -101,7 +103,7 @@ except Exception:
     _dropzone = None
 
 
-def _custom_client_available():
+def _custom_client_available() -> bool:
     if os.environ.get("FLET_PLATFORM", "").strip():
         return True
     try:
@@ -113,7 +115,7 @@ def _custom_client_available():
         return False
 
 
-def _dropzone_on():
+def _dropzone_on() -> bool:
     if _dropzone is None:
         return False
     flag = os.environ.get("FVP_DROPZONE", "").strip().lower()
@@ -127,7 +129,7 @@ def _dropzone_on():
 DROPZONE_ON = _dropzone_on()
 
 
-def pick_drop_path(paths):
+def pick_drop_path(paths: list[str]) -> str | None:
     """从拖入的路径里挑出能载入的那个：.bin 优先，其次含 HZC 的文件夹。"""
     bins, dirs = [], []
     for p in paths:
@@ -150,7 +152,7 @@ def pick_drop_path(paths):
     return bins[0] if bins else None
 
 
-def _palette(dark):
+def _palette(dark: bool) -> dict:
     if dark:
         p = {
             "page": "#101318",
@@ -205,12 +207,12 @@ def _palette(dark):
     return p
 
 
-def _rgb(hex_str):
+def _rgb(hex_str: str) -> tuple[int, int, int]:
     h = hex_str.lstrip("#")
     return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
 
-def _checker_src(a, b, cell=11):
+def _checker_src(a: str, b: str, cell: int = 11) -> str:
     """透明立绘的棋盘衬底：一眼分清“这里是透明的”和“这里是白的”。"""
     img = Image.new("RGB", (2, 2))
     img.putpixel((0, 0), _rgb(a))
@@ -221,7 +223,7 @@ def _checker_src(a, b, cell=11):
     return _img_src(img)
 
 
-def _app_icon():
+def _app_icon() -> str | None:
     """返回随程序分发的 Shinku.ico 路径；开发环境取脚本目录，打包后取解包目录。"""
     if getattr(sys, "frozen", False):
         base = Path(getattr(sys, "_MEIPASS", "")) or Path(sys.executable).parent
@@ -231,12 +233,12 @@ def _app_icon():
     return str(icon) if icon.exists() else None
 
 
-def _tip(text):
+def _tip(text: str) -> ft.Tooltip:
     """统一提示气泡：悬停 100ms 即显，移开 150ms 快速淡出。"""
     return ft.Tooltip(message=text, wait_duration=100, show_duration=150)
 
 
-def _expr_suffixes():
+def _expr_suffixes() -> tuple[str, ...]:
     """生成“表情”在各编码组合下的后缀变体，兼容 GBK/BIG5 等误读 SJIS 文件名的拆包结果。"""
     cands = {"表情"}
     for enc in ("shift_jis", "utf-8"):
@@ -259,12 +261,12 @@ EXPR_SUFFIXES = _expr_suffixes()
 _THUMB_POOL = ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 4)), thread_name_prefix="thumb")
 
 
-def _is_expr(filename):
+def _is_expr(filename: str) -> bool:
     """判断文件名是否为表情差分文件（编码无关）。"""
     return any(filename.endswith(s) for s in EXPR_SUFFIXES)
 
 
-def _find_expr_info(file_infos, base_name):
+def _find_expr_info(file_infos: list[dict], base_name: str) -> dict | None:
     """查找底图对应的表情差分条目：base_<表情后缀>，后缀按编码变体集合精确匹配。"""
     prefix = base_name + "_"
     for i in file_infos:
@@ -2497,13 +2499,13 @@ class ComposerApp(DropFeedbackMixin):
             self._set_status("导出失败")
 
 
-def _img_bytes(img, fmt="PNG"):
+def _img_bytes(img: Image.Image, fmt: str = "PNG") -> bytes:
     buf = io.BytesIO()
     img.save(buf, fmt)
     return buf.getvalue()
 
 
-def _img_src(img, fmt="PNG"):
+def _img_src(img: Image.Image, fmt: str = "PNG") -> str:
     """给 ft.Image 用的 data URI。
 
     注意：src 直接塞 bytes 只在「构造时」有效，构造后 `img.src = bytes` 赋值
@@ -2522,7 +2524,7 @@ _THUMB_SRC_CACHE = OrderedDict()
 _THUMB_SRC_CACHE_MAX = 256
 
 
-def _cached_src(cache, key, img, build, limit):
+def _cached_src(cache: OrderedDict, key: tuple, img: Image.Image, build, limit: int) -> str:
     """按 key 取缓存里的 data URI，没有就 build(img) 出来放回去（LRU 上限淘汰）。
 
     缓存只在 UI 线程与缩略图工作线程之间共享，最多退化成偶尔重复编码，
@@ -2539,23 +2541,23 @@ def _cached_src(cache, key, img, build, limit):
     return src
 
 
-def _cached_thumb(key, img, size):
+def _cached_thumb(key: tuple, img: Image.Image, size: int) -> str:
     return _cached_src(_THUMB_SRC_CACHE, key, img, lambda im: _thumb_bytes(im, size), _THUMB_SRC_CACHE_MAX)
 
 
-def _part_thumb_srcs(filename, imgs):
+def _part_thumb_srcs(filename: str, imgs: list[Image.Image]) -> list[str]:
     """一次算好一批差分帧的缩略图 data URI（放在线程里跑，别占 UI 事件循环）。"""
     return [_cached_thumb(("part", filename, i), img, THUMB) for i, img in enumerate(imgs)]
 
 
-def _thumb_bytes(img, size=100):
+def _thumb_bytes(img: Image.Image, size: int = 100) -> str:
     w, h = img.size
     s = min(1.0, size / max(w, h))
     thumb = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.Resampling.LANCZOS)
     return _img_src(thumb)
 
 
-def _make_thumb_widget(img, size=36):
+def _make_thumb_widget(img: Image.Image, size: int = 36) -> ft.Image:
     data = _thumb_bytes(img, size)
     return ft.Image(src=data, width=size, height=size, fit=ft.BoxFit.CONTAIN)
 
