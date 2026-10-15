@@ -55,7 +55,7 @@ async def _open_first_action(app, role_idx=0, outfit_idx=0):
     await asyncio.sleep(0.6)
     info = next((i for i in app.file_infos if not _is_expr(i["filename"])), None)
     if info:
-        app._select_action(info)
+        await app._select_action(info)
     await asyncio.sleep(1.2)
     return rbody, obody
 
@@ -83,7 +83,7 @@ async def scenario_parts(app, page):
          if not _is_expr(i["filename"]) and _find_expr_info(app.file_infos, i["filename"])),
         None)
     if with_parts:
-        app._select_action(with_parts)
+        await app._select_action(with_parts)
         await asyncio.sleep(1.0)
         app._pick_part(min(2, len(app.part_imgs) - 1))
     await asyncio.sleep(0.6)

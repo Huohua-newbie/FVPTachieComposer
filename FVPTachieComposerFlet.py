@@ -13,6 +13,7 @@ import io
 import math
 import os
 import sys
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -1709,16 +1710,32 @@ class ComposerApp:
         if self.part_imgs:
             self.thumb_refs = []
             self.thumb_list.controls.clear()
-            for idx, img in enumerate(self.part_imgs):
-                self.thumb_list.controls.append(self._make_thumb(img, idx))
+            datas = _part_thumb_srcs(
+                self.part_info.get("filename") if self.part_info else None,
+                self.part_imgs,
+            )
+            for idx, data in enumerate(datas):
+                self.thumb_list.controls.append(self._make_thumb(data, idx))
             self.part_count.value = f"{len(self.part_imgs)} 帧"
             self.part_hint.visible = False
             self.thumb_list.visible = True
         if self.composed_img is not None and self.part_info:
-            self.result_image.src = _img_src(self.composed_img)
-            self.result_hint.visible = False
             ox = self.part_info.get("offset_x", 0)
             oy = self.part_info.get("offset_y", 0)
+            self.result_image.src = _cached_src(
+                _SRC_CACHE,
+                (
+                    "composed",
+                    self.selected_info.get("filename") if self.selected_info else None,
+                    self.part_idx,
+                    ox,
+                    oy,
+                ),
+                self.composed_img,
+                _img_src,
+                _SRC_CACHE_MAX,
+            )
+            self.result_hint.visible = False
             self.result_meta.value = (f"{self.composed_img.size[0]}×"
                                       f"{self.composed_img.size[1]} · 偏移 {ox:+d}/{oy:+d}")
             self.save_btn.disabled = False
@@ -1726,7 +1743,13 @@ class ComposerApp:
         elif self.base_only and self.base_imgs:
             # 无差分底图模式：镜像与两按钮由 _show_base_frame 之外单独兜底
             img = self.base_imgs[self.base_idx]
-            self.result_image.src = _img_src(img)
+            self.result_image.src = _cached_src(
+                _SRC_CACHE,
+                ("base", self.selected_filename, self.base_idx),
+                img,
+                _img_src,
+                _SRC_CACHE_MAX,
+            )
             self.result_hint.visible = False
             self.result_meta.value = f"{img.size[0]}×{img.size[1]} · 底图（无表情差分）"
             self.save_btn.disabled = False
@@ -1962,7 +1985,7 @@ class ComposerApp:
                 if len(action_tiles) == 1 and not self._restoring:
                     tile, info = action_tiles[0]
                     if self.selected_filename != info.get("filename"):
-                        self._select_action(info)
+                        self._spawn(self._select_action(info))
             body.update()
             chevron.update()
             self._set_tile_bg(header, state["open"])
@@ -2003,7 +2026,7 @@ class ComposerApp:
             leading=thumb_widget,
             title=title,
             trailing=dot,
-            on_click=lambda e: self._select_action(info),
+            on_click=lambda e: self._spawn(self._select_action(info)),
             content_padding=ft.Padding.only(left=8, right=8, top=0, bottom=0),
             dense=True,
             min_height=38,
@@ -2062,7 +2085,7 @@ class ComposerApp:
             changed.append(entry)
         return changed
 
-    def _select_action(self, info):
+    async def _select_action(self, info):
         if self.selected_filename == info.get("filename"):
             return
         self.selected_filename = info["filename"]
@@ -2071,7 +2094,8 @@ class ComposerApp:
                 entry["hl"].update()
             except Exception:
                 pass
-        self._load_base(info)
+        # 解码可能几十毫秒到几百毫秒，丢回事件循环 await，别卡住点击响应
+        await self._load_base(info)
 
     # ── Base image ──────────────────────────────────────────
 
@@ -2092,25 +2116,40 @@ class ComposerApp:
         }
         return hzc_data_to_pil_list(data, header)
 
-    def _load_base(self, info):
+    async def _load_base(self, info):
         self.selected_info = info
+        gen = self._state_gen
         try:
-            self.base_imgs = self._read_pil_list(info)
+            # 整帧解压/变换在线程里做，UI 线程只负责上屏
+            base_imgs = await asyncio.to_thread(self._read_pil_list, info)
         except Exception as ex:
+            if gen != self._state_gen:
+                return
             self.base_imgs = []
             self._snack(f"读取底图失败: {ex}", error=True)
             return
-        if not self.base_imgs:
+        if gen != self._state_gen:
+            # 期间又切了别的动作，这份结果已经过期，直接丢
+            return
+        if not base_imgs:
             self._snack("无法解析该 HZC 图像", error=True)
             return
+        self.base_imgs = base_imgs
         self.base_idx = 0
         self._reset_zoom()
         self._show_base_frame()
-        self._load_parts(info)
+        await self._load_parts(info)
 
     def _show_base_frame(self):
         img = self.base_imgs[self.base_idx]
-        self.base_image.src = _img_src(img)
+        src = _cached_src(
+            _SRC_CACHE,
+            ("base", self.selected_filename, self.base_idx),
+            img,
+            _img_src,
+            _SRC_CACHE_MAX,
+        )
+        self.base_image.src = src
         self.base_hint.visible = False
         n = len(self.base_imgs)
         self.frame_label.value = f"{self.base_idx + 1}/{n}" if n > 1 else ""
@@ -2120,7 +2159,7 @@ class ComposerApp:
         self.base_meta.value = f"{img.size[0]}×{img.size[1]} · {n} 帧"
         if self.base_only:
             # 没有差分时右栏是底图镜像：换帧要跟手，否则导出的和看到的对不上
-            self.result_image.src = _img_src(img)
+            self.result_image.src = src
             self.result_meta.value = f"{img.size[0]}×{img.size[1]} · 底图（无表情差分）"
         self.page.update()
 
@@ -2173,14 +2212,20 @@ class ComposerApp:
             self.page.update()
             return
         img = self.base_imgs[self.base_idx]
-        self.result_image.src = _img_src(img)
+        self.result_image.src = _cached_src(
+            _SRC_CACHE,
+            ("base", self.selected_filename, self.base_idx),
+            img,
+            _img_src,
+            _SRC_CACHE_MAX,
+        )
         self.result_hint.visible = False
         self.result_meta.value = f"{img.size[0]}×{img.size[1]} · 底图（无表情差分）"
         self.save_btn.disabled = False
         self.batch_btn.disabled = False
         self.page.update()
 
-    def _load_parts(self, info):
+    async def _load_parts(self, info):
         self.part_info = None
         self.part_imgs = []
         self.thumb_refs = []
@@ -2204,29 +2249,39 @@ class ComposerApp:
             self._enter_base_only()
             return
 
+        gen = self._state_gen
         try:
-            imgs = self._read_pil_list(part_info)
+            imgs = await asyncio.to_thread(self._read_pil_list, part_info)
         except Exception as ex:
+            if gen != self._state_gen:
+                return
             self._snack(f"读取部件失败: {ex}", error=True)
             self.page.update()
+            return
+        if gen != self._state_gen:
+            # 期间又切了别的动作，这份结果已经过期
             return
         if not imgs:
             self.part_hint_text.value = PART_HINT_EMPTY
             self._enter_base_only()
             return
 
+        # 缩略图缩放 + PNG/base64 编码也丢线程里：几十帧在 UI 线程上做会明显掉帧
+        datas = await asyncio.to_thread(_part_thumb_srcs, part_info.get("filename"), imgs)
+        if gen != self._state_gen:
+            return
+
         self.part_info = part_info
         self.part_imgs = imgs
         self.part_count.value = f"{len(imgs)} 帧"
-        for idx, img in enumerate(imgs):
-            self.thumb_list.controls.append(self._make_thumb(img, idx))
+        for idx, data in enumerate(datas):
+            self.thumb_list.controls.append(self._make_thumb(data, idx))
         self.part_hint.visible = False
         self.thumb_list.visible = True
         self.page.update()
         self._pick_part(0)
 
-    def _make_thumb(self, img, idx):
-        data = _thumb_bytes(img, THUMB)
+    def _make_thumb(self, data, idx):
         selected = idx == self.part_idx
         ink = self.ink
 
@@ -2262,12 +2317,10 @@ class ComposerApp:
         if not self.part_imgs or idx >= len(self.part_imgs):
             return
         self.part_idx = idx
+        # 只改属性，交给紧随其后的 _compose() 里那次 page.update() 一起推上去，
+        # 免得 28 个缩略图各发一次 update、整棵控件树跟着抖。
         for c, i in self.thumb_refs:
             c.border = ft.Border.all(2, self.ink["accent"] if i == idx else self.ink["line_soft"])
-            try:
-                c.update()
-            except Exception:
-                pass
         self._compose()
 
     def _compose(self, e=None):
@@ -2426,6 +2479,41 @@ def _img_src(img, fmt="PNG"):
     统一走 data URI，构造和更新两条路都成立。
     """
     return "data:image/png;base64," + base64.b64encode(_img_bytes(img, fmt)).decode()
+
+
+# 全图 data URI 缓存：翻帧 / 换主题 / 无差分镜像都会把同一张 PIL 图重新编码
+# 成 PNG+base64（大图几十毫秒），命中即可跳过。key 用 (用途, 文件名, 序号)。
+_SRC_CACHE = OrderedDict()
+_SRC_CACHE_MAX = 24
+# 缩略图缓存单独一份，避免被翻帧产生的全图挤掉。
+_THUMB_SRC_CACHE = OrderedDict()
+_THUMB_SRC_CACHE_MAX = 256
+
+
+def _cached_src(cache, key, img, build, limit):
+    """按 key 取缓存里的 data URI，没有就 build(img) 出来放回去（LRU 上限淘汰）。
+
+    缓存只在 UI 线程与缩略图工作线程之间共享，最多退化成偶尔重复编码，
+    不影响正确性。
+    """
+    src = cache.get(key)
+    if src is not None:
+        cache.move_to_end(key)
+        return src
+    src = build(img)
+    cache[key] = src
+    if len(cache) > limit:
+        cache.popitem(last=False)
+    return src
+
+
+def _cached_thumb(key, img, size):
+    return _cached_src(_THUMB_SRC_CACHE, key, img, lambda im: _thumb_bytes(im, size), _THUMB_SRC_CACHE_MAX)
+
+
+def _part_thumb_srcs(filename, imgs):
+    """一次算好一批差分帧的缩略图 data URI（放在线程里跑，别占 UI 事件循环）。"""
+    return [_cached_thumb(("part", filename, i), img, THUMB) for i, img in enumerate(imgs)]
 
 
 def _thumb_bytes(img, size=100):

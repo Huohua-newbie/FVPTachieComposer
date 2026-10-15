@@ -233,7 +233,7 @@ async def main():
 
     # 4) 点击动作整链路（底图/差分/合成）在 stub 下无异常
     act_row = obody.controls[0]
-    app._select_action(first_outfit_info(app))
+    await app._select_action(first_outfit_info(app))
     assert app.composed_img is not None, "合成结果为空"
     assert any(e["filename"] == app.selected_filename for e in app._action_rows), \
         "行登记表没跟上当前选中项"
@@ -276,6 +276,8 @@ async def main():
     s_outfit_col = sbody.controls[0]
     soheader, sobody = s_outfit_col._args[0]
     assert sobody.visible is True, "单服装未自动展开"
+    # 级联选中现在是异步任务（_spawn→_select_action→_load_base），等它跑完
+    await asyncio.sleep(0.5)
     assert app2.composed_img is not None, "单动作未自动选中合成"
     assert app2.selected_filename == "CHR_S_基_私服", app2.selected_filename
     # 去重守卫：收起再展开不再重复加载，且已展开的子服装不被翻转关闭

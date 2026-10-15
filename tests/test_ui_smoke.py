@@ -291,7 +291,7 @@ async def run():
     hl = action_tile.content
     assert hl.animate is not None, "动作选中态必须有过渡，不能只是闪一下变色"
 
-    app._select_action(info)
+    await app._select_action(info)
     assert app.base_imgs, "底图未加载"
     assert app.part_imgs, "差分部件未加载"
     assert app.composed_img is not None, "合成结果为空"
@@ -307,11 +307,11 @@ async def run():
                   if e["filename"] != info["filename"]), None)
     if other is not None:
         info2 = next(i for i in app.file_infos if i["filename"] == other["filename"])
-        app._select_action(info2)
+        await app._select_action(info2)
         assert other["hl"].bgcolor == app.ink["sel"], "新选中的行没有亮起"
         assert sel["hl"].bgcolor == "#00000000", "上一行的选中态没被清掉"
         assert sel["hl"].content.title.weight == ft.FontWeight.W_400, "上一行标题仍是加粗"
-        app._select_action(info)  # 换回来，后面的用例继续用这一张
+        await app._select_action(info)  # 换回来，后面的用例继续用这一张
     # 图像源必须是字符串 data URI：src 给 bytes 只在构造时有效，
     # 之后 `img.src = bytes` 不会被重新编码，客户端当成路径解析 → 预览区空白。
     for name in ("base_image", "result_image"):
@@ -589,7 +589,7 @@ async def run():
     # 结果面板要镜像当前底图帧，保存/批量导出都退到底图本身。
     from FVPTachieComposerFlet import PART_HINT_EMPTY
     nodiff = next(i for i in app.file_infos if i["filename"] == "CHR_翠_无_私服")
-    app._select_action(nodiff)
+    await app._select_action(nodiff)
     assert app.base_only is True, "没有差分时应进入「直接导出底图」模式"
     assert app.part_imgs == [] and app.composed_img is None, "无差分模式不该留下合成结果"
     assert app.part_hint_text.value == PART_HINT_EMPTY, "左栏没说明会导出底图"
