@@ -719,6 +719,10 @@ class ComposerApp(DropFeedbackMixin):
         # busy 横幅：_parsing_gen 非空表示"这一代解析还在途中"，_busy_seq 是那条卡片
         self._parsing_gen = None
         self._busy_seq = None
+        # 成功提示走状态栏：记住最近一次的目标文件夹与代数
+        self._status_folder = None
+        self._status_gen = 0
+        self.status_action = None
         self._setup_page()
         self._build()
 
@@ -870,12 +874,20 @@ class ComposerApp(DropFeedbackMixin):
         self.status_text = ft.Text("就绪", size=11, color=self.ink["text_dim"],
                                    max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
         self.status_meta = ft.Text("", size=11, color=self.ink["text_dim"])
+        # 成功提示右侧的「打开文件夹」，默认藏起来，只在刚做完导出/保存时露脸
+        self.status_action = ft.Container(
+            content=ft.Text("打开文件夹", size=11, color=self.ink["accent"]),
+            on_click=self._open_status_folder,
+            visible=False,
+            padding=ft.Padding.only(left=8, right=2),
+        )
 
         status_bar = ft.Container(
             content=ft.Row(
                 [
                     ft.Container(width=6, height=6, border_radius=3, bgcolor=self.ink["accent"]),
                     ft.Container(self.status_text, expand=True),
+                    self.status_action,
                     self.status_meta,
                 ],
                 spacing=8,
@@ -1586,10 +1598,56 @@ class ComposerApp(DropFeedbackMixin):
         self._set_status_meta()
         # 只有真的弹过"正在解析"，才补一句结果；快路径全程安静
         if self._snack_is_showing(self._busy_seq):
-            self._snack(f"已载入 {Path(path).name} — {len(hier)} 角色 / {hzc} 图像",
-                        ttl=1.0)
+            self._dismiss_snack(self._busy_seq)
+            self._chime()
         self._busy_seq = None
         return True
+
+    def _chime(self):
+        """一次柔和的完成提示音。非 Windows、测试环境或 FVP_SOUND=0 时静默。"""
+        if sys.platform != "win32":
+            return
+        # 测试挂的是假 Page（普通类，不是 flet.Page），别在跑测试时叮一下
+        if not type(self.page).__module__.startswith("flet"):
+            return
+        if os.environ.get("FVP_SOUND", "").strip() == "0":
+            return
+        try:
+            import winsound
+
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except Exception:
+            log.debug("提示音播放失败", exc_info=True)
+
+    def _done(self, msg, folder=None, chime=True):
+        """成功类反馈走状态栏：不占浮层、不挡内容，完成时配一声柔和提示音。
+
+        folder 非空时，状态栏右侧短暂出现「打开文件夹」，6 秒后自动收起。
+        """
+        self._set_status(msg)
+        self._status_folder = folder
+        self._status_gen += 1
+        gen = self._status_gen
+        if self.status_action is not None:
+            self.status_action.visible = folder is not None
+            self.page.update()
+        if folder is not None:
+            self._later(6.0, self._hide_status_folder, gen)
+        if chime:
+            self._chime()
+
+    def _open_status_folder(self, e=None):
+        """状态栏「打开文件夹」：打开最近一次保存/导出的目录。"""
+        if self._status_folder:
+            self._open_folder(self._status_folder)
+        return None
+
+    def _hide_status_folder(self, gen=None):
+        if gen is not None and gen != self._status_gen:
+            return
+        if self.status_action is not None and self.status_action.visible:
+            self.status_action.visible = False
+            self.page.update()
 
     def _show_parsing_busy(self, gen, name):
         """解析超过 BUSY_DELAY 才走到这里；已经解析完就不弹任何东西。"""
@@ -1604,9 +1662,8 @@ class ComposerApp(DropFeedbackMixin):
         其余由 _load_bin 写入的状态全部复位，UI 回到 empty_hint 空状态。
         """
         if not self.input_file:
-            self._snack("当前没有载入任何文件")
+            self._done("当前没有载入任何文件", chime=False)
             return
-        old = Path(self.input_file).name
         # 作废在途解析与缩略图解码，迟到的回调会因代数不符而自弃
         self._state_gen += 1
 
@@ -1635,7 +1692,7 @@ class ComposerApp(DropFeedbackMixin):
         self.status_meta.value = ""
         self._set_status("就绪")
         self.page.update()
-        self._snack(f"已载出: {old}")
+        self._chime()
 
     def _clear_previews(self):
         self.base_imgs = []
@@ -2432,8 +2489,7 @@ class ComposerApp(DropFeedbackMixin):
         self.export_dir = str(Path(result).parent)
         try:
             img.save(result, "PNG")
-            self._snack(f"已保存: {Path(result).name}", folder=str(Path(result).parent))
-            self._set_status(str(result))
+            self._done(f"已保存 {Path(result).name}", folder=str(Path(result).parent))
         except Exception as ex:
             self._snack(f"保存失败: {ex}", error=True)
 
@@ -2490,10 +2546,10 @@ class ComposerApp(DropFeedbackMixin):
         try:
             saved, errors = await asyncio.to_thread(work)
             if errors:
-                self._snack(f"导出完成: {saved} 成功, {errors} 失败", error=errors > 0, folder=save_dir)
+                self._snack(f"导出完成: {saved} 成功, {errors} 失败", error=True, folder=save_dir)
+                self._set_status(f"导出完成: {saved} 成功, {errors} 失败")
             else:
-                self._snack(f"已导出 {saved} 张到 {Path(save_dir).name}", folder=save_dir)
-            self._set_status(save_dir)
+                self._done(f"已导出 {saved} 张到 {Path(save_dir).name}", folder=save_dir)
         except Exception as ex:
             self._snack(f"导出失败: {ex}", error=True)
             self._set_status("导出失败")
