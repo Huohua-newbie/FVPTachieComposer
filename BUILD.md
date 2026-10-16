@@ -7,13 +7,52 @@
 发布动作（本机执行）：
 
 ```powershell
-pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.2-beta>
+pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.4-beta>
 git tag -a v<版本号> -m "FVP Tachie Composer v<版本号>"; git push origin v<版本号>
-gh release create v<版本号> dist\FVPTachieComposer-<版本号>-win64-flet.zip dist\SHA256SUMS.txt `
-  --title "FVP Tachie Composer v<版本号>" --notes-file <面向用户的说明.md> --latest
 ```
 
+**先建 Draft，再单独传资产**——`gh release create` 若带上 41 MB 的 zip 一起提交，
+上传一旦失败会连 Release 一起回滚（实测报 `HTTP 408`）：
+
+```powershell
+gh release create v<版本号> --title "FVP Tachie Composer v<版本号>" `
+  --notes-file <面向用户的说明.md> --prerelease --latest=false --draft
+```
+
+传资产：**别用 `gh release upload`**。它默认走 HTTP/2，经本机代理
+（WSL 下 `http_proxy=172.27.48.1:7890`）传 40 MB 的包会中途静默卡死，最后报
+`HTTP 408: Upload body timed out due to inactivity (https://uploads.github.com/…)`；
+而几百字节的 `SHA256SUMS.txt` 反而能过，于是经常只传上去一半。
+改用 `curl --http1.1` 直传，十几秒完成（实测 14–15 s，`HTTP 201`）：
+
+```bash
+TOKEN=$(~/.local/gh/bin/gh auth token)
+RID=$(~/.local/gh/bin/gh release view v<版本号> -R Huohua-newbie/FVPTachieComposer --json databaseId --jq .databaseId)
+for f in dist/FVPTachieComposer-<版本号>-win64-flet.zip dist/SHA256SUMS.txt; do
+  curl --http1.1 -sS -X POST \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    --data-binary @"$f" \
+    "https://uploads.github.com/repos/Huohua-newbie/FVPTachieComposer/releases/$RID/assets?name=$(basename "$f")" \
+    -o /dev/null -w "$(basename "$f") HTTP=%{http_code} %{size_upload}B %{time_total}s\n"
+done
+```
+
+资产到位后再放行，并核对：
+
+```powershell
+gh release edit v<版本号> --draft=false
+gh release view v<版本号> --json isDraft,isPrerelease,tagName,assets --jq '{isDraft,isPrerelease,tagName,assets:[.assets[]|{name,size}]}'
+```
+
+核对点：`isDraft=false`、`isPrerelease=true`、zip 与 `SHA256SUMS.txt` 都在、zip 的
+`size` 与本地一致。
+
 > `SHA256SUMS.txt` 由构建脚本生成，只留发布页上真有的那几个包。
+> 本机 `gh` 在 `~/.local/gh/bin/gh`（未在 PATH 时用全路径）；仓库 remote 是 SSH，
+> 不带 `-R Huohua-newbie/FVPTachieComposer` 时 `gh` 会报
+> `none of the git remotes … point to a known GitHub host`。
+> **顺序：先旧后新**——GitHub Release 页按创建时间倒序排，先建新版会把旧版顶到下面。
 
 ## 环境要求
 
