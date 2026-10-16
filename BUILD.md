@@ -7,7 +7,7 @@
 发布动作（本机执行）：
 
 ```powershell
-pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.4-beta>
+pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.5-beta>
 git tag -a v<版本号> -m "FVP Tachie Composer v<版本号>"; git push origin v<版本号>
 ```
 
@@ -53,6 +53,32 @@ gh release view v<版本号> --json isDraft,isPrerelease,tagName,assets --jq '{i
 > 不带 `-R Huohua-newbie/FVPTachieComposer` 时 `gh` 会报
 > `none of the git remotes … point to a known GitHub host`。
 > **顺序：先旧后新**——GitHub Release 页按创建时间倒序排，先建新版会把旧版顶到下面。
+
+## 启动屏（开机到 UI 之间那一屏）
+
+`flet build windows` 的产物在 Python 起来之前会先渲染一个启动屏。不配置就吃 Flet
+默认值（`theme_mode` 跟随系统、不画转圈、不显示文字）——系统是深色时就是一块纯黑，
+紧接着跳成应用的浅色 UI，观感很突兀。
+
+启动屏在 `pyproject.toml` 里配置，选项要放进**以屏名命名的子表**（内置屏名是 `flet`）：
+
+```toml
+[tool.flet.boot_screen.flet]
+theme_mode = "light"          # 与应用默认（FVPTachieComposerFlet.py 的 is_dark=False）一致
+spinner_size = 26
+bgcolor_light = "#eff1f4"     # 取值对齐 _palette()，保证与 UI 同底色
+spinner_color_light = "#3f6ee0"
+text_color_light = "#6b7488"
+prepare_message = "正在准备…"
+startup_message = "正在载入界面…"
+fade_out_duration = 200       # 毫秒，淡出而不是硬切
+```
+
+- 内置屏只支持颜色 / 转圈 / 文字，**不支持图片 logo**；`--splash-*` 系列 CLI 开关只对
+  iOS / Android / web 生效，Windows 桌面不吃。
+- 改完必须重新 `flet build windows` 才会进包，改 `pyproject.toml` 不影响已构建产物。
+- 应用默认主题在 `FVPTachieComposerFlet.py` 的 `__init__`（`self.is_dark = False`）。
+  若哪天把默认改成深色，这里的 `theme_mode` / `bgcolor_*` 要跟着改，否则又会闪。
 
 ## 环境要求
 
@@ -107,7 +133,7 @@ Compress-Archive -Path dist/FVPTachieComposer.exe -DestinationPath dist/FVPTachi
 构建（需 Flutter SDK + VS C++ 桌面负载；**必须用 PowerShell 7**，见下）：
 
 ```powershell
-pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.4-beta>
+pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.5-beta>
 ```
 
 ## 跑 `build_flet_win.ps1` 要用 pwsh，不能用 powershell

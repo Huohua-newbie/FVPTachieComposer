@@ -4,7 +4,7 @@
 [project]
 name = "FVPTachieComposer"
 # 只喂给 flutter 的 --build-name，必须是 x.y.z；-beta 标识由 tag 和包名承担
-version = "2.2.4"
+version = "2.2.5"
 description = "FVP Tachie Composer —— 差分立绘预览与合成工具"
 # 绑定开发机的 3.13（flet 默认会跳到 3.14.x）
 requires-python = ">=3.13,<3.14"
@@ -52,3 +52,35 @@ exclude = [
     "build_win.ps1",
     "FVPTachieComposer.win.spec",
 ]
+
+# ── 启动屏 ───────────────────────────────────────────────────────────────────
+# 产物在 Python 起来之前，先渲染 flet 内置的 "flet" 启动屏
+# （flet-0.86.5/lib/src/widgets/flet_boot_screen.dart）。不配置时 theme_mode
+# 缺省 "auto" 跟随系统亮度 → Windows 深色模式下取 Flet 默认深色 scaffold，
+# 而 spinner_size 缺省 0、文案缺省空，于是露出一块**近黑的空 surface**，
+# 一直挂到 Python 第一次 update 才换成 UI —— 就是「启动黑屏、突然刷出界面」。
+#
+# 选项必须放在**以屏名命名的子表**里：build_base.py:1456 _resolve_boot_screen
+# 里 name = boot_screen.get("name", "flet")、options = boot_screen[name]，
+# 平台段（[tool.flet.windows.boot_screen]）会按 key 覆盖全局段。
+# 内置屏只支持下面这些键，**不支持图片/logo**。
+[tool.flet.boot_screen]
+name = "flet"
+
+[tool.flet.boot_screen.flet]
+# 应用 __init__ 起点是浅色（FVPTachieComposerFlet.py:644 self.is_dark = False），
+# 钉死 light，消掉「启动屏黑 → 应用亮」那一下跳变。
+theme_mode = "light"
+spinner_size = 26
+# 下面两组色与 _palette()（FVPTachieComposerFlet.py:155）对齐
+bgcolor_light = "#eff1f4"
+bgcolor_dark = "#101318"
+spinner_color_light = "#3f6ee0"
+spinner_color_dark = "#7aa6ff"
+text_color_light = "#6b7488"
+text_color_dark = "#8e9aae"
+prepare_message = "正在准备…"
+startup_message = "正在载入界面…"
+# 模板 _BootOverlay 读这个键（build/flutter/lib/main.dart:263/:280），单位毫秒，
+# 让启动屏淡出而不是硬切。
+fade_out_duration = 200
