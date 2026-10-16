@@ -7,7 +7,7 @@
 发布动作（本机执行）：
 
 ```powershell
-pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.5-beta>
+pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.3>
 git tag -a v<版本号> -m "FVP Tachie Composer v<版本号>"; git push origin v<版本号>
 ```
 
@@ -151,7 +151,7 @@ Compress-Archive -Path dist/FVPTachieComposer.exe -DestinationPath dist/FVPTachi
 构建（需 Flutter SDK + VS C++ 桌面负载；**必须用 PowerShell 7**，见下）：
 
 ```powershell
-pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.5-beta>
+pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.3>
 ```
 
 ## 跑 `build_flet_win.ps1` 要用 pwsh，不能用 powershell
