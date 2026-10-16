@@ -54,6 +54,24 @@ gh release view v<版本号> --json isDraft,isPrerelease,tagName,assets --jq '{i
 > `none of the git remotes … point to a known GitHub host`。
 > **顺序：先旧后新**——GitHub Release 页按创建时间倒序排，先建新版会把旧版顶到下面。
 
+### 大资产上传超时（`HTTP 408 Upload body timed out`）
+
+40MB 的 zip 传到一半卡住、GitHub 报 `HTTP 408: Upload body timed out due to inactivity`
+时，基本都是**当前网络的上行带宽太小**（有线网上行极低会稳定复现）。别被下载速度误导：
+下行可以很快，上行却是瓶颈；`SHA256SUMS.txt` 才几百字节所以总能传上去，容易误判成
+「GitHub 抽风」或代理问题。
+
+判据是先测上行基准：
+
+```bash
+curl --noproxy '*' --max-time 20 -sS -o /dev/null \
+  -w 'HTTP=%{http_code} speed=%{speed_upload}B/s\n' \
+  -X POST --data-binary @dist/<你的 zip> https://speed.cloudflare.com/__up
+```
+
+速度只有几十 KB/s 就是本地上行的问题（正常应 ≥1MB/s）。此时**换网络重传**即可——
+实测手机热点一次成功（41MB / 15s）；不要折腾代理、`--http1.1`、`Expect:` 这些开关。
+
 ## 启动屏（开机到 UI 之间那一屏）
 
 `flet build windows` 的产物在 Python 起来之前会先渲染一个启动屏。不配置就吃 Flet
