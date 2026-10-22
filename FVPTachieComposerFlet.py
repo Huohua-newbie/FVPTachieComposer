@@ -277,9 +277,8 @@ def _find_expr_info(file_infos: list[dict], base_name: str) -> dict | None:
 
 
 HELP_STEPS = (
-    ("打开", "点击「打开 BIN」选择 .bin，或「HZC 文件夹」直接指向解包目录；"
-             "也可把 .bin / HZC 文件夹拖到程序图标上直接打开。"
-             + ("或把文件直接拖进窗口。" if DROPZONE_ON else "")),
+    ("打开", "点击「打开 BIN」选择 .bin，或「HZC 文件夹」直接指向解包目录"
+             + ("；也可以把 .bin / HZC 文件夹直接拖进窗口。" if DROPZONE_ON else "。")),
     ("挑选", "左侧按 角色 → 服装 → 动作 展开，每级都有缩略图。"),
     ("预览", "中间是底图舞台：滚轮缩放、拖拽平移，多帧底图用左右箭头翻帧。"),
     ("合成", "点击「差分部件」里的任意一帧表情，右侧即时合成。"),
@@ -2627,13 +2626,9 @@ async def main(page: ft.Page):
         page.add(ft.Text(f"初始化失败: {ex}", color=ft.Colors.ERROR))
         page.update()
         return
-    # 命令行/拖到程序图标打开：首个存在的文件或目录参数自动载入
-    if len(sys.argv) > 1:
-        p = Path(sys.argv[1])
-        if p.exists() and (p.is_dir() or p.suffix.lower() == ".bin"):
-            await app._load_bin(str(p))
-        else:
-            app._snack(f"无法打开: {sys.argv[1]}", error=True)
+    # 不做「命令行参数启动即载入」：flet build windows 的嵌入式客户端只要收到
+    # 位置参数就不执行入口脚本（实测 main() 根本不进，窗口永远停在启动屏），
+    # 而「拖到 exe 图标」与命令行走的同是 argv 这条通道。载入统一走界面内拖放。
     return app
 
 
