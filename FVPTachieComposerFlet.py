@@ -1316,6 +1316,7 @@ class ComposerApp(DropFeedbackMixin):
             self._sync_selected_row()
             self._restore_preview()
             self.status_text.value = f"已加载 {Path(self.input_file).name}"
+            self._set_status_meta()
         self.page.update()
 
     # ── Status ──────────────────────────────────────────────
@@ -1590,11 +1591,11 @@ class ComposerApp(DropFeedbackMixin):
         # 不然每切一次深浅色都要把树重播一遍动画。
         self._render_tree(stagger=True)
         self._expand_role_tiles(gen)
-        hzc = sum(1 for i in infos if i["type"] == "hzc")
         self.file_chip.content.value = Path(path).name
         if self.unload_btn is not None:
             self.unload_btn.visible = True
-        self._set_status(f"{Path(path).name} — {len(hier)} 角色, {hzc} 图像")
+        # 状态栏一句话说"发生了什么"，右侧 meta 只说"载入了什么规模"，两者不重复。
+        self._set_status(f"已加载 {Path(path).name}")
         self._set_status_meta()
         # 只有真的弹过"正在解析"，才补一句结果；快路径全程安静
         if self._snack_is_showing(self._busy_seq):
@@ -2287,10 +2288,11 @@ class ComposerApp(DropFeedbackMixin):
         loop.create_task(quiet())
 
     def _reset_zoom(self, e=None):
-        viewer = getattr(self, "base_viewer", None)
-        if viewer is None:
-            return
-        self._spawn(viewer.reset())
+        """两个舞台一起复位：底图与合成始终用同一视角，比较时不会一深一浅。"""
+        for name in ("base_viewer", "result_viewer"):
+            viewer = getattr(self, name, None)
+            if viewer is not None:
+                self._spawn(viewer.reset())
 
     # ── Parts ───────────────────────────────────────────────
 
