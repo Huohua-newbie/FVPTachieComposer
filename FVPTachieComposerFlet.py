@@ -277,8 +277,9 @@ def _find_expr_info(file_infos: list[dict], base_name: str) -> dict | None:
 
 
 HELP_STEPS = (
-    ("打开", "点击「打开 BIN」选择 .bin，或「HZC 文件夹」直接指向解包目录"
-             + ("；也可以把 .bin / HZC 文件夹直接拖进窗口。" if DROPZONE_ON else "。")),
+    ("打开", "点击「打开 BIN」选择 .bin，或「HZC 文件夹」直接指向解包目录；"
+             "也可把 .bin / HZC 文件夹拖到程序图标上直接打开。"
+             + ("或把文件直接拖进窗口。" if DROPZONE_ON else "")),
     ("挑选", "左侧按 角色 → 服装 → 动作 展开，每级都有缩略图。"),
     ("预览", "中间是底图舞台：滚轮缩放、拖拽平移，多帧底图用左右箭头翻帧。"),
     ("合成", "点击「差分部件」里的任意一帧表情，右侧即时合成。"),
@@ -2626,9 +2627,20 @@ async def main(page: ft.Page):
         page.add(ft.Text(f"初始化失败: {ex}", color=ft.Colors.ERROR))
         page.update()
         return
-    # 不做「命令行参数启动即载入」：flet build windows 的嵌入式客户端只要收到
-    # 位置参数就不执行入口脚本（实测 main() 根本不进，窗口永远停在启动屏），
-    # 而「拖到 exe 图标」与命令行走的同是 argv 这条通道。载入统一走界面内拖放。
+    # 命令行/拖到程序图标打开：自动载入首个存在的 .bin/目录参数。
+    # dev 态参数在 argv[1:]（argv[0] 是脚本自身）；打包态 SeriousPython 把
+    # 用户参数从 argv[0] 起放（实测 argv=['D:\\...\\graph_bs.bin']，无脚本名）。
+    # 脚本路径以 .py 结尾不会被筛选误命中，两种形态直接一起扫。
+    # 打包态能走到这里还依赖 client\main.dart 的 FVP-PATCH：flet 0.86.5 原生
+    # 客户端会把「桌面 + 位置参数」当成 developer mode，嵌入 Python 根本不启动。
+    target = next((a for a in sys.argv
+                   if (p := Path(a)).exists()
+                   and (p.is_dir() or p.suffix.lower() == ".bin")),
+                  None)
+    if target:
+        await app._load_bin(target)
+    elif len(sys.argv) > 1:
+        app._snack(f"无法打开: {sys.argv[1]}", error=True)
     return app
 
 

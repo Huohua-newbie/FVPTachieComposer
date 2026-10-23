@@ -288,8 +288,9 @@ async def main():
     assert app2.composed_img is before, "重复加载了已选项"
     assert sobody.visible is True, "重展开时已开的服装被误关闭"
 
-    # 7) argv 启动即载入已移除：打包客户端带位置参数就不执行入口脚本（卡启动屏），
-    #    载入统一走界面内拖放。这里守住「带参数也不自动载入」。
+    # 7) 命令行/拖到图标打开：argv 目录参数启动即自动载入；非法参数给报错横幅。
+    #    打包态这条依赖 client\main.dart 的 FVP-PATCH（原生客户端会把位置参数
+    #    当成 developer mode，嵌入 Python 不启动），别把入口的 argv 处理删了。
     page3 = FakePage()
     tmp3 = Path(tempfile.mkdtemp(prefix="argv_open_"))
     make_hzc(tmp3 / "CHR_Q_基_私服.hzc")
@@ -298,7 +299,24 @@ async def main():
         app3 = await app_main(page3)
     finally:
         sys.argv = old_argv
-    assert app3.input_file is None, "argv 自动载入未移除（打包态会卡在启动屏）"
+    assert app3.input_file == str(tmp3), app3.input_file
+    assert app3.hierarchy.get("Q"), "层级未建立"
+    page4 = FakePage()
+    old_argv, sys.argv = sys.argv, ["prog", str(tmp3 / "不存在.bin")]
+    try:
+        await app_main(page4)
+    finally:
+        sys.argv = old_argv
+    assert len(page4.overlay) == 1, "非法参数应弹报错横幅"
+    # 打包态形态：SeriousPython 把用户参数从 argv[0] 起放（没有脚本名），
+    # 实测拖到 exe 图标时 argv=['D:\\...\\graph_bs.bin']，这条也得载入。
+    page5 = FakePage()
+    old_argv, sys.argv = sys.argv, [str(tmp3)]
+    try:
+        app5 = await app_main(page5)
+    finally:
+        sys.argv = old_argv
+    assert app5.input_file == str(tmp3), "打包形态 argv[0] 未触发自动载入"
 
     print("THUMB_THREADING_OK")
 

@@ -574,17 +574,17 @@ async def run():
                                   shift=False, ctrl=False, alt=False, meta=False)
             await app._on_keyboard(ev)
 
-    # argv 不再触发自动载入——flet build windows 的嵌入式客户端只要收到位置参数
-    # 就不执行入口脚本（实测 main() 根本不进），这条是防它被改回去的回归线；
-    # 但入口本身要照常建树。
+    # argv 自动载入要一直可用（拖到 exe 图标那条通道）。打包态能走到这里
+    # 全靠 client\main.dart 的 FVP-PATCH：flet 0.86.5 原生客户端会把位置参数
+    # 当成 developer mode 的 page URL，嵌入 Python 根本不启动。
     page2 = FakePage()
     old_argv, sys.argv = sys.argv, ["prog", str(tmp)]
     try:
         app2 = await app_main(page2)
     finally:
         sys.argv = old_argv
-    assert app2.input_file is None, "argv 自动载入未移除（打包态会卡在启动屏）"
-    assert page2.added, "入口未建树"
+    assert app2.input_file == str(tmp), "argv 自动载入失效了"
+    assert page2.added, "argv 启动路径未建树"
 
     # ── 无表情差分 → 直接导出底图 ──────────────────────────────
     # 只让看不让导出的状态是不完整的：没有 _表情 变体（或载入的不是立绘）时，

@@ -44,8 +44,38 @@ if ($FletFlutter -and (Test-Path (Join-Path $FletFlutter "flutter.bat"))) {
 $env:PATH = "$FlutterBin;$env:PATH"
 Write-Host "   Flutter SDK: $FlutterBin"
 
+# flutter 探测引擎版本（flutter doctor / --version）依赖 git，本机 git 装在
+# D:\soft\SDK\Git 且不在系统 PATH——缺了它 doctor 直接 "Unable to determine
+# engine version" 构建失败。与 Flutter 同样只在本会话注入。
+if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
+    $GitBin = "D:\soft\SDK\Git\cmd"
+    if (-not (Test-Path (Join-Path $GitBin "git.exe"))) {
+        throw "找不到 git.exe（PATH 与 $GitBin 均无），Flutter 引擎版本探测会失败"
+    }
+    $env:PATH = "$GitBin;$env:PATH"
+    Write-Host "   Git: $GitBin"
+}
+
 # --build-name 只吃 x.y.z，-beta 只保留在 tag 与包名里
 $BuildName = ($Version -split "-")[0]
+
+# ---- flet 客户端补丁 ----------------------------------------------------
+# flet 0.86.5 客户端把「桌面 + 位置参数」当成 developer mode（args[0] 当 page
+# URL，嵌入 Python 不启动），Windows 拖文件到 exe 图标正踩这条 → 打包版卡死
+# 启动屏。client\main.dart 是打好补丁的渲染版（头部 FVP-PATCH 标记说明根因），
+# 在渲染产物上覆盖它。flet 只在模板 hash 变化时重渲染 build\flutter，所以
+# 平时预铺即生效；干净树首次构建会先渲染未补丁版，由构建后校验兜底重打。
+$RenderedMain = Join-Path $Repo "build\flutter\lib\main.dart"
+$PatchedMain = Join-Path $Repo "client\main.dart"
+if (-not (Test-Path $PatchedMain)) { throw "客户端补丁缺失: $PatchedMain" }
+function Test-MainPatched {
+    (Test-Path $RenderedMain) -and
+    (Select-String -Path $RenderedMain -Pattern "FVP-PATCH" -Quiet)
+}
+if ((Test-Path $RenderedMain) -and -not (Test-MainPatched)) {
+    Copy-Item $PatchedMain $RenderedMain -Force
+    Write-Host "   客户端补丁已应用: build\flutter\lib\main.dart"
+}
 
 Write-Host "== flet build windows  (version=$Version, build-name=$BuildName)"
 $buildArgs = @(
@@ -58,6 +88,18 @@ if ($SkipFlutterDoctor) { $buildArgs += "--skip-flutter-doctor" }
 
 & py @buildArgs
 if ($LASTEXITCODE -ne 0) { throw "flet build 失败 (exit $LASTEXITCODE)" }
+
+# 模板刚渲染（干净树 / 模板 hash 变了）会把补丁冲掉：重打后重建一次。
+# 此时模板 hash 已稳定，第二次构建不会再渲染，直接编译补丁版。
+if (-not (Test-Path $RenderedMain)) { throw "渲染产物缺失: $RenderedMain" }
+if (-not (Test-MainPatched)) {
+    Write-Host "   客户端补丁被模板渲染冲掉，重打补丁后重建" -ForegroundColor Yellow
+    Copy-Item $PatchedMain $RenderedMain -Force
+    & py @buildArgs
+    if ($LASTEXITCODE -ne 0) { throw "flet 重建(带补丁)失败 (exit $LASTEXITCODE)" }
+    if (-not (Test-MainPatched)) { throw "补丁再次被冲掉，检查 flet 模板渲染逻辑" }
+}
+Write-Host "   客户端补丁在编译源中生效: FVP-PATCH"
 
 # ---- 产物校验 ----------------------------------------------------------
 $OutDir = Join-Path $Repo "build\windows"

@@ -154,6 +154,28 @@ Compress-Archive -Path dist/FVPTachieComposer.exe -DestinationPath dist/FVPTachi
 pwsh .\build_flet_win.ps1 -Version <版本号，如 2.2.3>
 ```
 
+## 客户端补丁：打包态位置参数（`client\main.dart`，2026-10-23 实录）
+
+现象：把 `.bin` 拖到 `FVPTachieComposer.exe` 图标（或任何带位置参数启动）后，
+窗口永远停在启动屏；无参数双击一切正常，dev 态带参数也正常。
+
+根因在 flet 客户端 Dart 侧，不在 Python：`client/lib/main.dart` 把
+「桌面平台 + 收到位置参数」一律当成 developer mode——`args[0]` 被当作 page URL
+去连 WebSocket，并且不构建 `_ProdApp`，嵌入 Python 从头到尾不启动。
+诊断构建实测带参数时入口 `main()` 根本不进。Windows 拖文件到 exe 图标
+正是以位置参数拉起进程，所以必踩。
+
+修法是仓库里的 `client\main.dart`（打好补丁的渲染版，头部 `FVP-PATCH` 注释
+说明细节）：用编译期烧进 app.so 的 `pythonModuleName` 区分打包态与通用
+`flet run` 客户端，打包态位置参数照常走 production，`runPythonApp` 本就把
+args 转发给嵌入解释器，Python 侧 `sys.argv` 原样可见——「拖到 exe 图标启动即
+载入」因此恢复可用。
+
+`build_flet_win.ps1` 负责铺设与守护：构建前把补丁覆盖到 `build\flutter\lib\main.dart`
+（flet 只在模板 hash 变化时重渲染，预铺即生效）；构建后校验 `FVP-PATCH` 标记还在，
+干净树首建/模板更新会把补丁冲掉，脚本自动重打并重建一次。
+升级 flet 版本时要重新核对补丁的三处条件与新版模板的差异。
+
 ## 跑 `build_flet_win.ps1` 要用 pwsh，不能用 powershell
 
 脚本是 UTF-8 无 BOM 且含中文注释。Windows PowerShell 5.1（`powershell.exe`）按系统
@@ -186,13 +208,29 @@ PowerShell 7（`pwsh`）默认按 UTF-8 读，才正常。
 顺带：`Problem getting monitor brightness` 是 `screen_brightness_windows` 插件的噪音，
 与白屏无关。
 
+## jni 插件编译失败：CMake 缓存里的 JDK 路径过期（2026-10-23 实录）
+
+现象：改了 Dart 侧代码后首次重建，`dartjni.c : error C1083: 无法打开包括文件 jni.h`；
+之前几次只改 Python 的构建全部正常（没触发原生重编，坏缓存一直没暴露）。
+
+根因：`build\flutter\build\windows\x64\CMakeCache.txt` 是老的 `flutter doctor`/构建
+生成的，`FIND_PACKAGE_MESSAGE_DETAILS_JNI` 记的是当时的 `JAVA_HOME`（`D:/soft`）。
+JDK 后来搬到 `D:\soft\SDK\JDK25`，缓存里的 `D:/soft/include` 成了死路径。
+
+处理：删掉 `build\flutter\build\windows\x64\CMakeCache.txt` 与同目录 `CMakeFiles\`
+重新配置即可（纯中间产物，flutter 会自己重建）。若 `flutter doctor` 报
+`Unable to determine engine version`，是本会话 PATH 里没有 git——
+`build_flet_win.ps1` 已自动注入 `D:\soft\SDK\Git\cmd`。
+
 ## 构建后验证（必做）
 
 发布链（`build\windows`）：
 
 1. `build\windows\desktop_drop_plugin.dll` 存在（脚本已断言，缺了拖入功能是哑的）；
 2. `build\windows\app\FVPTachieComposerFlet.pyc` 时间戳晚于本次改动；
-3. 双击 `build\windows\FVPTachieComposer.exe`，按 `TESTING.md` 跑冒烟清单，通过后才放行发布。
+3. `build\flutter\lib\main.dart` 含 `FVP-PATCH` 标记（脚本已断言，丢了就是带参数启动卡启动屏的老 bug）；
+4. 双击 `build\windows\FVPTachieComposer.exe`，按 `TESTING.md` 跑冒烟清单，通过后才放行发布；
+5. 把某个 `.bin` 拖到 exe 图标上，应正常进 UI 且该资源自动载入。
 
 后备链（PyInstaller）：
 
