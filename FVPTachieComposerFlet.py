@@ -1793,6 +1793,12 @@ class ComposerApp(DropFeedbackMixin):
                 if not state["open"]:
                     tog(None)
 
+    def _result_meta_text(self, size, suffix):
+        """结果面板不重复底图尺寸：与当前底图帧同尺寸时只留后缀（偏移/底图模式），
+        避免左右两个面板头同时显示同一个「583×989」。尺寸不同才带上。"""
+        base = self.base_imgs[self.base_idx].size if self.base_imgs else None
+        return suffix if base == size else f"{size[0]}×{size[1]} · {suffix}"
+
     def _restore_preview(self):
         """换主题后按缓存的 PIL 图重建预览：不重新读盘，也不重置帧号/差分选择。"""
         if self.base_imgs:
@@ -1826,8 +1832,8 @@ class ComposerApp(DropFeedbackMixin):
                 _SRC_CACHE_MAX,
             )
             self.result_hint.visible = False
-            self.result_meta.value = (f"{self.composed_img.size[0]}×"
-                                      f"{self.composed_img.size[1]} · 偏移 {ox:+d}/{oy:+d}")
+            self.result_meta.value = self._result_meta_text(
+                self.composed_img.size, f"偏移 {ox:+d}/{oy:+d}")
             self.save_btn.disabled = False
             self.batch_btn.disabled = False
         elif self.base_only and self.base_imgs:
@@ -1841,7 +1847,8 @@ class ComposerApp(DropFeedbackMixin):
                 _SRC_CACHE_MAX,
             )
             self.result_hint.visible = False
-            self.result_meta.value = f"{img.size[0]}×{img.size[1]} · 底图（无表情差分）"
+            self.result_meta.value = self._result_meta_text(
+                img.size, "底图（无表情差分）")
             self.save_btn.disabled = False
             self.batch_btn.disabled = False
 
@@ -2249,7 +2256,8 @@ class ComposerApp(DropFeedbackMixin):
         if self.base_only:
             # 没有差分时右栏是底图镜像：换帧要跟手，否则导出的和看到的对不上
             self.result_image.src = src
-            self.result_meta.value = f"{img.size[0]}×{img.size[1]} · 底图（无表情差分）"
+            self.result_meta.value = self._result_meta_text(
+                img.size, "底图（无表情差分）")
         self.page.update()
 
     def _prev_frame(self, e):
@@ -2311,7 +2319,7 @@ class ComposerApp(DropFeedbackMixin):
             _SRC_CACHE_MAX,
         )
         self.result_hint.visible = False
-        self.result_meta.value = f"{img.size[0]}×{img.size[1]} · 底图（无表情差分）"
+        self.result_meta.value = self._result_meta_text(img.size, "底图（无表情差分）")
         self.save_btn.disabled = False
         self.batch_btn.disabled = False
         self.page.update()
@@ -2430,7 +2438,7 @@ class ComposerApp(DropFeedbackMixin):
         self.composed_img = composed
         self.result_image.src = _img_src(composed)
         self.result_hint.visible = False
-        self.result_meta.value = f"{composed.size[0]}×{composed.size[1]} · 偏移 {ox:+d}/{oy:+d}"
+        self.result_meta.value = self._result_meta_text(composed.size, f"偏移 {ox:+d}/{oy:+d}")
         self.save_btn.disabled = False
         self.batch_btn.disabled = False
         self.page.update()

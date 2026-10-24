@@ -295,6 +295,10 @@ async def run():
     assert app.base_imgs, "底图未加载"
     assert app.part_imgs, "差分部件未加载"
     assert app.composed_img is not None, "合成结果为空"
+    # 结果面板头不重复底图尺寸：同尺寸时只留偏移，否则左右两个面板头会显示同一个 583×989
+    assert "×" in app.base_meta.value, app.base_meta.value
+    assert "×" not in app.result_meta.value, app.result_meta.value
+    assert app.result_meta.value.startswith("偏移"), app.result_meta.value
     assert app.thumb_list.visible, "缩略图条未显示"
     # 选中态由 filename 决定，不是"点了哪个控件"——所以断言要按文件名找回那一行
     sel = next(e for e in app._action_rows if e["filename"] == info["filename"])
