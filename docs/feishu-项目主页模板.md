@@ -40,7 +40,7 @@
 git clone https://github.com/Huohua-newbie/FVPTachieComposer.git
 cd FVPTachieComposer
 py -3.13 -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate            # PowerShell / cmd；Git Bash 用 source .venv/Scripts/activate
 pip install -r requirements.txt
 py -3.13 FVPTachieComposerFlet.py
 ```

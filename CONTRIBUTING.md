@@ -36,7 +36,8 @@ cd FVPTachieComposer
 
 ```bash
 py -3.13 -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate            # PowerShell / cmd 用这行
+# Git Bash 用：source .venv/Scripts/activate
 pip install -r requirements.txt
 
 py -3.13 FVPTachieComposerFlet.py
