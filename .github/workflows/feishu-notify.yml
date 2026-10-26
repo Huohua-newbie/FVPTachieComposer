@@ -1,0 +1,65 @@
+# GitHub → 飞书群机器人通知
+#
+# 启用步骤（一次性，3 分钟）：
+#   1. 飞书群 → 右上角设置 → 群机器人 → 添加机器人 → 「自定义机器人」
+#   2. 安全设置选「自定义关键词」，填：PR
+#   3. 复制 Webhook 地址（形如 https://open.feishu.cn/open-apis/bot/v2/hook/xxxx）
+#   4. 本仓库 → Settings → Secrets and variables → Actions → New repository secret
+#      Name: FEISHU_WEBHOOK     Secret: <粘贴地址>
+#
+# 没配 secret 时这个 workflow 什么也不发（step 直接跳过），不会把 PR 变红。
+
+name: 飞书通知
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, closed]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    env:
+      FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+    steps:
+      - name: 发送到飞书群
+        if: env.FEISHU_WEBHOOK != ''
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          NUM: ${{ github.event.pull_request.number }}
+          TITLE: ${{ github.event.pull_request.title }}
+          URL: ${{ github.event.pull_request.html_url }}
+          ACTOR: ${{ github.actor }}
+          MERGED: ${{ github.event.pull_request.merged }}
+          REVIEW: ${{ github.event.review.state }}
+        run: |
+          set -euo pipefail
+          case "$EVENT:$ACTION" in
+            pull_request_review:*)
+              TEXT="👀 PR #$NUM 收到 review（$REVIEW）：$TITLE"
+              ;;
+            pull_request:closed)
+              if [ "$MERGED" = "true" ]; then
+                TEXT="✅ PR #$NUM 已合并：$TITLE"
+              else
+                TEXT="❌ PR #$NUM 被关闭（未合并）：$TITLE"
+              fi
+              ;;
+            pull_request:opened)
+              TEXT="🆕 新 PR #$NUM 待 review：$TITLE（by $ACTOR）"
+              ;;
+            *)
+              TEXT="🔄 PR #$NUM $ACTION：$TITLE"
+              ;;
+          esac
+
+          MSG=$(printf '%s\n%s' "$TEXT" "$URL")
+          BODY=$(jq -n --arg t "$MSG" '{msg_type:"text",content:{text:$t}}')
+          curl -sS --fail-with-body -X POST \
+            -H 'Content-Type: application/json' \
+            -d "$BODY" "$FEISHU_WEBHOOK"
