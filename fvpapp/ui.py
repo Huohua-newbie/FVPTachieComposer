@@ -25,6 +25,7 @@ from .engine import (
     parse_dir_infos,
 )
 
+from .crashlog import mark_exit_once
 from .dropzone import DROPZONE_ON, _custom_client_available, _dropzone, _dropzone_on, pick_drop_path
 from .media import (
     EXPR_SUFFIXES,
@@ -670,9 +671,13 @@ class UiMixin:
             self._win_maximized = True
         elif t is ft.WindowEventType.UNMAXIMIZE:
             self._win_maximized = False
-        elif t not in (ft.WindowEventType.RESIZED, ft.WindowEventType.MOVED,
-                       ft.WindowEventType.CLOSE):
-            return
+        elif t is ft.WindowEventType.CLOSE:
+            # 打包态关窗时进程是被 Dart 侧直接结束的，atexit / on_disconnect
+            # 都来不及（实测只有窗口事件能收到 CLOSE）——「正常退出」只能写在这。
+            mark_exit_once()
+        else:
+            if t not in (ft.WindowEventType.RESIZED, ft.WindowEventType.MOVED):
+                return
         self._remember_window()
 
 
