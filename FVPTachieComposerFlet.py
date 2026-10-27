@@ -22,7 +22,7 @@ from pathlib import Path
 # ── 日志 / 崩溃落盘 ───────────────────────────────────────
 # 必须在 `import flet` 之前装：flet 导入期或客户端拉起阶段出的错也要留证据。
 # 控制台行为不变（默认 WARNING 以上），文件里则是完整的 DEBUG。
-# 位置：%LOCALAPPDATA%\FVPTachieComposer\logs\fvptachie-<版本>-<时间>.log
+# 位置：<应用根目录>\logs\fvptachie-<版本>-<时间>.log（打包态即 exe 旁边）
 # 用户报错时让他把这个文件发过来就行，界面上原本的提示一律不改。
 from fvpapp.crashlog import _flush as _flush_log  # noqa: F401
 from fvpapp.crashlog import install as _install_logging

@@ -2,8 +2,9 @@
 
 用户报错时只要让他把当次的日志文件发过来：
 
-    Windows（打包态）：%LOCALAPPDATA%\\FVPTachieComposer\\logs\\
-    开发环境（非 Windows）：~/.local/state/FVPTachieComposer/logs/
+    应用根目录\\logs\\   （打包态 = exe 所在目录；源码运行 = 仓库根）
+    根目录不可写（装在 Program Files、只读介质等）时退回
+    %LOCALAPPDATA%\\FVPTachieComposer\\logs\\，非 Windows 退回 ~/.local/state/
 
 文件名 = 版本号 + 启动时刻，例如 `fvptachie-2.2.3-20261027-153012.log`，
 一次运行一个文件，天然对得上「用户说的是哪一版、哪一次」。只保留最近
@@ -60,19 +61,45 @@ _atexit_done = False
 
 
 # ── 路径 ──────────────────────────────────────────────────────────────
-def logs_dir() -> Path:
-    """日志目录。`FVP_LOG_DIR` 可覆盖（测试与排障用）。"""
-    override = os.environ.get("FVP_LOG_DIR")
-    if override:
-        return Path(override).expanduser()
+def app_root() -> Path:
+    """应用根目录：打包态是 exe 所在目录，源码运行是仓库根。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def _fallback_logs_dir() -> Path:
     local = os.environ.get("LOCALAPPDATA")
     if local:
         return Path(local) / APP_NAME / "logs"
-    if os.name == "nt":  # LOCALAPPDATA 被清掉的极端情况
+    if os.name == "nt":
         return Path.home() / "AppData" / "Local" / APP_NAME / "logs"
-    # 开发环境（WSL/Linux/macOS）
     state = os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
     return Path(state) / APP_NAME / "logs"
+
+
+def _creatable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".fvp-write-probe"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def logs_dir() -> Path:
+    """日志目录，放在应用根目录下。`FVP_LOG_DIR` 可覆盖（测试与排障用）。
+
+    根目录写不进去（装进 Program Files、放只读介质）才退回
+    `%LOCALAPPDATA%\\FVPTachieComposer\\logs`，不然日志会整个丢掉。
+    """
+    override = os.environ.get("FVP_LOG_DIR")
+    if override:
+        return Path(override).expanduser()
+    root = app_root() / "logs"
+    return root if _creatable(root) else _fallback_logs_dir()
 
 
 def app_version() -> str:

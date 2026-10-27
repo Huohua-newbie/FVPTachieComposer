@@ -66,16 +66,24 @@ def main():
     check("fvpapp/version.py 与 pyproject.toml 版本一致",
           m is not None and m.group(1) == cl.app_version())
 
-    # ── 2. 目录规则 ──────────────────────────────────────
+    # ── 2. 目录规则：日志跟着应用根目录走 ────────────────
     old_local = os.environ.get("LOCALAPPDATA")
     old_dir = os.environ.pop("FVP_LOG_DIR", None)
+    real_app_root = cl.app_root
     try:
         os.environ["LOCALAPPDATA"] = str(tmp / "AppData" / "Local")
-        want = tmp / "AppData" / "Local" / "FVPTachieComposer" / "logs"
-        check("%LOCALAPPDATA%/FVPTachieComposer/logs", cl.logs_dir() == want)
+        check("默认落在应用根目录的 logs 下",
+              cl.logs_dir() == cl.app_root() / "logs")
+        # 根目录写不进去（装进 Program Files、只读介质）才退回 LOCALAPPDATA
+        blocker = tmp / "not-a-dir"
+        blocker.write_text("", encoding="utf-8")
+        cl.app_root = lambda: blocker
+        check("根目录不可写时退回 %LOCALAPPDATA%",
+              cl.logs_dir() == tmp / "AppData" / "Local" / "FVPTachieComposer" / "logs")
         os.environ["FVP_LOG_DIR"] = str(tmp / "override")
         check("FVP_LOG_DIR 可覆盖", cl.logs_dir() == tmp / "override")
     finally:
+        cl.app_root = real_app_root
         os.environ.pop("FVP_LOG_DIR", None)
         if old_local is None:
             os.environ.pop("LOCALAPPDATA", None)

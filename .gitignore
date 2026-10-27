@@ -17,3 +17,5 @@ tests/preview_bin.txt
 tests/image_*.png
 # 外部截图工具按进程 cwd 落盘，会掉在仓库根目录
 图片/
+# 源码运行时日志就落在仓库根（打包态落在 exe 旁边）
+logs/
