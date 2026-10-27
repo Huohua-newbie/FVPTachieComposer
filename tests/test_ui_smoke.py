@@ -7,6 +7,7 @@
 需要已安装 flet + Pillow：python3 tests/test_ui_smoke.py
 """
 import asyncio
+import os
 import struct
 import sys
 import tempfile
@@ -15,6 +16,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+
+# 窗口偏好写进临时文件：测试不该碰 %LOCALAPPDATA% 下真用户的那份 settings.json
+os.environ.setdefault(
+    "FVP_SETTINGS_PATH",
+    str(Path(tempfile.mkdtemp(prefix="ui_smoke_settings_")) / "settings.json"),
+)
 
 try:
     import flet as ft  # noqa: F401
@@ -44,12 +51,15 @@ class FakeWindow:
     def __init__(self):
         self.width = 1280
         self.height = 760
+        self.left = None
+        self.top = None
         self.min_width = 1020
         self.min_height = 600
         self.title_bar_hidden = False
         self.icon = None
         self.maximized = False
         self.minimized = False
+        self.on_event = None
 
     async def destroy(self):
         pass
@@ -106,7 +116,7 @@ class FakePage:
         return None
 
 
-def make_hzc(path, image_type=1, w=8, h=8, frames=1):
+def make_hzc(path, image_type=1, w=8, h=8, frames=1, salt=0):
     head = bytearray(44)
     head[0:4] = b"hzc1"
     struct.pack_into("<H", head, 18, image_type)
@@ -118,20 +128,21 @@ def make_hzc(path, image_type=1, w=8, h=8, frames=1):
     stride = w * h * bpp
     # 纯线性序列的周期是 256，正好等于一帧的字节数，多帧会解出一堆一模一样的画面。
     # 混进帧号（i // stride）并取 251 为周期，翻帧断言才能真的看出画面变了。
-    body = bytes(((i % 251) * 7 + (i // stride) * 53) % 256 for i in range(need))
+    # salt 让"同名的另一份资源"画面确实不同：换资源串图与否只能这样验。
+    body = bytes(((i % 251) * 7 + (i // stride) * 53 + salt) % 256 for i in range(need))
     path.write_bytes(bytes(head) + zlib.compress(body))
 
 
-def build_fixture():
+def build_fixture(salt=0):
     tmp = Path(tempfile.mkdtemp(prefix="ui_smoke_"))
     for role in ("翠", "真紅"):
         for outfit in ("私服", "制服"):
             for action in ("基", "喜"):
-                make_hzc(tmp / f"CHR_{role}_{action}_{outfit}.hzc")
+                make_hzc(tmp / f"CHR_{role}_{action}_{outfit}.hzc", salt=salt)
                 make_hzc(tmp / f"CHR_{role}_{action}_{outfit}_表情.hzc",
-                         image_type=2, frames=3)
+                         image_type=2, frames=3, salt=salt)
     # 没有 _表情 变体的多帧底图：走「直接导出底图」那条退路
-    make_hzc(tmp / "CHR_翠_无_私服.hzc", image_type=2, frames=3)
+    make_hzc(tmp / "CHR_翠_无_私服.hzc", image_type=2, frames=3, salt=salt)
     return tmp
 
 
@@ -493,14 +504,19 @@ async def run():
     app._parsing_gen = 7
     app._show_parsing_busy(8, "x.bin")
     assert app._busy_seq is None and not app.page.overlay, "快路径也被弹了横幅"
+    assert app.parse_progress.visible is False, "没到揭示时刻就把进度条亮出来了"
     app._show_parsing_busy(7, "x.bin")
     assert app._busy_seq == app._snack_seq, "慢路径没弹\"正在解析\""
+    # 进度条和这条提示同一时刻上场，此刻还不知道总数 → 不定态
+    assert app.parse_progress.visible is True and app.parse_progress.value is None, \
+        "\"正在解析\"弹了但进度条没跟上"
     await asyncio.sleep(2.4)
     assert app._snack_overlay in app.page.overlay, "busy 卡片不该自己消失"
     app._dismiss_snack(app._busy_seq)
     await asyncio.sleep(0.3)
     assert app._snack_overlay not in app.page.overlay
-    app._parsing_gen = None
+    app._end_parse_feedback()
+    assert app.parse_progress.visible is False, "解析收尾后进度条没收回去"
 
     # 方向键：列表项/按钮点过之后会持有焦点，e.control 不为空是常态而不是"在打字"，
     # 拿它当"焦点被占用"判断会把 ←/→ 全吞掉，帧切换直接失效。
@@ -542,6 +558,38 @@ async def run():
     seen.clear()
     await app._open_bin(None)
     assert seen["import"] == str(tmp), "导出之后导入对话框的初始目录被带跑"
+
+    # ── 窗口记忆 ─────────────────────────────────────────────
+    # 拖动和缩放都不走关闭流程：只存"退出时"会漏掉整个「拖过一遍再关」的情况，
+    # 所以尺寸/位置靠窗口事件记录。这里验的就是事件确实挂上了、并且会落盘。
+    import fvpapp.settings as st
+
+    class _WinEvt:
+        def __init__(self, t):
+            self.type = t
+
+    assert callable(page.window.on_event), "窗口事件没挂上，尺寸位置变化不会被记录"
+    page.window.width, page.window.height = 1500, 900
+    page.window.left, page.window.top = 210, 130
+    page.window.on_event(_WinEvt(ft.WindowEventType.RESIZED))
+    await asyncio.sleep(st.SAVE_DELAY_S + 0.2)      # 等节流那一档落地
+    saved = st.window_prefs()
+    assert (saved.get("width"), saved.get("height")) == (1500, 900), f"缩放后没写盘: {saved}"
+    assert (saved.get("left"), saved.get("top")) == (210, 130), f"拖动后没写盘: {saved}"
+
+    # 最大化只改标记：这会儿的宽高是整个显示器的框，存下来下次会还原成铺满的浮窗
+    page.window.on_event(_WinEvt(ft.WindowEventType.MAXIMIZE))
+    await asyncio.sleep(st.SAVE_DELAY_S + 0.2)
+    saved = st.window_prefs()
+    assert saved.get("maximized") is True, f"最大化状态没记住: {saved}"
+    assert (saved.get("width"), saved.get("left")) == (1500, 210), \
+        f"最大化把上次的几何冲掉了: {saved}"
+
+    # 换主题整树重建，窗口偏好与事件不能丢
+    await app._toggle_theme(None)
+    assert callable(page.window.on_event), "换主题后窗口事件掉了"
+    assert st.window_prefs().get("maximized") is True, "换主题把窗口记忆洗掉了"
+    await app._toggle_theme(None)
 
     # 帧导航 / 部件切换 / 缩放复位
     if len(app.base_imgs) > 1:
@@ -693,8 +741,151 @@ async def run():
     assert all(w.opacity == 1.0 for w in app._tree_wraps), "拖入打断错峰时留下了半透明的角色"
     app._drop_armed = False
 
+    # ── 缩略图缓存 ─────────────────────────────────────────────
+    # 三个缓存的键都只带文件名（角色名、mini_<文件名>_<尺寸>、("part"/"base", 文件名, 帧号)），
+    # 而不同 bin / 不同拆包目录里文件名撞车是常态：载入新资源时不清缓存，新资源就直接
+    # 拿到上一份的图（串图）。这里用"文件名一模一样、画面不同"的两份资源来验。
+    from fvpapp import media as _media
+
+    def _role_thumb_src(role):
+        w = app.role_thumb_cache.get(role)
+        if w is None:
+            return None
+        return getattr(w, "src", None) or getattr(getattr(w, "content", None), "src", None)
+
+    def _strip_srcs():
+        return [getattr(c.content, "src", None) for c in app.thumb_list.controls]
+
+    decoded = []
+    real_read = app._read_first_frame
+    app._read_first_frame = lambda info: (decoded.append(info["filename"]), real_read(info))[1]
+    try:
+        target = next(i for i in app.file_infos if i["filename"] == "CHR_翠_喜_私服")
+        await app._select_action(target)
+        await asyncio.sleep(0.6)                       # 底图与差分条都在后台解
+        base_a, strip_a = app.base_image.src, _strip_srcs()
+        assert base_a.startswith("data:image/") and strip_a, "底图或差分条没出来"
+        role_a = _role_thumb_src("翠")
+
+        # 角色/服装现在才展开：这些层的缩略图此前不该提前解码
+        for role in sorted(app.hierarchy):
+            app._tree_toggles[("role", role)][1](None)
+        for role in sorted(app.hierarchy):
+            for outfit in sorted(app.hierarchy[role]):
+                app._tree_toggles[("outfit", f"{role}/{outfit}")][1](None)
+        await asyncio.sleep(0.6)
+        first = len(decoded)
+        assert first > 0, "展开后一张缩略图都没解码，这条断言没走到路径"
+
+        # 换主题会整棵重建树并恢复展开态：解过的不能再解一遍
+        await app._toggle_theme(None)
+        await asyncio.sleep(0.6)
+        assert len(decoded) == first, f"重建树又解码了 {len(decoded) - first} 张缩略图"
+
+        # 卡片上写的自测口径：整批收起再展开，第二次不重复解码
+        roles = sorted(app.hierarchy)
+        for role in roles:
+            app._tree_toggles[("role", role)][1](None)
+        for role in roles:
+            app._tree_toggles[("role", role)][1](None)
+        await asyncio.sleep(0.4)
+        assert len(decoded) == first, f"收起再展开又解码了 {len(decoded) - first} 张缩略图"
+
+        # 换资源：同名不同画面，角色/服装/动作/底图/差分条都要跟着换
+        other = build_fixture(salt=90)
+        await app._load_bin(str(other))
+        await asyncio.sleep(0.6)
+        assert _role_thumb_src("翠") is not None, "新资源的角色缩略图没出来"
+        assert _role_thumb_src("翠") != role_a, "换资源后角色缩略图还是上一份的（同名串图）"
+        assert _media._SRC_CACHE == {}, "换资源后底图/合成缓存还留着上一份的（按文件名索引）"
+        assert _media._THUMB_SRC_CACHE == {}, "换资源后差分条缓存还留着上一份的（按文件名索引）"
+        target_b = next(i for i in app.file_infos if i["filename"] == "CHR_翠_喜_私服")
+        await app._select_action(target_b)
+        await asyncio.sleep(0.6)
+        assert app.base_image.src != base_a, "换资源后同一动作的底图还是上一份的"
+        assert _strip_srcs() != strip_a, "换资源后差分条还是上一份的"
+    finally:
+        app._read_first_frame = real_read
+
     await app._unload_bin(None)  # 幂等收尾：第二次载出同样干净
     assert app.input_file is None and app.empty_hint.visible is True
+    assert app.role_thumb_cache == {} and _media._SRC_CACHE == {} and _media._THUMB_SRC_CACHE == {}, \
+        "载出后图像缓存没清干净"
+
+    # ── 大资源载入的进度反馈 ───────────────────────────────────
+    # 小资源在进度条亮起来之前就解析完了，那条路全程安静；只有慢资源才把
+    # "正在解析"和进度条一起亮出来，状态栏右侧报阶段，收尾立刻收起。
+    import fvpapp.resources as _res
+
+    big = Path(tempfile.mkdtemp(prefix="ui_smoke_big_"))
+    for i in range(400):
+        make_hzc(big / f"CHR_翠_动作{i:03d}_私服.hzc")
+
+    raw, frames = [], []
+    real_scan, real_show = _res.parse_dir_infos, app._show_parse_progress
+
+    def counting_scan(path, progress=None):
+        def inner(done, total, stage):
+            raw.append((done, total, stage))
+            progress(done, total, stage)
+        return real_scan(path, progress=inner)
+
+    def spy(gen, done, total, stage):
+        frames.append((done, total, stage, app.parse_progress.visible))
+        real_show(gen, done, total, stage)
+
+    _res.parse_dir_infos = counting_scan
+    app._show_parse_progress = spy
+    old_delay = _res.BUSY_DELAY
+    _res.BUSY_DELAY = 0            # 400 个文件在小机器上也可能秒完，门槛降到 0 才保证走到慢路径
+    try:
+        await app._load_bin(str(big))
+    finally:
+        _res.BUSY_DELAY = old_delay
+        _res.parse_dir_infos = real_scan
+        del app._show_parse_progress
+
+    stages = {s for _, _, s in raw}
+    assert "扫描目录" in stages and "读文件头" in stages, f"阶段不全: {stages}"
+    assert raw[-1][0] == raw[-1][1] != 0, f"最后一帧没报满: {raw[-1]}"
+    head = [(d, t) for d, t, s in raw if s == "读文件头"]
+    assert all(b[0] >= a[0] for a, b in zip(head, head[1:])), "读文件头的计数倒着走了"
+    assert len({t for _, t in head}) == 1, "同一阶段里 total 会变，进度条会来回跳"
+    # 节流：四百次回调只该换来个位数帧——逐条刷会把事件循环淹了
+    assert len(raw) >= 400 and len(frames) < 60, \
+        f"引擎报了 {len(raw)} 次、UI 收到 {len(frames)} 帧，节流没生效"
+    assert any(f[3] for f in frames), "慢资源从头到尾没亮过进度条"
+    assert app.parse_progress.visible is False and app.parse_progress.value is None, \
+        "解析完了进度条还挂着（残影）"
+    assert app.status_meta.value == f"1 角色 · {len(app.file_infos)} 图像", \
+        f"状态栏停在解析文案: {app.status_meta.value}"
+
+    # UI 线程那一半不用起线程也能验：没到揭示时刻不画、代号不符自弃、
+    # total=0 是"还不知道总数"（不定态），文案不能写成 0/0。
+    app._parsing_gen, app._parse_shown = 21, False
+    app._show_parse_progress(21, 5, 400, "读文件头")
+    assert app.parse_progress.visible is False, "还没到揭示时刻就把进度条画出去了"
+    app._parse_shown = True
+    app._show_parse_progress(21, 5, 400, "读文件头")
+    assert app.parse_progress.value == 5 / 400, app.parse_progress.value
+    assert app.status_meta.value == "读文件头 5/400", app.status_meta.value
+    app._show_parse_progress(21, 30, 0, "扫描目录")
+    assert app.parse_progress.value is None, "total=0 该是不定态，不该给个具体比例"
+    assert app.status_meta.value == "扫描目录 30 个", app.status_meta.value
+    app._show_parse_progress(22, 399, 400, "读文件头")      # 上一轮解析的迟到帧
+    assert app.status_meta.value == "扫描目录 30 个", "过期代号的帧还在改状态栏"
+    app._end_parse_feedback()
+    assert (app._parsing_gen, app._parse_shown) == (None, False), "收尾没把解析代号作废"
+    assert app.parse_progress.visible is False and app.parse_progress.value is None, \
+        "收尾没清干净"
+
+    # 解析中途按下载出：进度条不能跟着带进初始态
+    app._parsing_gen = app._state_gen
+    app.parse_progress.visible = True
+    await app._unload_bin(None)
+    assert app.parse_progress.visible is False and app.parse_progress.value is None, \
+        "载出把亮着的进度条带进了初始态"
+    assert app.status_text.value == "就绪" and app.status_meta.value == ""
 
     print("UI_SMOKE_OK")
 

@@ -56,6 +56,8 @@ STAGGER_MS = 0.04
 STAGGER_RISE = 10.0
 # 慢载入才给过程反馈：解析超过这个时长才弹"正在解析"，快路径什么都不弹
 BUSY_DELAY = 0.25
+# 进度往 UI 线程推的最小间隔：解析九千条就是九千次回调，逐条刷会把事件循环淹了
+PROGRESS_PUSH_S = 0.1
 
 
 def _palette(dark: bool) -> dict:
