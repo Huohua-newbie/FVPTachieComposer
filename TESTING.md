@@ -2,16 +2,26 @@
 
 测试对象：Draft release 中的 `FVPTachieComposer-v<ver>-win64.zip`，解压到干净目录运行。
 
-## 无头自检（不需要 GUI，先跑这两个）
+## 无头自检（不需要 GUI，先跑这几个）
 
 ```bash
 python tests/test_ui_smoke.py          # 用真实 flet 搭整棵树，查控件参数与滚动条留槽
 python tests/test_thumb_threading.py   # 假 flet，查缩略图解码仍在后台线程、update 回 UI 线程
+python tests/test_window_memory.py     # 窗口偏好：读不到回默认、坐标出界不还原、最大化不覆盖几何
+python tests/test_crashlog.py          # 日志落盘：目录解析、轮转、不可写时不抛异常
+python .github/selfcheck.py            # 解析与差分合成的纯逻辑（不碰 flet）
 ```
+
+> `test_ui_smoke.py` 要能验证拖放那条链，跑之前给一个客户端环境：
+> `FLET_PLATFORM=windows python tests/test_ui_smoke.py`（打包态同理，见 `tests/DEV.md`）。
 
 ## 启动与外观
 
 - [ ] 双击 exe 正常启动，任务栏/窗口图标为 Shinku（非 Python 默认）
+- [ ] 拖动或缩放窗口后直接关掉再打开：大小和位置跟上次一样（不是只在退出时才存的那份）
+- [ ] 最大化后关掉再打开：仍然是最大化；从最大化还原下去，回到的是之前的尺寸而不是铺满
+- [ ] 把 `%LOCALAPPDATA%\FVPTachieComposer\settings.json` 删掉再启动：回默认 1280×760，不报错
+- [ ] 在副屏上摆好窗口、拔掉副屏再启动：窗口仍在屏幕内（位置回默认，尺寸照常还原）
 - [ ] 深色/浅色主题切换正常，切换后树与预览不丢失
 - [ ] 列表滚动条停在为自己预留的槽里（树右侧、差分条底部），不压住缩略图与文字
 - [ ] 拖文件进窗口（任意位置）：左侧「角色库」面板亮起来——底纹染色 + 虚线边框 + 一个沿边爬的光斑；移出立刻收回，不吞面板里的点击

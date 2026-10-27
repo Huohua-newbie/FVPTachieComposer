@@ -44,6 +44,16 @@ from .media import (
     _part_thumb_srcs,
     _thumb_bytes,
 )
+from .settings import (
+    SAVE_DELAY_S,
+    MIN_HEIGHT,
+    MIN_WIDTH,
+    capture_window,
+    plan_window,
+    save_window,
+    screen_bounds,
+    window_prefs,
+)
 from .theme import (
     ANIM_ROW,
     ANIM_VEIL,
@@ -96,18 +106,40 @@ class UiMixin:
     def _setup_page(self):
         p = self.page
         p.title = "FVP Tachie Composer"
-        p.window.width = 1280
-        p.window.height = 760
-        p.window.min_width = 1020
-        p.window.min_height = 600
+        p.window.min_width = MIN_WIDTH
+        p.window.min_height = MIN_HEIGHT
         p.window.title_bar_hidden = True
         icon = _app_icon()
         if icon:
             p.window.icon = icon
+        self._restore_window()
         p.padding = 0
         p.spacing = 0
         p.on_keyboard_event = self._on_keyboard
         self._apply_theme()
+
+
+    def _restore_window(self):
+        """按上次关掉程序时的样子摆窗口（`fvpapp/settings.py`）。
+
+        第一次运行、或者 `settings.json` 被删/读坏，`plan_window` 回默认
+        1280×760、位置交给系统——不能因为设置出问题而起不来。
+        """
+        prefs = window_prefs()
+        plan = plan_window(prefs, screen_bounds())
+        w = self.page.window
+        w.width = plan["width"]
+        w.height = plan["height"]
+        if plan["left"] is not None:
+            w.left = plan["left"]
+            w.top = plan["top"]
+        w.maximized = plan["maximized"]
+        # 最大化状态由窗口事件维护（见 _on_window_event），不回头读控件属性：
+        # 事件到达时 flet 侧的属性不一定已经同步。
+        self._win_maximized = plan["maximized"]
+        self._win_prefs = prefs
+        self._win_save_gen = 0
+        w.on_event = self._on_window_event
 
 
     def _apply_theme(self):
@@ -604,14 +636,54 @@ class UiMixin:
     async def _toggle_maximize(self, e):
         self.page.window.maximized = not self.page.window.maximized
         maximized = bool(self.page.window.maximized)
+        self._win_maximized = maximized
         if getattr(self, "max_btn", None):
             self.max_btn.icon = ft.Icons.FILTER_NONE if maximized else ft.Icons.CROP_SQUARE
             self.max_btn.tooltip = _tip("还原" if maximized else "最大化")
         self.page.update()
+        self._remember_window()
 
 
     async def _close(self, e):
+        self._write_window()
         await self.page.window.destroy()
+
+
+    def _on_window_event(self, e):
+        """尺寸/位置一变就记下来。
+
+        拖动和缩放都不会走关闭流程，只在退出时存会漏掉整个「拖过一次再关」的
+        情况；Windows 在操作过程中一路发事件，所以这里节流一下再写盘。
+        """
+        t = getattr(e, "type", None)
+        if t is ft.WindowEventType.MAXIMIZE:
+            self._win_maximized = True
+        elif t is ft.WindowEventType.UNMAXIMIZE:
+            self._win_maximized = False
+        elif t not in (ft.WindowEventType.RESIZED, ft.WindowEventType.MOVED,
+                       ft.WindowEventType.CLOSE):
+            return
+        self._remember_window()
+
+
+    def _remember_window(self):
+        """推迟到窗口停下再写：每次事件换一代，旧的那次自己作废。"""
+        self._win_save_gen = getattr(self, "_win_save_gen", 0) + 1
+        gen = self._win_save_gen
+        if not self._later(SAVE_DELAY_S, self._write_window, gen):
+            self._write_window(gen)
+
+
+    def _write_window(self, gen=None):
+        if gen is not None and gen != getattr(self, "_win_save_gen", None):
+            return
+        prefs = capture_window(self.page.window,
+                               getattr(self, "_win_maximized", False),
+                               getattr(self, "_win_prefs", None))
+        if prefs == getattr(self, "_win_prefs", None):
+            return
+        self._win_prefs = prefs
+        save_window(prefs)
 
 
     def _help(self, e):

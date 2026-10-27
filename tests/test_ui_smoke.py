@@ -7,6 +7,7 @@
 需要已安装 flet + Pillow：python3 tests/test_ui_smoke.py
 """
 import asyncio
+import os
 import struct
 import sys
 import tempfile
@@ -15,6 +16,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+
+# 窗口偏好写进临时文件：测试不该碰 %LOCALAPPDATA% 下真用户的那份 settings.json
+os.environ.setdefault(
+    "FVP_SETTINGS_PATH",
+    str(Path(tempfile.mkdtemp(prefix="ui_smoke_settings_")) / "settings.json"),
+)
 
 try:
     import flet as ft  # noqa: F401
@@ -44,12 +51,15 @@ class FakeWindow:
     def __init__(self):
         self.width = 1280
         self.height = 760
+        self.left = None
+        self.top = None
         self.min_width = 1020
         self.min_height = 600
         self.title_bar_hidden = False
         self.icon = None
         self.maximized = False
         self.minimized = False
+        self.on_event = None
 
     async def destroy(self):
         pass
@@ -542,6 +552,38 @@ async def run():
     seen.clear()
     await app._open_bin(None)
     assert seen["import"] == str(tmp), "导出之后导入对话框的初始目录被带跑"
+
+    # ── 窗口记忆 ─────────────────────────────────────────────
+    # 拖动和缩放都不走关闭流程：只存"退出时"会漏掉整个「拖过一遍再关」的情况，
+    # 所以尺寸/位置靠窗口事件记录。这里验的就是事件确实挂上了、并且会落盘。
+    import fvpapp.settings as st
+
+    class _WinEvt:
+        def __init__(self, t):
+            self.type = t
+
+    assert callable(page.window.on_event), "窗口事件没挂上，尺寸位置变化不会被记录"
+    page.window.width, page.window.height = 1500, 900
+    page.window.left, page.window.top = 210, 130
+    page.window.on_event(_WinEvt(ft.WindowEventType.RESIZED))
+    await asyncio.sleep(st.SAVE_DELAY_S + 0.2)      # 等节流那一档落地
+    saved = st.window_prefs()
+    assert (saved.get("width"), saved.get("height")) == (1500, 900), f"缩放后没写盘: {saved}"
+    assert (saved.get("left"), saved.get("top")) == (210, 130), f"拖动后没写盘: {saved}"
+
+    # 最大化只改标记：这会儿的宽高是整个显示器的框，存下来下次会还原成铺满的浮窗
+    page.window.on_event(_WinEvt(ft.WindowEventType.MAXIMIZE))
+    await asyncio.sleep(st.SAVE_DELAY_S + 0.2)
+    saved = st.window_prefs()
+    assert saved.get("maximized") is True, f"最大化状态没记住: {saved}"
+    assert (saved.get("width"), saved.get("left")) == (1500, 210), \
+        f"最大化把上次的几何冲掉了: {saved}"
+
+    # 换主题整树重建，窗口偏好与事件不能丢
+    await app._toggle_theme(None)
+    assert callable(page.window.on_event), "换主题后窗口事件掉了"
+    assert st.window_prefs().get("maximized") is True, "换主题把窗口记忆洗掉了"
+    await app._toggle_theme(None)
 
     # 帧导航 / 部件切换 / 缩放复位
     if len(app.base_imgs) > 1:
