@@ -58,6 +58,7 @@ _file_handler: Optional[logging.FileHandler] = None
 _fault_stream: Optional[Any] = None
 _hooked = False
 _atexit_done = False
+_exit_logged = False
 
 
 # ── 路径 ──────────────────────────────────────────────────────────────
@@ -363,6 +364,28 @@ def _flush() -> None:
         pass
 
 
+def mark_exit_once() -> None:
+    """给这趟运行收个尾：写一行「正常退出」并 flush。
+
+    打包态关窗口时，flet 客户端是直接结束内嵌 Python 进程的（实测 atexit
+    根本没机会跑）；所以入口把 `page.on_disconnect` 也接到这里——断连那一刻
+    进程还活着，日志来得及落。幂等：atexit 与断连谁先到算谁，只记一次。
+    """
+    global _exit_logged
+    if _exit_logged:
+        return
+    _exit_logged = True
+    try:
+        log.info("正常退出")
+        for h in logging.getLogger().handlers:
+            try:
+                h.flush()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _atexit_marker() -> None:
     """正常退出也留一行，用户发日志时能区分「崩了」和「关了」。"""
     global _atexit_done
@@ -371,15 +394,7 @@ def _atexit_marker() -> None:
     _atexit_done = True
 
     def _bye():
-        try:
-            log.info("正常退出")
-            for h in logging.getLogger().handlers:
-                try:
-                    h.flush()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        mark_exit_once()
         try:
             faulthandler.disable()
         except Exception:

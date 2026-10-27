@@ -27,6 +27,7 @@ from pathlib import Path
 from fvpapp.crashlog import _flush as _flush_log  # noqa: F401
 from fvpapp.crashlog import install as _install_logging
 from fvpapp.crashlog import install_asyncio_handler
+from fvpapp.crashlog import mark_exit_once
 
 log = logging.getLogger("fvptachie")
 LOG_PATH = _install_logging()
@@ -201,20 +202,26 @@ async def main(page: ft.Page):
             log.exception("初始化失败的提示都没能显示出来")
         return
     log.info("界面已就绪")
+    # 关窗时 atexit 在打包态跑不到（客户端直接结束内嵌进程），断连事件是
+    # 唯一还来得及写「正常退出」的时机。
+    page.on_disconnect = lambda e: mark_exit_once()
     # 命令行/拖到程序图标打开：自动载入首个存在的 .bin/目录参数。
     # dev 态参数在 argv[1:]（argv[0] 是脚本自身）；打包态 SeriousPython 把
     # 用户参数从 argv[0] 起放（实测 argv=['D:\\...\\graph_bs.bin']，无脚本名）。
     # 脚本路径以 .py 结尾不会被筛选误命中，两种形态直接一起扫。
     # 打包态能走到这里还依赖 client\main.dart 的 FVP-PATCH：flet 0.86.5 原生
     # 客户端会把「桌面 + 位置参数」当成 developer mode，嵌入 Python 根本不启动。
-    target = next((a for a in sys.argv
+    args = [a for a in sys.argv if not a.endswith(".py")]
+    target = next((a for a in args
                    if (p := Path(a)).exists()
                    and (p.is_dir() or p.suffix.lower() == ".bin")),
                   None)
     if target:
         await app._load_bin(target)
-    elif len(sys.argv) > 1:
-        app._snack(f"无法打开: {sys.argv[1]}", error=True)
+    elif args:
+        # 拖了个不存在/不支持的东西进来也要吭一声：打包态参数从 argv[0] 起，
+        # 拿 len(argv)>1 判会整个静默掉（实测拖已删除的文件就毫无提示）。
+        app._snack(f"无法打开: {args[0]}", error=True)
     return app
 
 

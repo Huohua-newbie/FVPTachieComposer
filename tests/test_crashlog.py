@@ -47,6 +47,7 @@ def reset_logging():
     cl._log_path = None
     cl._file_handler = None
     cl._fault_stream = None
+    cl._exit_logged = False
 
 
 def read_all(path):
@@ -191,6 +192,12 @@ def main():
     asyncio.run(async_main())
     text = read_all(path)
     check("asyncio 任务异常落盘", "任务里炸了" in text)
+
+    # ── 8.5 退出标记：打包态 atexit 跑不到，断连事件调 mark_exit_once ──
+    cl.mark_exit_once()
+    cl.mark_exit_once()  # 幂等：atexit 与断连都到也只记一次
+    text = read_all(path)
+    check("退出标记落盘「正常退出」且只记一次", text.count("正常退出") == 1)
 
     # ── 9. 只留最近 N 个 ────────────────────────────────
     prune_dir = tmp / "prune"
