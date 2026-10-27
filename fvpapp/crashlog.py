@@ -61,11 +61,21 @@ _atexit_done = False
 
 
 # ── 路径 ──────────────────────────────────────────────────────────────
+_PKG_DIR = Path(__file__).resolve().parent  # fvpapp/ 所在目录
+
+
 def app_root() -> Path:
-    """应用根目录：打包态是 exe 所在目录，源码运行是仓库根。"""
+    """应用根目录：打包态是 exe 所在目录，源码运行是仓库根。
+
+    flet 的 Windows 包用内嵌解释器跑 `.pyc`，**不设 `sys.frozen`**，代码树
+    落在 `<exe>\\app\\fvpapp\\` 下；只认 `sys.frozen` 会把日志写进 `app\\` 里。
+    """
+    exe_dir = Path(sys.executable).resolve().parent
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent
+        return exe_dir
+    if _PKG_DIR.parent == exe_dir / "app":
+        return exe_dir
+    return _PKG_DIR.parent
 
 
 def _fallback_logs_dir() -> Path:

@@ -57,7 +57,9 @@ def read_all(path):
 
 
 def main():
-    tmp = Path(tempfile.mkdtemp(prefix="fvp-crashlog-"))
+    # resolve()：Windows 的 TEMP 常是 8.3 短名（ADMINI~1），而 app_root()
+    # 返回长路径，不先展开会因为大小写不同的同一路径判成不相等。
+    tmp = Path(tempfile.mkdtemp(prefix="fvp-crashlog-")).resolve()
 
     # ── 1. 版本号只有一处真源 ────────────────────────────
     pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
@@ -74,6 +76,17 @@ def main():
         os.environ["LOCALAPPDATA"] = str(tmp / "AppData" / "Local")
         check("默认落在应用根目录的 logs 下",
               cl.logs_dir() == cl.app_root() / "logs")
+        # flet 打包态：内嵌解释器不设 sys.frozen，代码树在 <exe>\app\fvpapp 下
+        real_exe, real_pkg = sys.executable, cl._PKG_DIR
+        try:
+            pkg = tmp / "FVP" / "app" / "fvpapp"
+            pkg.mkdir(parents=True)
+            sys.executable = str(tmp / "FVP" / "FVPTachieComposer.exe")
+            cl._PKG_DIR = pkg.resolve()
+            check("flet 打包态认 exe 所在目录", cl.app_root() == tmp / "FVP")
+        finally:
+            sys.executable = real_exe
+            cl._PKG_DIR = real_pkg
         # 根目录写不进去（装进 Program Files、只读介质）才退回 LOCALAPPDATA
         blocker = tmp / "not-a-dir"
         blocker.write_text("", encoding="utf-8")
