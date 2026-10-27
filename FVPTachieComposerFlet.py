@@ -1,7 +1,7 @@
 """FVP Tachie Composer — Flet UI
 
 FVP engine character sprite viewer & composer.
-Parsing and composition logic reused from FVPTachieComposer.py.
+HZC / BIN 解析与合成内核在 `fvpapp/engine.py`。
 
 界面本身按四块拆在 `fvpapp/` 下：
   ui.py（布局与控件树）/ state.py（主题、提示、选中态）/ resources.py（解析与载入）/
@@ -34,6 +34,13 @@ LOG_PATH = _install_logging()
 import flet as ft  # noqa: E402  （要装在日志之后）
 
 from fvpapp.drop import DropFeedbackMixin
+from fvpapp.engine import (  # noqa: F401  （内核，历史脚本从这里取）
+    compose_preview,
+    hzc_data_to_pil_list,
+    hzc_decode_first_frame,
+    parse_bin_info_extended,
+    parse_dir_infos,
+)
 from fvpapp.dropzone import (  # noqa: F401  （测试/脚本从这里取）
     DROPZONE_ON,
     _custom_client_available,

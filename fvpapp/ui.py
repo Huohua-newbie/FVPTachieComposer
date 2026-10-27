@@ -17,7 +17,7 @@ import flet as ft
 import flet.canvas as fc
 from PIL import Image
 
-from FVPTachieComposer import (
+from .engine import (
     compose_preview,
     hzc_data_to_pil_list,
     hzc_decode_first_frame,

@@ -95,7 +95,7 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 
 ## 给开发者
 
-- 入口：`FVPTachieComposerFlet.py`（UI）+ `FVPTachieComposer.py`（HZC / BIN 解析与合成）
+- 入口：`FVPTachieComposerFlet.py`（UI）+ `fvpapp/engine.py`（HZC / BIN 解析与合成）
 - 开发运行：`py -3.13 FVPTachieComposerFlet.py <资源路径>`，原因见 [`tests/DEV.md`](tests/DEV.md)
 - 构建发布：见 [`BUILD.md`](BUILD.md)
 - **这份 README 就是功能说明**：用户能感觉到的行为变了，就在同一个提交里改它

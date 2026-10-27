@@ -17,7 +17,7 @@ for _s in (sys.stdout, sys.stderr):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import FVPTachieComposer as core
+from fvpapp import engine as core
 import FVPTachieComposerFlet as ui
 
 
