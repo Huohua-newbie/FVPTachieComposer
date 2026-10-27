@@ -4,7 +4,7 @@
 [project]
 name = "FVPTachieComposer"
 # 只喂给 flutter 的 --build-name，必须是 x.y.z；-beta 标识由 tag 和包名承担
-version = "2.2.3"
+version = "2.3.0"
 description = "FVP Tachie Composer —— 差分立绘预览与合成工具"
 # 绑定开发机的 3.13（flet 默认会跳到 3.14.x）
 requires-python = ">=3.13,<3.14"
