@@ -31,8 +31,8 @@
 | --- | --- |
 | 功能**现在**怎么工作（改代码前先读） | [`README.md`](README.md) —— **唯一的功能说明**，跟代码一起改 |
 | 功能该怎么设计、边界怎么定 | 飞书「FVP 功能讨论区」（话题群，一个功能一个话题） |
-| 每个改动**为什么**这么改 | 飞书[变更日志](https://ecn4wyos4h4e.feishu.cn/base/MMSfbYuxIaYOHRseXdEcZE5EnCd?view=vewucl6Ua1)（可按版本 / 按功能筛） |
-| 谁在做什么 | 飞书[任务看板](https://ecn4wyos4h4e.feishu.cn/base/XL78b251jaAtvksf3QMcNNCTn8g) |
+| 每个改动**为什么**这么改、放弃了什么 | 飞书[协作表 · 变更](https://ecn4wyos4h4e.feishu.cn/base/XL78b251jaAtvksf3QMcNNCTn8g?table=tblVrPehcX05cU4e&view=vewTJLNm7t)（只记决策和用户能感觉到的变化，重构不记） |
+| 谁在做什么 | 飞书[协作表 · 任务](https://ecn4wyos4h4e.feishu.cn/base/XL78b251jaAtvksf3QMcNNCTn8g?table=tblKW2gbzH5nFNow&view=vewNjmSyHu) |
 
 **功能说明只有 README 一份**，没有第二个文档需要同步。讨论在飞书，但**聊天记录不算数** —— 定下来的结论必须回写 README，否则等于没定。
 
@@ -41,8 +41,12 @@
 看板上一张卡改「已完成」之前：
 
 1. 无头自检全绿（清单见 [`TESTING.md`](TESTING.md) 的「无头自检」）
-2. **变更日志加了一行**：改了什么 / 为什么 / 关联（提交或 PR）/ 谁改的
-   - 重构、性能、内部整理这种用户感觉不到的，也要加，`类型` 选「内部」
+2. **变更日志加了一行**（只在下面两种情况之一）：
+   - 用户能感觉到的行为变了 → 要进 Release notes
+   - 有取舍，但没落成代码 → 比如「为什么不用某个方案」
+   - 字段只填 `改了什么` / `为什么` / `关联`（提交或 PR），`日期` 不填就是当天
+   - 重构、清理、依赖调整、修 typo **不记** —— 发版时 `git log v<上个版本>..HEAD --oneline` 一眼看全
+   - 判断标准：**三个月后，这件事能不能从 `git log` 里读出来？** 能 → 不写
 3. 用户能感觉到的行为变了 → `README.md` 对应小节也改了（同一个提交里改）
 
 只改代码不改文档 = 没做完。
