@@ -82,5 +82,7 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - 入口：`FVPTachieComposerFlet.py`（UI）+ `FVPTachieComposer.py`（HZC / BIN 解析与合成）
 - 开发运行：`py -3.13 FVPTachieComposerFlet.py <资源路径>`，原因见 [`tests/DEV.md`](tests/DEV.md)
 - 构建发布：见 [`BUILD.md`](BUILD.md)
+- 功能说明与变更记录在飞书：[功能说明书](https://ecn4wyos4h4e.feishu.cn/docx/H95KdirR9owgMwxARPgcQKoVnhc)、
+  [变更日志](https://ecn4wyos4h4e.feishu.cn/base/MMSfbYuxIaYOHRseXdEcZE5EnCd)；协作流程见 [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - 自检：`python tests/test_ui_smoke.py`、`python tests/test_thumb_threading.py`、
   `python tests/test_crashlog.py`、`python .github/selfcheck.py`；人工冒烟清单见 [`TESTING.md`](TESTING.md)
