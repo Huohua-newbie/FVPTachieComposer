@@ -125,6 +125,11 @@ def _make_thumb_widget(img: Image.Image, size: int = 36) -> ft.Image:
     return ft.Image(src=data, width=size, height=size, fit=ft.BoxFit.CONTAIN)
 
 
+def _make_thumb_widget_from_src(src: str, size: int = 36) -> ft.Image:
+    """缩略图已经编码好（磁盘命中）时直接用 data URI，不再过一遍 PIL。"""
+    return ft.Image(src=src, width=size, height=size, fit=ft.BoxFit.CONTAIN)
+
+
 _SRC_CACHE = OrderedDict()
 _SRC_CACHE_MAX = 24
 _THUMB_SRC_CACHE = OrderedDict()

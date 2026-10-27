@@ -6,6 +6,7 @@ Linux 下可直接运行：python3 tests/test_thumb_threading.py
 """
 import asyncio
 import io
+import os
 import struct
 import sys
 import tempfile
@@ -16,6 +17,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+
+# 缓存目录指到临时目录：既别弄脏用户的 thumbcache，也别让上一次运行留下的
+# 命中掩盖本测试要验的"后台解码 → UI 线程推送"这条路径。
+os.environ["FVP_THUMB_CACHE"] = tempfile.mkdtemp(prefix="thumb_thread_cache_")
 
 MAIN_IDENT = threading.get_ident()
 
