@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import struct
 import zlib
+from collections.abc import Callable
 from pathlib import Path
 
 from PIL import Image
@@ -67,10 +68,14 @@ def hzc_decode_first_frame(hzc_data: bytes, header_info: dict) -> Image.Image | 
 	b, g, r, a = img.split()
 	return Image.merge("RGBA", (r, g, b, a))
 
-def parse_bin_info(input_file: str) -> list[dict]:
+def parse_bin_info(input_file: str, progress: Callable[[int, int, str], None] | None = None) -> list[dict]:
 	"""
 	解析.bin文件，返回文件信息列表。
 	每个元素为字典：{'filename': 文件名（不含扩展名）, 'offset': 绝对偏移, 'size': 大小, 'type': 类型}
+
+	`progress(done, total, stage)` 可选：`total` 恒为条目数，`stage` 是给人看的阶段名。
+	前两个阶段（读文件表 / 读文件名）各只是一次顺序读，所以报 0/x 换个阶段名就过去，
+	真正逐条推进的是「识别类型」。不传 progress 时行为与原来完全一致。
 	"""
 	with open(input_file, 'rb') as f:
 		header = f.read(8)
@@ -78,6 +83,11 @@ def parse_bin_info(input_file: str) -> list[dict]:
 			raise ValueError("文件头不完整")
 		x, y = struct.unpack('<II', header)  # 文件数，文件名总长度
 
+		def report(done, stage):
+			if progress is not None:
+				progress(min(done, x), x, stage)
+
+		report(0, "读文件表")
 		entries = []  # (rel_offset, abs_offset, size)
 		for _ in range(x):
 			entry_data = f.read(12)
@@ -86,6 +96,7 @@ def parse_bin_info(input_file: str) -> list[dict]:
 			rel_offset, abs_offset, size = struct.unpack('<III', entry_data)
 			entries.append((rel_offset, abs_offset, size))
 
+		report(0, "读文件名")
 		filenames_data = f.read(y)
 		if len(filenames_data) != y:
 			raise ValueError("文件名区域长度不符")
@@ -120,6 +131,7 @@ def parse_bin_info(input_file: str) -> list[dict]:
 			else:
 				typ = 'bin'
 			file_types.append(typ)
+			report(idx + 1, "识别类型")
 
 		# 构建返回列表
 		file_infos = []
@@ -155,11 +167,22 @@ def parse_hzc_header_from_bytes(header_bytes: bytes) -> dict | None:
 		'frame_count': frame_count
 	}
 
-def parse_bin_info_extended(input_file: str) -> list[dict]:
-	"""调用原 parse_bin_info 并补充 HZC 头部信息"""
-	base_infos = parse_bin_info(input_file)  # 原函数返回列表，每个元素含 filename, offset, size, type
+def parse_bin_info_extended(input_file: str, progress: Callable[[int, int, str], None] | None = None) -> list[dict]:
+	"""调用原 parse_bin_info 并补充 HZC 头部信息
+
+	进度按条目数折成两段：`parse_bin_info` 里的「识别类型」扫一遍条目，
+	这里补头部再扫一遍。内层报来的 total 乘 2、done 原样转出去，
+	前半段正好走满进度条的一半。
+	"""
+	if progress is None:
+		base_infos = parse_bin_info(input_file)
+	else:
+		def _inner(done, total, stage):
+			progress(done, total * 2, stage)
+		base_infos = parse_bin_info(input_file, progress=_inner)
+	n = len(base_infos)
 	with open(input_file, 'rb') as f:
-		for info in base_infos:
+		for i, info in enumerate(base_infos):
 			if info['type'] == 'hzc':
 				f.seek(info['offset'])
 				header_data = f.read(44)
@@ -170,22 +193,37 @@ def parse_bin_info_extended(input_file: str) -> list[dict]:
 					info.update({'image_type': 0, 'width': 0, 'height': 0, 'offset_x': 0, 'offset_y': 0, 'frame_count': 1})
 			else:
 				info.update({'image_type': None, 'width': 0, 'height': 0, 'offset_x': 0, 'offset_y': 0, 'frame_count': 1})
+			if progress is not None:
+				progress(n + i + 1, n * 2, "读图像头")
 	return base_infos
 
-def parse_dir_infos(folder: str | Path) -> list[dict]:
+def parse_dir_infos(folder: str | Path, progress: Callable[[int, int, str], None] | None = None) -> list[dict]:
 	"""
 	递归扫描文件夹，识别 HZC 图像文件（按 .hzc 后缀或 hzc1 文件头），
 	返回与 parse_bin_info_extended 兼容的信息列表。
 	每个元素额外含 'path'（文件绝对路径），offset 恒为 0，size 为文件大小。
+
+	进度分两段：「扫描目录」边数边报，此刻还不知道总共多少个，所以 total 报 0
+	表示不确定（界面据此走不确定态）；「读文件头」才有明确的 done/total。
 	"""
 	folder = Path(folder)
-	infos = []
+	paths = []
 	for p in sorted(folder.rglob('*')):
 		if not p.is_file():
 			continue
+		paths.append(p)
+		if progress is not None and len(paths) % 200 == 0:
+			progress(len(paths), 0, "扫描目录")
+	total = len(paths)
+	infos = []
+	if progress is not None:
+		progress(0, total, "读文件头")
+	for i, p in enumerate(paths):
 		with open(p, 'rb') as f:
 			header_data = f.read(44)
 		has_magic = len(header_data) >= 4 and header_data[:4] == b'hzc1'
+		if progress is not None:
+			progress(i + 1, total, "读文件头")
 		if not has_magic and p.suffix.lower() != '.hzc':
 			continue
 		header = parse_hzc_header_from_bytes(header_data) if has_magic else None

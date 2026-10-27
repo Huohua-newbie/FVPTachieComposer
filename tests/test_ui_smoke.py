@@ -504,14 +504,19 @@ async def run():
     app._parsing_gen = 7
     app._show_parsing_busy(8, "x.bin")
     assert app._busy_seq is None and not app.page.overlay, "快路径也被弹了横幅"
+    assert app.parse_progress.visible is False, "没到揭示时刻就把进度条亮出来了"
     app._show_parsing_busy(7, "x.bin")
     assert app._busy_seq == app._snack_seq, "慢路径没弹\"正在解析\""
+    # 进度条和这条提示同一时刻上场，此刻还不知道总数 → 不定态
+    assert app.parse_progress.visible is True and app.parse_progress.value is None, \
+        "\"正在解析\"弹了但进度条没跟上"
     await asyncio.sleep(2.4)
     assert app._snack_overlay in app.page.overlay, "busy 卡片不该自己消失"
     app._dismiss_snack(app._busy_seq)
     await asyncio.sleep(0.3)
     assert app._snack_overlay not in app.page.overlay
-    app._parsing_gen = None
+    app._end_parse_feedback()
+    assert app.parse_progress.visible is False, "解析收尾后进度条没收回去"
 
     # 方向键：列表项/按钮点过之后会持有焦点，e.control 不为空是常态而不是"在打字"，
     # 拿它当"焦点被占用"判断会把 ←/→ 全吞掉，帧切换直接失效。
@@ -806,6 +811,81 @@ async def run():
     assert app.input_file is None and app.empty_hint.visible is True
     assert app.role_thumb_cache == {} and _media._SRC_CACHE == {} and _media._THUMB_SRC_CACHE == {}, \
         "载出后图像缓存没清干净"
+
+    # ── 大资源载入的进度反馈 ───────────────────────────────────
+    # 小资源在进度条亮起来之前就解析完了，那条路全程安静；只有慢资源才把
+    # "正在解析"和进度条一起亮出来，状态栏右侧报阶段，收尾立刻收起。
+    import fvpapp.resources as _res
+
+    big = Path(tempfile.mkdtemp(prefix="ui_smoke_big_"))
+    for i in range(400):
+        make_hzc(big / f"CHR_翠_动作{i:03d}_私服.hzc")
+
+    raw, frames = [], []
+    real_scan, real_show = _res.parse_dir_infos, app._show_parse_progress
+
+    def counting_scan(path, progress=None):
+        def inner(done, total, stage):
+            raw.append((done, total, stage))
+            progress(done, total, stage)
+        return real_scan(path, progress=inner)
+
+    def spy(gen, done, total, stage):
+        frames.append((done, total, stage, app.parse_progress.visible))
+        real_show(gen, done, total, stage)
+
+    _res.parse_dir_infos = counting_scan
+    app._show_parse_progress = spy
+    old_delay = _res.BUSY_DELAY
+    _res.BUSY_DELAY = 0            # 400 个文件在小机器上也可能秒完，门槛降到 0 才保证走到慢路径
+    try:
+        await app._load_bin(str(big))
+    finally:
+        _res.BUSY_DELAY = old_delay
+        _res.parse_dir_infos = real_scan
+        del app._show_parse_progress
+
+    stages = {s for _, _, s in raw}
+    assert "扫描目录" in stages and "读文件头" in stages, f"阶段不全: {stages}"
+    assert raw[-1][0] == raw[-1][1] != 0, f"最后一帧没报满: {raw[-1]}"
+    head = [(d, t) for d, t, s in raw if s == "读文件头"]
+    assert all(b[0] >= a[0] for a, b in zip(head, head[1:])), "读文件头的计数倒着走了"
+    assert len({t for _, t in head}) == 1, "同一阶段里 total 会变，进度条会来回跳"
+    # 节流：四百次回调只该换来个位数帧——逐条刷会把事件循环淹了
+    assert len(raw) >= 400 and len(frames) < 60, \
+        f"引擎报了 {len(raw)} 次、UI 收到 {len(frames)} 帧，节流没生效"
+    assert any(f[3] for f in frames), "慢资源从头到尾没亮过进度条"
+    assert app.parse_progress.visible is False and app.parse_progress.value is None, \
+        "解析完了进度条还挂着（残影）"
+    assert app.status_meta.value == f"1 角色 · {len(app.file_infos)} 图像", \
+        f"状态栏停在解析文案: {app.status_meta.value}"
+
+    # UI 线程那一半不用起线程也能验：没到揭示时刻不画、代号不符自弃、
+    # total=0 是"还不知道总数"（不定态），文案不能写成 0/0。
+    app._parsing_gen, app._parse_shown = 21, False
+    app._show_parse_progress(21, 5, 400, "读文件头")
+    assert app.parse_progress.visible is False, "还没到揭示时刻就把进度条画出去了"
+    app._parse_shown = True
+    app._show_parse_progress(21, 5, 400, "读文件头")
+    assert app.parse_progress.value == 5 / 400, app.parse_progress.value
+    assert app.status_meta.value == "读文件头 5/400", app.status_meta.value
+    app._show_parse_progress(21, 30, 0, "扫描目录")
+    assert app.parse_progress.value is None, "total=0 该是不定态，不该给个具体比例"
+    assert app.status_meta.value == "扫描目录 30 个", app.status_meta.value
+    app._show_parse_progress(22, 399, 400, "读文件头")      # 上一轮解析的迟到帧
+    assert app.status_meta.value == "扫描目录 30 个", "过期代号的帧还在改状态栏"
+    app._end_parse_feedback()
+    assert (app._parsing_gen, app._parse_shown) == (None, False), "收尾没把解析代号作废"
+    assert app.parse_progress.visible is False and app.parse_progress.value is None, \
+        "收尾没清干净"
+
+    # 解析中途按下载出：进度条不能跟着带进初始态
+    app._parsing_gen = app._state_gen
+    app.parse_progress.visible = True
+    await app._unload_bin(None)
+    assert app.parse_progress.visible is False and app.parse_progress.value is None, \
+        "载出把亮着的进度条带进了初始态"
+    assert app.status_text.value == "就绪" and app.status_meta.value == ""
 
     print("UI_SMOKE_OK")
 

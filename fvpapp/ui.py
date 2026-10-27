@@ -278,6 +278,15 @@ class UiMixin:
         self.status_text = ft.Text("就绪", size=11, color=self.ink["text_dim"],
                                    max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
         self.status_meta = ft.Text("", size=11, color=self.ink["text_dim"])
+        # 大资源解析时才露脸的一条细进度条：value=None 是不定态
+        # （目录还在数有多少个文件的时候，确实不知道总共几步）。
+        self.parse_progress = ft.ProgressBar(
+            width=120,
+            height=14,
+            color=self.ink["accent"],
+            bgcolor=self.ink["line_soft"],
+            visible=False,
+        )
         # 成功提示右侧的「打开文件夹」，默认藏起来，只在刚做完导出/保存时露脸
         self.status_action = ft.Container(
             content=ft.Text("打开文件夹", size=11, color=self.ink["accent"]),
@@ -291,6 +300,7 @@ class UiMixin:
                 [
                     ft.Container(width=6, height=6, border_radius=3, bgcolor=self.ink["accent"]),
                     ft.Container(self.status_text, expand=True),
+                    self.parse_progress,
                     self.status_action,
                     self.status_meta,
                 ],

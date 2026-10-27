@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import sys
+import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -55,6 +56,7 @@ from .theme import (
     PART_HINT_EMPTY,
     PART_HINT_IDLE,
     PART_STRIP_H,
+    PROGRESS_PUSH_S,
     RADIUS_PANEL,
     RADIUS_STAGE,
     RADIUS_TILE,
@@ -122,13 +124,35 @@ class ResourceMixin:
         # 完成时再用结果替换它（成功 1 秒自退，失败常驻）。
         self._parsing_gen = gen
         self._busy_seq = None
+        self._parse_shown = False
         self._later(BUSY_DELAY, self._show_parsing_busy, gen, Path(path).name)
+
+        loop = self._loop
+        pushed = [0.0, None]  # 上一次推送的时刻与阶段名
+
+        def report(done, total, stage):
+            """解析线程调用：只把最新一帧丢回 UI 线程，自己一个控件都不碰。
+
+            九千条就是九千次回调，逐条刷会把事件循环淹了；所以同阶段内按
+            PROGRESS_PUSH_S 节流，换阶段和最后一步立刻推。
+            """
+            now = time.monotonic()
+            if stage == pushed[1] and done != total and now - pushed[0] < PROGRESS_PUSH_S:
+                return
+            pushed[0] = now
+            pushed[1] = stage
+            if loop is None:
+                return
+            try:
+                loop.call_soon_threadsafe(self._show_parse_progress, gen, done, total, stage)
+            except Exception:
+                log.debug("忽略异常（report）", exc_info=True)
 
         def work():
             if Path(path).is_dir():
-                infos = parse_dir_infos(path)
+                infos = parse_dir_infos(path, progress=report)
             else:
-                infos = parse_bin_info_extended(path)
+                infos = parse_bin_info_extended(path, progress=report)
             hier = {}
             for info in infos:
                 if info["type"] != "hzc":
@@ -149,14 +173,14 @@ class ResourceMixin:
         try:
             infos, hier = await asyncio.to_thread(work)
         except Exception as ex:
-            self._parsing_gen = None
+            self._end_parse_feedback()
             self.status_text.value = prev_status
             self.status_meta.value = prev_meta
             self._snack(f"解析失败: {ex}", error=True)
             self._busy_seq = None
             self.page.update()
             return False
-        self._parsing_gen = None
+        self._end_parse_feedback()
         if gen != self._state_gen:
             # 解析期间被载出/被另一次载入接管：这份结果已经过期，丢弃。
             # 但"正在解析"的转圈卡片不能留着，否则它会一直转下去。
@@ -201,6 +225,8 @@ class ResourceMixin:
             return
         # 作废在途解析与缩略图解码，迟到的回调会因代数不符而自弃
         self._state_gen += 1
+        # 解析中途载出：进度条和"正在解析"都不能带进初始态
+        self._end_parse_feedback()
 
         self.input_file = None
         self.file_infos = []
@@ -655,3 +681,37 @@ class ResourceMixin:
         if gen != self._parsing_gen:
             return
         self._busy_seq = self._snack(f"正在解析 {name}…", busy=True)
+        # 进度条跟这条提示同一时刻亮：小文件在亮之前就解析完了，
+        # 快路径全程安静，不该闪一下进度条再收回去。
+        self._parse_shown = True
+        self.parse_progress.value = None
+        self.parse_progress.visible = True
+        self.page.update()
+
+
+    def _show_parse_progress(self, gen, done, total, stage):
+        """UI 线程：把解析线程报来的一帧画进状态栏。
+
+        total 为 0 表示"还不知道总共多少"（目录还在数文件），进度条走不定态，
+        文案只报已数到的个数，别写成 0/0。
+        """
+        if gen != self._parsing_gen or not self._parse_shown:
+            return
+        self.parse_progress.value = (done / total) if total else None
+        self.status_meta.value = f"{stage} {done}/{total}" if total else f"{stage} {done} 个"
+        self.status_meta.update()
+        self.parse_progress.update()
+
+
+    def _end_parse_feedback(self):
+        """解析收尾（成功、失败、被下一次载入接管都算）：反馈全部收起。
+
+        进度条长在常驻的状态栏上，收起这件事不能指望下一次 update 顺手做——
+        被接管那条路根本不会再走回这里刷新。
+        """
+        self._parsing_gen = None
+        self._parse_shown = False
+        if self.parse_progress.visible:
+            self.parse_progress.visible = False
+            self.parse_progress.value = None
+            self.page.update()

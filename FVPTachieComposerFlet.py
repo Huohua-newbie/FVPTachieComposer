@@ -173,6 +173,8 @@ class ComposerApp(UiMixin, StateMixin, ResourceMixin, ExportMixin, DropFeedbackM
         # busy 横幅：_parsing_gen 非空表示"这一代解析还在途中"，_busy_seq 是那条卡片
         self._parsing_gen = None
         self._busy_seq = None
+        # 状态栏那条进度条亮了吗：慢载入才亮，快路径全程不出现
+        self._parse_shown = False
         # 成功提示走状态栏：记住最近一次的目标文件夹与代数
         self._status_folder = None
         self._status_gen = 0
