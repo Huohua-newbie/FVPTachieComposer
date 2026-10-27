@@ -130,6 +130,52 @@ $RunnerIcon = Join-Path $Repo "build\flutter\windows\runner\resources\app_icon.i
 if (-not (Test-Path $RunnerIcon)) { throw "应用图标未生成: $RunnerIcon" }
 Write-Host "   图标已生成: app_icon.ico"
 
+# ---- 剔除 app\ 里的开发期杂物 ------------------------------------------
+# flet 把整个项目目录拷进 <exe>\app\，仓库根的一切都跟着进包：这次改日志
+# 落点后尤其明显（app\logs\ 里是开发机自己的日志，还有 .pytest_cache、
+# 截图目录、构建日志）。运行时真正需要的只有 fvpapp\*.pyc、入口 pyc 和
+# Shinku.ico（theme._app_icon 从 app\ 根读它），其余按名单剔除。
+$AppDir = Join-Path $OutDir "app"
+$StripNames = @(
+    "logs", ".pytest_cache", "__pycache__", "图片", "client", "tests", ".github",
+    ".gitignore", "build_flet_win.ps1", "build_win.ps1",
+    "CONTRIBUTING.md", "RELEASING.md", "README.md", "BUILD.md", "TESTING.md",
+    "pyproject.toml", "requirements.txt"
+)
+if (Test-Path $AppDir) {
+    $stripped = @()
+    foreach ($n in $StripNames) {
+        $p = Join-Path $AppDir $n
+        if (Test-Path $p) {
+            Remove-Item -Recurse -Force $p
+            $stripped += $n
+        }
+    }
+    Get-ChildItem -Path $AppDir -Filter "*.log" -File -ErrorAction SilentlyContinue | ForEach-Object {
+        Remove-Item -Force $_.FullName
+        $stripped += $_.Name
+    }
+    # 开发机跑 python 留下的 __pycache__（cpython-310/313 等）也整个带进包；
+    # 运行时用的是 app\fvpapp\*.pyc（flet 自己编译的那份），这些缓存纯属垃圾。
+    Get-ChildItem -Path $AppDir -Recurse -Directory -Filter "__pycache__" -Force -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            Remove-Item -Recurse -Force $_.FullName
+            $stripped += "pycache"
+        }
+    Write-Host "   已剔除 app\ 杂物: $(if ($stripped) { ($stripped | Select-Object -Unique) -join ', ' } else { '无' })"
+
+    # 剔除过头就把包废了，宁可不打包也别发一个起不来的包
+    foreach ($need in @("fvpapp", "Shinku.ico")) {
+        if (-not (Test-Path (Join-Path $AppDir $need))) {
+            throw "运行时需要 $need，但它不在 $AppDir —— 剔除名单配错了"
+        }
+    }
+    if (-not (Get-ChildItem -Path $AppDir -Recurse -File |
+              Where-Object { $_.Name -like "FVPTachieComposerFlet.*" })) {
+        throw "入口模块不在 app\ 里 —— 剔除名单配错了"
+    }
+}
+
 # ---- 打包 + 校验和 -----------------------------------------------------
 $DistDir = Join-Path $Repo "dist"
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
