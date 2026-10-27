@@ -116,7 +116,7 @@ class FakePage:
         return None
 
 
-def make_hzc(path, image_type=1, w=8, h=8, frames=1):
+def make_hzc(path, image_type=1, w=8, h=8, frames=1, salt=0):
     head = bytearray(44)
     head[0:4] = b"hzc1"
     struct.pack_into("<H", head, 18, image_type)
@@ -128,20 +128,21 @@ def make_hzc(path, image_type=1, w=8, h=8, frames=1):
     stride = w * h * bpp
     # 纯线性序列的周期是 256，正好等于一帧的字节数，多帧会解出一堆一模一样的画面。
     # 混进帧号（i // stride）并取 251 为周期，翻帧断言才能真的看出画面变了。
-    body = bytes(((i % 251) * 7 + (i // stride) * 53) % 256 for i in range(need))
+    # salt 让"同名的另一份资源"画面确实不同：换资源串图与否只能这样验。
+    body = bytes(((i % 251) * 7 + (i // stride) * 53 + salt) % 256 for i in range(need))
     path.write_bytes(bytes(head) + zlib.compress(body))
 
 
-def build_fixture():
+def build_fixture(salt=0):
     tmp = Path(tempfile.mkdtemp(prefix="ui_smoke_"))
     for role in ("翠", "真紅"):
         for outfit in ("私服", "制服"):
             for action in ("基", "喜"):
-                make_hzc(tmp / f"CHR_{role}_{action}_{outfit}.hzc")
+                make_hzc(tmp / f"CHR_{role}_{action}_{outfit}.hzc", salt=salt)
                 make_hzc(tmp / f"CHR_{role}_{action}_{outfit}_表情.hzc",
-                         image_type=2, frames=3)
+                         image_type=2, frames=3, salt=salt)
     # 没有 _表情 变体的多帧底图：走「直接导出底图」那条退路
-    make_hzc(tmp / "CHR_翠_无_私服.hzc", image_type=2, frames=3)
+    make_hzc(tmp / "CHR_翠_无_私服.hzc", image_type=2, frames=3, salt=salt)
     return tmp
 
 
@@ -735,8 +736,76 @@ async def run():
     assert all(w.opacity == 1.0 for w in app._tree_wraps), "拖入打断错峰时留下了半透明的角色"
     app._drop_armed = False
 
+    # ── 缩略图缓存 ─────────────────────────────────────────────
+    # 三个缓存的键都只带文件名（角色名、mini_<文件名>_<尺寸>、("part"/"base", 文件名, 帧号)），
+    # 而不同 bin / 不同拆包目录里文件名撞车是常态：载入新资源时不清缓存，新资源就直接
+    # 拿到上一份的图（串图）。这里用"文件名一模一样、画面不同"的两份资源来验。
+    from fvpapp import media as _media
+
+    def _role_thumb_src(role):
+        w = app.role_thumb_cache.get(role)
+        if w is None:
+            return None
+        return getattr(w, "src", None) or getattr(getattr(w, "content", None), "src", None)
+
+    def _strip_srcs():
+        return [getattr(c.content, "src", None) for c in app.thumb_list.controls]
+
+    decoded = []
+    real_read = app._read_first_frame
+    app._read_first_frame = lambda info: (decoded.append(info["filename"]), real_read(info))[1]
+    try:
+        target = next(i for i in app.file_infos if i["filename"] == "CHR_翠_喜_私服")
+        await app._select_action(target)
+        await asyncio.sleep(0.6)                       # 底图与差分条都在后台解
+        base_a, strip_a = app.base_image.src, _strip_srcs()
+        assert base_a.startswith("data:image/") and strip_a, "底图或差分条没出来"
+        role_a = _role_thumb_src("翠")
+
+        # 角色/服装现在才展开：这些层的缩略图此前不该提前解码
+        for role in sorted(app.hierarchy):
+            app._tree_toggles[("role", role)][1](None)
+        for role in sorted(app.hierarchy):
+            for outfit in sorted(app.hierarchy[role]):
+                app._tree_toggles[("outfit", f"{role}/{outfit}")][1](None)
+        await asyncio.sleep(0.6)
+        first = len(decoded)
+        assert first > 0, "展开后一张缩略图都没解码，这条断言没走到路径"
+
+        # 换主题会整棵重建树并恢复展开态：解过的不能再解一遍
+        await app._toggle_theme(None)
+        await asyncio.sleep(0.6)
+        assert len(decoded) == first, f"重建树又解码了 {len(decoded) - first} 张缩略图"
+
+        # 卡片上写的自测口径：整批收起再展开，第二次不重复解码
+        roles = sorted(app.hierarchy)
+        for role in roles:
+            app._tree_toggles[("role", role)][1](None)
+        for role in roles:
+            app._tree_toggles[("role", role)][1](None)
+        await asyncio.sleep(0.4)
+        assert len(decoded) == first, f"收起再展开又解码了 {len(decoded) - first} 张缩略图"
+
+        # 换资源：同名不同画面，角色/服装/动作/底图/差分条都要跟着换
+        other = build_fixture(salt=90)
+        await app._load_bin(str(other))
+        await asyncio.sleep(0.6)
+        assert _role_thumb_src("翠") is not None, "新资源的角色缩略图没出来"
+        assert _role_thumb_src("翠") != role_a, "换资源后角色缩略图还是上一份的（同名串图）"
+        assert _media._SRC_CACHE == {}, "换资源后底图/合成缓存还留着上一份的（按文件名索引）"
+        assert _media._THUMB_SRC_CACHE == {}, "换资源后差分条缓存还留着上一份的（按文件名索引）"
+        target_b = next(i for i in app.file_infos if i["filename"] == "CHR_翠_喜_私服")
+        await app._select_action(target_b)
+        await asyncio.sleep(0.6)
+        assert app.base_image.src != base_a, "换资源后同一动作的底图还是上一份的"
+        assert _strip_srcs() != strip_a, "换资源后差分条还是上一份的"
+    finally:
+        app._read_first_frame = real_read
+
     await app._unload_bin(None)  # 幂等收尾：第二次载出同样干净
     assert app.input_file is None and app.empty_hint.visible is True
+    assert app.role_thumb_cache == {} and _media._SRC_CACHE == {} and _media._THUMB_SRC_CACHE == {}, \
+        "载出后图像缓存没清干净"
 
     print("UI_SMOKE_OK")
 

@@ -5,7 +5,7 @@
 ## 无头自检（不需要 GUI，先跑这几个）
 
 ```bash
-python tests/test_ui_smoke.py          # 用真实 flet 搭整棵树，查控件参数与滚动条留槽
+python tests/test_ui_smoke.py          # 用真实 flet 搭整棵树，查控件参数、滚动条留槽、缓存换资源即失效
 python tests/test_thumb_threading.py   # 假 flet，查缩略图解码仍在后台线程、update 回 UI 线程
 python tests/test_window_memory.py     # 窗口偏好：读不到回默认、坐标出界不还原、最大化不覆盖几何
 python tests/test_crashlog.py          # 日志落盘：目录解析、轮转、不可写时不抛异常
@@ -33,6 +33,7 @@ python .github/selfcheck.py            # 解析与差分合成的纯逻辑（不
 
 - [ ] 打开 `.bin`：状态栏显示“角色数 / 图像数”正确
 - [ ] 三层树（角色→服装→动作）逐层展开，箭头右→下旋转动画正常，列表即时展开无卡顿
+- [ ] 载出后换另一份 `.bin`（或同一个角色名的另一份素材）：树里、底图、差分条显示的都是新资源的图，不残留上一份（同名动作串图）
 
 ## 打开散装 HZC 文件夹
 
@@ -57,3 +58,5 @@ python .github/selfcheck.py            # 解析与差分合成的纯逻辑（不
 ## 性能
 
 - [ ] 打开 graph_bs 级别目录（~900 文件）树秒开，缩略图渐进补齐，后台无长时间单核满载
+- [ ] 展开几个角色 → 全部收起 → 再展开：第二次秒开（缩略图不重新解码）；来回切角色、切动作同理
+- [ ] 切深浅主题（整棵重建树）后再展开：不重新解码已有的缩略图

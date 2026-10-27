@@ -279,6 +279,7 @@ class StateMixin:
             datas = _part_thumb_srcs(
                 self.part_info.get("filename") if self.part_info else None,
                 self.part_imgs,
+                self._cache_token,
             )
             for idx, data in enumerate(datas):
                 self.thumb_list.controls.append(self._make_thumb(data, idx))

@@ -101,8 +101,15 @@ def _cached_thumb(key: tuple, img: Image.Image, size: int) -> str:
     return _cached_src(_THUMB_SRC_CACHE, key, img, lambda im: _thumb_bytes(im, size), _THUMB_SRC_CACHE_MAX)
 
 
-def _part_thumb_srcs(filename: str, imgs: list[Image.Image]) -> list[str]:
-    """一次算好一批差分帧的缩略图 data URI（放在线程里跑，别占 UI 事件循环）。"""
+def _part_thumb_srcs(filename: str, imgs: list[Image.Image], token: int) -> list[str]:
+    """一次算好一批差分帧的缩略图 data URI（放在线程里跑，别占 UI 事件循环）。
+
+    token 是调用方在 UI 线程上取到的"当前资源"标记：这一批要是回来得太晚、
+    中间用户已经换了文件，就只算不存——否则上一份资源的图会以同一个文件名
+    赖在缓存里，新资源点开同名动作就是串图。
+    """
+    if token != _CACHE_TOKEN:
+        return [_thumb_bytes(img, THUMB) for img in imgs]
     return [_cached_thumb(("part", filename, i), img, THUMB) for i, img in enumerate(imgs)]
 
 
@@ -122,5 +129,24 @@ _SRC_CACHE = OrderedDict()
 _SRC_CACHE_MAX = 24
 _THUMB_SRC_CACHE = OrderedDict()
 _THUMB_SRC_CACHE_MAX = 256
+
+# 缓存的"代号"：两个缓存都只按文件名索引，而不同 BIN 里完全可能有一模一样的
+# 动作名（同一套素材换皮、或者干脆是同一个角色的两份导出）。代号每换一次资源
+# 自增一次，后台线程算完回来先对代号，对不上就只返回结果、不写缓存。
+_CACHE_TOKEN = 0
+
+
+def reset_image_caches() -> int:
+    """载入 / 载出另一份资源时调用：丢掉所有按文件名索引的图，返回新代号。
+
+    返回值要存到调用方身上（`ComposerApp._cache_token`），后面每次往线程池里
+    丢编码任务都带上它。
+    """
+    global _CACHE_TOKEN
+    _SRC_CACHE.clear()
+    _THUMB_SRC_CACHE.clear()
+    _CACHE_TOKEN += 1
+    return _CACHE_TOKEN
+
 
 EXPR_SUFFIXES = _expr_suffixes()

@@ -43,6 +43,7 @@ from .media import (
     _make_thumb_widget,
     _part_thumb_srcs,
     _thumb_bytes,
+    reset_image_caches,
 )
 from .theme import (
     ANIM_ROW,
@@ -169,6 +170,7 @@ class ResourceMixin:
         self.hierarchy = hier
         self.selected_info = None
         self.selected_filename = None
+        self._drop_image_caches()
         self._clear_previews()
         # 只在"真的载入了一份新东西"时错峰浮入；换主题走的是默认整棵直出，
         # 不然每切一次深浅色都要把树重播一遍动画。
@@ -207,7 +209,7 @@ class ResourceMixin:
         self.selected_filename = None
         self.base_idx = 0
         self.part_idx = 0
-        self.role_thumb_cache = {}
+        self._drop_image_caches()
 
         self._clear_previews()
         # _render_tree 只会把 empty_hint 藏起来，恢复必须在这里做（回初始态的根因点）
@@ -226,6 +228,17 @@ class ResourceMixin:
         self._set_status("就绪")
         self.page.update()
         self._chime()
+
+
+    def _drop_image_caches(self):
+        """换资源 / 载出：把所有按文件名索引的图缓存整个丢掉。
+
+        三处缓存（底图与合成、树里的迷你缩略图、差分条）的 key 里都只有文件名，
+        没有"是哪一份资源"，而不同 BIN 出现同名动作太正常了——同一角色的两份
+        导出、换皮素材。不清的话新资源点开同名动作，看到的还是上一份的图。
+        """
+        self.role_thumb_cache = {}
+        self._cache_token = reset_image_caches()
 
 
     def _clear_previews(self):
@@ -262,8 +275,15 @@ class ResourceMixin:
             pass
 
 
-    def _push_thumb(self, placeholder, widget, cache_key):
-        """必须在 UI 线程执行：替换占位内容并做控件级精确推送。"""
+    def _push_thumb(self, placeholder, widget, cache_key, token):
+        """必须在 UI 线程执行：替换占位内容并做控件级精确推送。
+
+        token 在这里对而不是在解码线程对上：解码线程对完还可能排在队列里，
+        等它跑回来时资源已经换了——占位控件早不在新树里，缓存也清空了，
+        这时候再写进去就是给新资源的同名动作挂上上一份的图。
+        """
+        if token != self._cache_token:
+            return
         try:
             self.role_thumb_cache[cache_key] = widget
             placeholder.content = widget
@@ -279,6 +299,7 @@ class ResourceMixin:
     def _queue_thumb(self, placeholder, info, size, cache_key):
         """后台线程只做解码；完成后经事件循环把替换+刷新调度回 UI 线程。"""
         gen = self._state_gen  # 解码期间若载出/换文件，结果作废
+        token = self._cache_token
 
         def job():
             try:
@@ -298,12 +319,12 @@ class ResourceMixin:
             loop = getattr(self, "_loop", None)
             if loop is not None:
                 try:
-                    loop.call_soon_threadsafe(self._push_thumb, placeholder, widget, cache_key)
+                    loop.call_soon_threadsafe(self._push_thumb, placeholder, widget, cache_key, token)
                     return
                 except Exception:
                     log.debug("忽略异常（job）", exc_info=True)
                     pass
-            self._push_thumb(placeholder, widget, cache_key)
+            self._push_thumb(placeholder, widget, cache_key, token)
         _THUMB_POOL.submit(job)
 
 
@@ -531,7 +552,7 @@ class ResourceMixin:
             return
 
         # 缩略图缩放 + PNG/base64 编码也丢线程里：几十帧在 UI 线程上做会明显掉帧
-        datas = await asyncio.to_thread(_part_thumb_srcs, part_info.get("filename"), imgs)
+        datas = await asyncio.to_thread(_part_thumb_srcs, part_info.get("filename"), imgs, self._cache_token)
         if gen != self._state_gen:
             return
 

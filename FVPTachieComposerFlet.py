@@ -111,6 +111,9 @@ class ComposerApp(UiMixin, StateMixin, ResourceMixin, ExportMixin, DropFeedbackM
         self.base_only = False
         self.thumb_refs = []
         self.role_thumb_cache = {}
+        # 图缓存的资源代号：图都按文件名索引，换一份 BIN 后代号 +1，
+        # 在途的编码任务回来时对不上号就不写缓存，免得同名动作串图。
+        self._cache_token = 0
         # 树的展开状态记在 app 上而不是 tile 闭包里，
         # 这样换主题整树重建后能原样展开回去（否则用户展开的角色/服装会被强制收起）。
         self.open_roles = set()
