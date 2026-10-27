@@ -31,8 +31,8 @@
 | --- | --- |
 | 功能**现在**怎么工作（改代码前先读） | [`README.md`](README.md) —— **唯一的功能说明**，跟代码一起改 |
 | 功能该怎么设计、边界怎么定 | 飞书「FVP 功能讨论区」（话题群，一个功能一个话题） |
-| 每个改动**为什么**这么改、放弃了什么 | 飞书[变更日志](https://ecn4wyos4h4e.feishu.cn/base/MMSfbYuxIaYOHRseXdEcZE5EnCd?view=vewucl6Ua1)（只记决策和用户能感觉到的变化，重构不记） |
-| 谁在做什么 | 飞书[任务看板](https://ecn4wyos4h4e.feishu.cn/base/XL78b251jaAtvksf3QMcNNCTn8g) |
+| 每个改动**为什么**这么改、放弃了什么 | 飞书[协作表 · 变更](https://ecn4wyos4h4e.feishu.cn/base/XL78b251jaAtvksf3QMcNNCTn8g?table=tblVrPehcX05cU4e&view=vewTJLNm7t)（只记决策和用户能感觉到的变化，重构不记） |
+| 谁在做什么 | 飞书[协作表 · 任务](https://ecn4wyos4h4e.feishu.cn/base/XL78b251jaAtvksf3QMcNNCTn8g?table=tblKW2gbzH5nFNow&view=vewNjmSyHu) |
 
 **功能说明只有 README 一份**，没有第二个文档需要同步。讨论在飞书，但**聊天记录不算数** —— 定下来的结论必须回写 README，否则等于没定。
 
