@@ -84,9 +84,11 @@ def main():
             sys.executable = str(tmp / "FVP" / "FVPTachieComposer.exe")
             cl._PKG_DIR = pkg.resolve()
             check("flet 打包态认 exe 所在目录", cl.app_root() == tmp / "FVP")
+            check("flet 打包态 banner 报「打包态 是」", cl.is_packaged() is True)
         finally:
             sys.executable = real_exe
             cl._PKG_DIR = real_pkg
+        check("源码运行不算打包态", cl.is_packaged() is False)
         # 根目录写不进去（装进 Program Files、只读介质）才退回 LOCALAPPDATA
         blocker = tmp / "not-a-dir"
         blocker.write_text("", encoding="utf-8")

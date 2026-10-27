@@ -64,17 +64,22 @@ _atexit_done = False
 _PKG_DIR = Path(__file__).resolve().parent  # fvpapp/ 所在目录
 
 
-def app_root() -> Path:
-    """应用根目录：打包态是 exe 所在目录，源码运行是仓库根。
+def is_packaged() -> bool:
+    """是否跑在打包产物里。
 
-    flet 的 Windows 包用内嵌解释器跑 `.pyc`，**不设 `sys.frozen`**，代码树
-    落在 `<exe>\\app\\fvpapp\\` 下；只认 `sys.frozen` 会把日志写进 `app\\` 里。
+    flet 的 Windows 包用内嵌解释器跑 `.pyc`，**不设 `sys.frozen`**，代码树落在
+    `<exe>\\app\\fvpapp\\` 下；所以两种形态都要认，否则 banner 会把打包态误报成
+    「源码运行」，日志目录也会退到代码树里。
     """
-    exe_dir = Path(sys.executable).resolve().parent
     if getattr(sys, "frozen", False):
-        return exe_dir
-    if _PKG_DIR.parent == exe_dir / "app":
-        return exe_dir
+        return True
+    return _PKG_DIR.parent == Path(sys.executable).resolve().parent / "app"
+
+
+def app_root() -> Path:
+    """应用根目录：打包态是 exe 所在目录，源码运行是仓库根。"""
+    if is_packaged():
+        return Path(sys.executable).resolve().parent
     return _PKG_DIR.parent
 
 
@@ -241,14 +246,14 @@ def _enable_faulthandler(path: Path) -> None:
 
 
 def _banner(path: Path) -> str:
-    frozen = getattr(sys, "frozen", False)
+    packaged = is_packaged()
     lines = [
         "=" * 62,
         f" {APP_NAME} {__version__}  启动于 {datetime.now():%Y-%m-%d %H:%M:%S}",
         "=" * 62,
         f"版本      : {__version__}",
         f"Python    : {sys.version.split()[0]}  {platform.machine()}",
-        f"打包态    : {'是' if frozen else '否（源码运行）'}",
+        f"打包态    : {'是' if packaged else '否（源码运行）'}",
         f"平台      : {platform.platform()}",
         f"工作目录  : {os.getcwd()}",
         f"命令行    : {sys.argv}",
