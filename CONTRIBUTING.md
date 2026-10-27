@@ -25,15 +25,16 @@
 
 其他都可以商量，这几条不商量。
 
-## 文档在哪（都在飞书）
+## 文档在哪
 
 | 要什么 | 去哪 |
 | --- | --- |
-| 功能**现在**怎么工作（改代码前先读） | [功能说明书](https://ecn4wyos4h4e.feishu.cn/docx/H95KdirR9owgMwxARPgcQKoVnhc) |
-| 每个改动**为什么**这么改 | [变更日志](https://ecn4wyos4h4e.feishu.cn/base/MMSfbYuxIaYOHRseXdEcZE5EnCd?view=vewucl6Ua1)（可按版本 / 按功能筛） |
-| 谁在做什么 | [任务看板](https://ecn4wyos4h4e.feishu.cn/base/XL78b251jaAtvksf3QMcNNCTn8g) |
+| 功能**现在**怎么工作（改代码前先读） | [`README.md`](README.md) —— **唯一的功能说明**，跟代码一起改 |
+| 功能该怎么设计、边界怎么定 | 飞书「FVP 功能讨论区」（话题群，一个功能一个话题） |
+| 每个改动**为什么**这么改 | 飞书[变更日志](https://ecn4wyos4h4e.feishu.cn/base/MMSfbYuxIaYOHRseXdEcZE5EnCd?view=vewucl6Ua1)（可按版本 / 按功能筛） |
+| 谁在做什么 | 飞书[任务看板](https://ecn4wyos4h4e.feishu.cn/base/XL78b251jaAtvksf3QMcNNCTn8g) |
 
-**GitHub 只放代码。** 功能文档和变更记录只在飞书，仓库里不留副本 —— 两份一定对不上，还得多一次同步。
+**功能说明只有 README 一份**，没有第二个文档需要同步。讨论在飞书，但**聊天记录不算数** —— 定下来的结论必须回写 README，否则等于没定。
 
 ## 什么算「做完了」
 
@@ -42,7 +43,7 @@
 1. 四个测试跑绿（见下）
 2. **变更日志加了一行**：改了什么 / 为什么 / 关联（提交或 PR）/ 谁改的
    - 重构、性能、内部整理这种用户感觉不到的，也要加，`类型` 选「内部」
-3. 用户能感觉到的行为变了 → 功能说明书里对应那个 `### F编号` 小节也改了
+3. 用户能感觉到的行为变了 → `README.md` 对应小节也改了（同一个提交里改）
 
 只改代码不改文档 = 没做完。
 

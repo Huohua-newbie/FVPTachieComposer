@@ -56,6 +56,9 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - **载入**：把 `.bin` / HZC 文件夹拖进窗口，或点「角色库」标题栏的图标，或把文件拖到 exe 图标上启动即载入
 - **载出**：一键回到初始状态，换资源不用重开程序
 - **主题**：深浅两套配色一键切换（窗口标题栏右上角图标或按 `L`），当前浏览、选中的帧与预览全部保留
+- **成功提示走状态栏**：保存 / 导出 / 载入 / 载出成功后，底部状态栏显示结果并播一声轻提示音，不弹浮层打断操作（设 `FVP_SOUND=0` 可关掉声音）
+- **启动即见画面**：启动时先显示浅色底 +「正在载入界面…」，不会出现「黑屏一下再突然亮起来」
+- **记住上次的文件夹**：打开和保存对话框各自记住上次用过的目录，下次直接落在那里
 
 ## 界面
 
@@ -71,6 +74,19 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - Windows 10 / 11 64-bit
 - 无需安装 Python 或其他任何依赖
 
+## 出问题了怎么反馈
+
+程序会把异常写进日志文件，报 bug 时**把这个文件一起附上**，比描述半天管用：
+
+```
+%LOCALAPPDATA%\FVPTachieComposer\logs\
+```
+
+- 一次运行一个文件，文件名带版本号和启动时间（例如 `fvptachie-2.2.3-20261027-153012.log`）
+- 里面是版本、系统信息、调用栈；**不含你的立绘资源**
+- 只保留最近 20 次，不会越堆越多
+- 界面上原本的错误提示不会因为日志而改变 —— 日志只是多留一份证据
+
 ## 更新日志
 
 见 [GitHub Releases](https://github.com/Huohua-newbie/FVPTachieComposer/releases)。
@@ -82,7 +98,7 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - 入口：`FVPTachieComposerFlet.py`（UI）+ `FVPTachieComposer.py`（HZC / BIN 解析与合成）
 - 开发运行：`py -3.13 FVPTachieComposerFlet.py <资源路径>`，原因见 [`tests/DEV.md`](tests/DEV.md)
 - 构建发布：见 [`BUILD.md`](BUILD.md)
-- 功能说明与变更记录在飞书：[功能说明书](https://ecn4wyos4h4e.feishu.cn/docx/H95KdirR9owgMwxARPgcQKoVnhc)、
-  [变更日志](https://ecn4wyos4h4e.feishu.cn/base/MMSfbYuxIaYOHRseXdEcZE5EnCd)；协作流程见 [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- **这份 README 就是功能说明**：用户能感觉到的行为变了，就在同一个提交里改它
+- 协作流程（分支、PR、什么算做完了）见 [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - 自检：`python tests/test_ui_smoke.py`、`python tests/test_thumb_threading.py`、
   `python tests/test_crashlog.py`、`python .github/selfcheck.py`；人工冒烟清单见 [`TESTING.md`](TESTING.md)
