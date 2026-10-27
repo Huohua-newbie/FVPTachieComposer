@@ -16,11 +16,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
 
-import flet as ft
+# ── 日志 / 崩溃落盘 ───────────────────────────────────────
+# 必须在 `import flet` 之前装：flet 导入期或客户端拉起阶段出的错也要留证据。
+# 控制台行为不变（默认 WARNING 以上），文件里则是完整的 DEBUG。
+# 位置：%LOCALAPPDATA%\FVPTachieComposer\logs\fvptachie-<版本>-<时间>.log
+# 用户报错时让他把这个文件发过来就行，界面上原本的提示一律不改。
+from fvpapp.crashlog import _flush as _flush_log  # noqa: F401
+from fvpapp.crashlog import install as _install_logging
+from fvpapp.crashlog import install_asyncio_handler
+
+log = logging.getLogger("fvptachie")
+LOG_PATH = _install_logging()
+
+import flet as ft  # noqa: E402  （要装在日志之后）
 
 from fvpapp.drop import DropFeedbackMixin
 from fvpapp.dropzone import (  # noqa: F401  （测试/脚本从这里取）
@@ -69,19 +80,6 @@ from fvpapp.theme import (  # noqa: F401  （历史脚本按老路径取这些�
     _tip,
 )
 from fvpapp.ui import UiMixin
-
-# ── 日志 ──────────────────────────────────────────────────
-# 桌面打包态没有控制台（flet 客户端会把 stdout/stderr 转存到 console.log）。
-# 默认只放 WARNING 及以上（被吞的异常走 log.debug，需要时设 FVP_DEBUG=1 或
-# FVP_LOG_LEVEL=INFO/DEBUG 才打全），打进 stderr 也就是 console.log——出问题时能
-# 回溯，正常运行不刷屏。
-log = logging.getLogger("fvptachie")
-log.addHandler(logging.NullHandler())
-_LOG_LEVEL = os.environ.get("FVP_LOG_LEVEL") or ("DEBUG" if os.environ.get("FVP_DEBUG") else "WARNING")
-logging.basicConfig(
-    level=getattr(logging, _LOG_LEVEL.upper(), logging.WARNING),
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
 
 
 class ComposerApp(UiMixin, StateMixin, ResourceMixin, ExportMixin, DropFeedbackMixin):
@@ -176,11 +174,21 @@ class ComposerApp(UiMixin, StateMixin, ResourceMixin, ExportMixin, DropFeedbackM
 
 async def main(page: ft.Page):
     try:
+        install_asyncio_handler(asyncio.get_running_loop())
+    except RuntimeError:
+        pass
+    try:
         app = ComposerApp(page)
     except Exception as ex:
-        page.add(ft.Text(f"初始化失败: {ex}", color=ft.Colors.ERROR))
-        page.update()
+        # 界面照旧提示（这是用户看得见的那一句），同时把栈留在日志文件里
+        log.exception("界面初始化失败")
+        try:
+            page.add(ft.Text(f"初始化失败: {ex}", color=ft.Colors.ERROR))
+            page.update()
+        except Exception:
+            log.exception("初始化失败的提示都没能显示出来")
         return
+    log.info("界面已就绪")
     # 命令行/拖到程序图标打开：自动载入首个存在的 .bin/目录参数。
     # dev 态参数在 argv[1:]（argv[0] 是脚本自身）；打包态 SeriousPython 把
     # 用户参数从 argv[0] 起放（实测 argv=['D:\\...\\graph_bs.bin']，无脚本名）。
@@ -200,4 +208,12 @@ async def main(page: ft.Page):
 
 
 if __name__ == "__main__":
-    ft.run(main)
+    try:
+        ft.run(main)
+    except BaseException:
+        # 启动/运行期直接抛到这里（连 flet 的崩溃页都没机会显示）：
+        # 日志先落地，再把原异常原样抛回去——PyInstaller 的崩溃弹窗、
+        # 控制台 traceback 全都保持原来的行为。
+        log.critical("启动或运行失败，程序退出", exc_info=True)
+        _flush_log()
+        raise

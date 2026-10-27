@@ -20,7 +20,7 @@
 
 对**维护者**：
 
-3. **直推 `main` 前把三个测试跑绿**（`test_ui_smoke` / `test_thumb_threading` / `selfcheck`），一次推送只做一件事。
+3. **直推 `main` 前把四个测试跑绿**（`test_ui_smoke` / `test_thumb_threading` / `test_crashlog` / `selfcheck`），一次推送只做一件事。
 4. **不要 `git push --force` 到 `main`** —— 协作者的分支是从它长出来的。
 
 其他都可以商量，这几条不商量。
@@ -62,10 +62,11 @@ py -3.13 FVPTachieComposerFlet.py
 ```bash
 python tests/test_ui_smoke.py
 python tests/test_thumb_threading.py
+python tests/test_crashlog.py
 python .github/selfcheck.py
 ```
 
-三个都过 = 环境和工作区都是干净的。
+四个都过 = 环境和工作区都是干净的。
 
 ---
 

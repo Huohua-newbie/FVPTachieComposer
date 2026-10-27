@@ -9,7 +9,7 @@
 | **MAJOR** | 不兼容的破坏性变更 | `2.x` → `3.0.0` |
 
 - 正式版本号**不带** `-beta`；只有明确还不稳定的预览版才用 Pre-release（并加 `-beta`）。
-- 版本号改 `pyproject.toml` 的 `[project].version`，同时同步 `BUILD.md` 示例与 `build_flet_win.ps1` 头部注释。
+- 版本号改 `pyproject.toml` 的 `[project].version`，同时同步 `fvpapp/version.py`（运行时读这一份，日志文件名用）、`BUILD.md` 示例与 `build_flet_win.ps1` 头部注释。漏改 `fvpapp/version.py` 会被 `tests/test_crashlog.py` 当场挡下。
 
 ## 发布节奏
 

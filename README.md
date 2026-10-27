@@ -83,4 +83,4 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - 开发运行：`py -3.13 FVPTachieComposerFlet.py <资源路径>`，原因见 [`tests/DEV.md`](tests/DEV.md)
 - 构建发布：见 [`BUILD.md`](BUILD.md)
 - 自检：`python tests/test_ui_smoke.py`、`python tests/test_thumb_threading.py`、
-  `python .github/selfcheck.py`；人工冒烟清单见 [`TESTING.md`](TESTING.md)
+  `python tests/test_crashlog.py`、`python .github/selfcheck.py`；人工冒烟清单见 [`TESTING.md`](TESTING.md)

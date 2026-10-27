@@ -27,13 +27,13 @@ def _expr_suffixes() -> tuple[str, ...]:
         try:
             raw = "表情".encode(enc)
         except Exception:
-            log.debug("忽略异常（_expr_suffixes）", exc_info=True)
+            # 编码探测失败是预期分支，不是"被吞的异常"：这里不记日志，
+            # 否则每次启动都会在日志文件里留下几条吓人的假 traceback。
             continue
         for dst in ("gbk", "big5", "cp1252"):
             try:
                 cands.add(raw.decode(dst))
             except Exception:
-                log.debug("忽略异常（_expr_suffixes）", exc_info=True)
                 pass
     return tuple(cands)
 
