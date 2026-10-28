@@ -1,0 +1,28 @@
+#!/bin/sh
+# 推送前同步带 Feishu-Change: 的提交；同步失败就拦下推送，避免协作者照着旧目标干活。
+# 安装：python scripts/install_feishu_hook.py
+# 离线应急跳过：FVP_FEISHU_SYNC=off git push（之后务必手动补跑同步）
+set -eu
+
+if [ "${FVP_FEISHU_SYNC:-}" = "off" ]; then
+  echo "feishu-sync: FVP_FEISHU_SYNC=off，本次跳过；记得手动跑 scripts/feishu_sync.py" >&2
+  exit 0
+fi
+
+cd "$(git rev-parse --show-toplevel)"
+
+if [ -n "${FVP_PYTHON:-}" ]; then
+  PY="$FVP_PYTHON"
+elif command -v python3 >/dev/null 2>&1; then
+  PY=python3
+elif command -v python >/dev/null 2>&1; then
+  PY=python
+elif command -v py >/dev/null 2>&1; then
+  PY="py -3.13"
+else
+  echo "feishu-sync: 找不到 Python；装一个或设置 FVP_PYTHON" >&2
+  exit 1
+fi
+
+# shellcheck disable=SC2086  # PY 可能是 "py -3.13" 这种带参数的命令
+$PY scripts/feishu_sync.py --pre-push

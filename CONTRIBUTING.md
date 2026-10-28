@@ -36,6 +36,17 @@
 
 **功能说明只有 README 一份**，没有第二个文档需要同步。讨论在飞书，但**聊天记录不算数** —— 定下来的结论必须回写 README，否则等于没定。
 
+## 需求变更先同步飞书，再继续写代码
+
+目标口径变了（验收标准、行为边界、测试期望），不要只在群里说一句：
+
+1. 写一份清单（模板 `feishu/change.example.json` → `feishu/changes/YYYY-MM-DD-短名.json`）
+2. `py -3.13 scripts/feishu_sync.py --manifest <清单> --dry-run` 看一遍
+3. 提交里带一行 `Feishu-Change: <清单路径>`，推送前钩子会自动改任务卡 / 测试表 / 变更表并通知群；同步失败会**拦下推送**
+
+每台机器先装一次钩子：`py -3.13 scripts/install_feishu_hook.py`。
+完整字段与应急开关见 [`feishu/README.md`](feishu/README.md)。
+
 ## 什么算「做完了」
 
 看板上一张卡改「已完成」之前：
@@ -90,6 +101,8 @@ python tests/test_ui_smoke.py
 python tests/test_thumb_threading.py
 python tests/test_parse_progress.py
 python tests/test_window_memory.py
+python tests/test_dialog_dirs.py
+python tests/test_feishu_sync.py
 python tests/test_crashlog.py
 python .github/selfcheck.py
 ```

@@ -1,0 +1,24 @@
+{
+  "base_token": "XL78b251jaAtvksf3QMcNNCTn8g",
+  "identity": "user",
+  "tables": {
+    "tasks": "tblKW2gbzH5nFNow",
+    "tests": "tblv1jwnniD8i0rs",
+    "changes": "tblVrPehcX05cU4e"
+  },
+  "fields": {
+    "task_acceptance": "验收标准",
+    "task_note": "负责人备注",
+    "test_result": "结果",
+    "test_note": "备注",
+    "change_date": "日期",
+    "change_link": "关联",
+    "change_version": "版本"
+  },
+  "notify": {
+    "chat_id": "oc_ba69c35210cb608abc374a906764996f",
+    "mentions": [
+      "ou_552feb80ced621cefac37d2493962a09"
+    ]
+  }
+}

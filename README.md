@@ -106,8 +106,10 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - 构建发布：见 [`BUILD.md`](BUILD.md)
 - **这份 README 就是功能说明**：用户能感觉到的行为变了，就在同一个提交里改它
 - 协作流程（分支、PR、什么算做完了）见 [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- 需求变更同步到飞书（推送前自动改任务/测试/变更表并通知群）见 [`feishu/README.md`](feishu/README.md)
 - 自检：`python tests/test_ui_smoke.py`、`python tests/test_thumb_threading.py`、
   `python tests/test_export_progress.py`、`python tests/test_thumb_cache.py`、
   `python tests/test_parse_progress.py`、`python tests/test_window_memory.py`、
-  `python tests/test_dialog_dirs.py`、`python tests/test_crashlog.py`、
-  `python .github/selfcheck.py`；人工冒烟清单见 [`TESTING.md`](TESTING.md)
+  `python tests/test_dialog_dirs.py`、`python tests/test_feishu_sync.py`、
+  `python tests/test_crashlog.py`、`python .github/selfcheck.py`；
+  人工冒烟清单见 [`TESTING.md`](TESTING.md)

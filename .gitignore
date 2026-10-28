@@ -19,3 +19,8 @@ tests/image_*.png
 图片/
 # 源码运行时日志就落在仓库根（打包态落在 exe 旁边）
 logs/
+
+# 飞书同步的本地状态：已同步清单与创建出来的 record id，不入库
+.feishu-sync/
+# 本机覆盖（chat_id / 提及名单 / 本地测试用 base_token），不入库
+feishu/local.json
