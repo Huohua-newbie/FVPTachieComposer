@@ -62,7 +62,7 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - **启动即见画面**：启动时先显示浅色底 +「正在载入界面…」，不会出现「黑屏一下再突然亮起来」
 - **记住上次的文件夹**：打开和保存对话框各自记住上次用过的目录，下次直接落在那里
 - **记住窗口**：窗口的大小、位置和最大化状态都按上次关掉程序时的样子还原，拖动/缩放之后不用等退出就记上了。偏好存在 `%LOCALAPPDATA%\FVPTachieComposer\settings.json`；删掉它，或者上次记下的坐标已经落在当前屏幕外（拔掉一块显示器），就回默认 1280×760
-- **缩略图解过就留着**：同一份资源里角色展开过、切走过再切回来，缩略图和差分条直接复用，不重新解码；换 `.bin` 或载出时这些缓存整个清空，所以同名动作显示的一定是新资源自己的图，不会串到上一份上
+- **缩略图解过就留着**：树缩略图按「资源指纹 + 条目名 + 尺寸」的 SHA1 落盘到 `%LOCALAPPDATA%\FVPTachieComposer\thumbcache`（`FVP_THUMB_CACHE` 可覆盖），最多 50 张、按最近使用淘汰，关掉程序再开同一份资源也直接命中；键里带着源文件路径、大小和 mtime，所以同名动作不会串到上一份资源上，源文件改过缓存自动失效。同一份资源里整帧解码结果也在内存里按 50 帧 LRU 复用，来回切动作不再重解整包；换 `.bin` 或载出时内存缓存清空，磁盘缓存按指纹各管各的
 - **大资源载入看得见进度**：解析超过约四分之一秒，底部状态栏才亮起进度条，右侧同时报阶段与已处理数（如「读文件头 1200/9000」）；小资源在进度条亮起来之前就解析完了，全程安静不闪条。解析完成、失败或中途载出，进度条立刻收起，不会留在状态栏里
 
 ## 界面
@@ -107,4 +107,5 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - **这份 README 就是功能说明**：用户能感觉到的行为变了，就在同一个提交里改它
 - 协作流程（分支、PR、什么算做完了）见 [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - 自检：`python tests/test_ui_smoke.py`、`python tests/test_thumb_threading.py`、
-  `python tests/test_export_progress.py`、`python tests/test_crashlog.py`、`python .github/selfcheck.py`；人工冒烟清单见 [`TESTING.md`](TESTING.md)
+  `python tests/test_export_progress.py`、`python tests/test_thumb_cache.py`、
+  `python tests/test_crashlog.py`、`python .github/selfcheck.py`；人工冒烟清单见 [`TESTING.md`](TESTING.md)

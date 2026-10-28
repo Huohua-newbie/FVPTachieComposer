@@ -26,6 +26,7 @@ from .engine import (
     parse_dir_infos,
 )
 
+from . import thumbcache
 from .dropzone import DROPZONE_ON, _custom_client_available, _dropzone, _dropzone_on, pick_drop_path
 from .media import (
     EXPR_SUFFIXES,
@@ -42,6 +43,7 @@ from .media import (
     _img_src,
     _is_expr,
     _make_thumb_widget,
+    _make_thumb_widget_from_src,
     _part_thumb_srcs,
     _thumb_bytes,
     reset_image_caches,
@@ -261,13 +263,17 @@ class ResourceMixin:
 
 
     def _drop_image_caches(self):
-        """换资源 / 载出：把所有按文件名索引的图缓存整个丢掉。
+        """换资源 / 载出：丢掉会话内的图缓存，释放上一份资源的整帧。
 
-        三处缓存（底图与合成、树里的迷你缩略图、差分条）的 key 里都只有文件名，
-        没有"是哪一份资源"，而不同 BIN 出现同名动作太正常了——同一角色的两份
-        导出、换皮素材。不清的话新资源点开同名动作，看到的还是上一份的图。
+        三处内存缓存（底图与合成、树里的迷你缩略图、差分条）的 key 里都只有
+        文件名，没有"是哪一份资源"，而不同 BIN 出现同名动作太正常了——同一
+        角色的两份导出、换皮素材。不清的话新资源点开同名动作，看到的还是上一份。
+
+        磁盘缩略图不在这里清：它的键自带资源指纹，多份资源可以安全共存；
+        换资源后仍然能按各自指纹命中。
         """
         self.role_thumb_cache = {}
+        thumbcache.clear_decoded()
         self._cache_token = reset_image_caches()
 
 
@@ -327,23 +333,16 @@ class ResourceMixin:
 
 
     def _queue_thumb(self, placeholder, info, size, cache_key):
-        """后台线程只做解码；完成后经事件循环把替换+刷新调度回 UI 线程。"""
+        """后台线程先查磁盘，未命中再解码；完成后经事件循环把替换+刷新调度回 UI。
+
+        磁盘键带资源指纹 + 文件名 + 尺寸，所以同名动作不会串图；写盘就在这个
+        工作线程里做，不占 UI 线程。
+        """
         gen = self._state_gen  # 解码期间若载出/换文件，结果作废
         token = self._cache_token
+        input_file = self.input_file
 
-        def job():
-            try:
-                img = self._read_first_frame(info)
-            except Exception:
-                log.debug("忽略异常（job）", exc_info=True)
-                return
-            if img is None:
-                return
-            try:
-                widget = _make_thumb_widget(img, size)
-            except Exception:
-                log.debug("忽略异常（job）", exc_info=True)
-                return
+        def deliver(widget):
             if gen != self._state_gen:
                 return  # 已载出（或换了文件）：占位控件不再属于当前树，缓存也已清
             loop = getattr(self, "_loop", None)
@@ -355,6 +354,36 @@ class ResourceMixin:
                     log.debug("忽略异常（job）", exc_info=True)
                     pass
             self._push_thumb(placeholder, widget, cache_key, token)
+
+        def job():
+            key = thumbcache.entry_key(info, size, input_file)
+            if key is not None:
+                png = thumbcache.load(key)
+                if png:
+                    try:
+                        deliver(_make_thumb_widget_from_src(thumbcache.data_uri(png), size))
+                    except Exception:
+                        log.debug("忽略异常（job/cache）", exc_info=True)
+                    else:
+                        return
+
+            try:
+                data, header = self._read_hzc_bytes(info)
+                img = self._read_first_frame(info, data, header)
+            except Exception:
+                log.debug("忽略异常（job）", exc_info=True)
+                return
+            if img is None:
+                return
+            try:
+                png = thumbcache.thumb_png(img, size)
+                widget = _make_thumb_widget_from_src(thumbcache.data_uri(png), size)
+            except Exception:
+                log.debug("忽略异常（job）", exc_info=True)
+                return
+            if key is not None:
+                thumbcache.save(key, png)
+            deliver(widget)
         _THUMB_POOL.submit(job)
 
 
@@ -392,8 +421,9 @@ class ResourceMixin:
         return data, header
 
 
-    def _read_first_frame(self, info):
-        data, header = self._read_hzc_bytes(info)
+    def _read_first_frame(self, info, data=None, header=None):
+        if data is None:
+            data, header = self._read_hzc_bytes(info)
         return hzc_decode_first_frame(data, header)
 
 
@@ -444,8 +474,15 @@ class ResourceMixin:
 
 
     def _read_pil_list(self, info):
+        """整帧解码；同一份内容按 SHA-1 复用，来回切动作不再重解整包。"""
         data, header = self._read_hzc_bytes(info)
-        return hzc_data_to_pil_list(data, header)
+        key = thumbcache.source_digest(data)
+        cached = thumbcache.get_decoded(key)
+        if cached is not None:
+            return cached
+        images = hzc_data_to_pil_list(data, header)
+        thumbcache.put_decoded(key, images)
+        return images
 
 
     async def _load_base(self, info):

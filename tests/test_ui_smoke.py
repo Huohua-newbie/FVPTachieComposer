@@ -7,6 +7,7 @@
 需要已安装 flet + Pillow：python3 tests/test_ui_smoke.py
 """
 import asyncio
+import hashlib
 import os
 import struct
 import sys
@@ -21,6 +22,11 @@ sys.path.insert(0, str(REPO))
 os.environ.setdefault(
     "FVP_SETTINGS_PATH",
     str(Path(tempfile.mkdtemp(prefix="ui_smoke_settings_")) / "settings.json"),
+)
+# 缩略图磁盘缓存同理：测试用独立目录，避免读到上一次运行留下的 50 张缓存
+os.environ.setdefault(
+    "FVP_THUMB_CACHE",
+    str(Path(tempfile.mkdtemp(prefix="ui_smoke_thumbcache_"))),
 )
 
 try:
@@ -129,7 +135,11 @@ def make_hzc(path, image_type=1, w=8, h=8, frames=1, salt=0):
     # 纯线性序列的周期是 256，正好等于一帧的字节数，多帧会解出一堆一模一样的画面。
     # 混进帧号（i // stride）并取 251 为周期，翻帧断言才能真的看出画面变了。
     # salt 让"同名的另一份资源"画面确实不同：换资源串图与否只能这样验。
-    body = bytes(((i % 251) * 7 + (i // stride) * 53 + salt) % 256 for i in range(need))
+    # 文件名也掺一点：同一份资源里不同动作是两张不同的图，否则整帧缓存
+    # 会（正确地）把同样字节当成同一张，切动作的断言就验不出东西。
+    name_salt = int(hashlib.sha1(path.name.encode("utf-8")).hexdigest()[:8], 16) % 251
+    body = bytes(((i % 251) * 7 + (i // stride) * 53 + salt + name_salt) % 256
+                 for i in range(need))
     path.write_bytes(bytes(head) + zlib.compress(body))
 
 
@@ -758,7 +768,9 @@ async def run():
 
     decoded = []
     real_read = app._read_first_frame
-    app._read_first_frame = lambda info: (decoded.append(info["filename"]), real_read(info))[1]
+    app._read_first_frame = lambda info, data=None, header=None: (
+        decoded.append(info["filename"]), real_read(info, data, header)
+    )[1]
     try:
         target = next(i for i in app.file_infos if i["filename"] == "CHR_翠_喜_私服")
         await app._select_action(target)
@@ -811,6 +823,8 @@ async def run():
     assert app.input_file is None and app.empty_hint.visible is True
     assert app.role_thumb_cache == {} and _media._SRC_CACHE == {} and _media._THUMB_SRC_CACHE == {}, \
         "载出后图像缓存没清干净"
+    from fvpapp import thumbcache as _tc
+    assert _tc.decoded_frames() == 0, "载出后整帧缓存还占着内存"
 
     # ── 大资源载入的进度反馈 ───────────────────────────────────
     # 小资源在进度条亮起来之前就解析完了，那条路全程安静；只有慢资源才把
@@ -878,6 +892,59 @@ async def run():
     assert (app._parsing_gen, app._parse_shown) == (None, False), "收尾没把解析代号作废"
     assert app.parse_progress.visible is False and app.parse_progress.value is None, \
         "收尾没清干净"
+
+    # ── 跨会话磁盘命中（50 张上限内的树缩略图）────────────────
+    # 换一个 App 实例、同一份资源、同一个 FVP_THUMB_CACHE：树里三级缩略图
+    # 都应直接命中磁盘，_read_first_frame 一次都不该再走。
+    app2 = ComposerApp(FakePage())
+    decoded2 = []
+    real_read2 = app2._read_first_frame
+    app2._read_first_frame = lambda info, data=None, header=None: (
+        decoded2.append(info["filename"]), real_read2(info, data, header)
+    )[1]
+    try:
+        await app2._load_bin(str(tmp))
+        for role in sorted(app2.hierarchy):
+            app2._tree_toggles[("role", role)][1](None)
+        for role in sorted(app2.hierarchy):
+            for outfit in sorted(app2.hierarchy[role]):
+                app2._tree_toggles[("outfit", f"{role}/{outfit}")][1](None)
+        await asyncio.sleep(1.0)
+        assert decoded2 == [], \
+            f"跨会话没命中磁盘缓存，又解码了 {len(decoded2)} 张: {decoded2[:5]}"
+    finally:
+        app2._read_first_frame = real_read2
+
+    # ── 卡片 2.4：来回切动作不重解整帧 ─────────────────────────
+    # 计数挂在真正干整包 zlib 的 hzc_data_to_pil_list 上（不是树里的首帧解码）。
+    app3 = ComposerApp(FakePage())
+    await app3._load_bin(str(tmp))
+    await asyncio.sleep(0.2)
+    calls = []
+    real_list = _res.hzc_data_to_pil_list
+
+    def counting_list(data, header):
+        calls.append(1)
+        return real_list(data, header)
+
+    _res.hzc_data_to_pil_list = counting_list
+    try:
+        first = next(i for i in app3.file_infos if i["filename"] == "CHR_翠_基_私服")
+        second = next(i for i in app3.file_infos if i["filename"] == "CHR_翠_喜_私服")
+        await app3._select_action(first)
+        await asyncio.sleep(0.4)
+        n_first = len(calls)
+        await app3._select_action(second)
+        await asyncio.sleep(0.4)
+        n_second = len(calls)
+        await app3._select_action(first)
+        await asyncio.sleep(0.4)
+        assert n_first >= 2, f"第一次选动作只解了 {n_first} 次，没走到整帧解码"
+        assert n_second > n_first, "换动作没有解新动作"
+        assert len(calls) == n_second, \
+            f"切回已看过的动作又整帧解码了 {len(calls) - n_second} 次"
+    finally:
+        _res.hzc_data_to_pil_list = real_list
 
     # 解析中途按下载出：进度条不能跟着带进初始态
     app._parsing_gen = app._state_gen
