@@ -574,6 +574,11 @@ async def run():
     # 所以尺寸/位置靠窗口事件记录。这里验的就是事件确实挂上了、并且会落盘。
     import fvpapp.settings as st
 
+    # 目录记忆要跨重启：退出时落盘成 dialogs 段（打包态只有 CLOSE 事件来得及，_close 也写）
+    app._write_dialog_dirs()
+    assert st.dialog_dirs() == {"import": str(tmp), "export": str(tmp / "export")}, \
+        f"对话框目录没落盘: {st.dialog_dirs()}"
+
     class _WinEvt:
         def __init__(self, t):
             self.type = t
@@ -647,6 +652,8 @@ async def run():
         sys.argv = old_argv
     assert app2.input_file == str(tmp), "argv 自动载入失效了"
     assert page2.added, "argv 启动路径未建树"
+    assert app2.export_dir == str(tmp / "export"), "重启后导出目录没接上"
+    assert app2.import_dir == str(tmp), "重启后导入目录没接上"
 
     # ── 无表情差分 → 直接导出底图 ──────────────────────────────
     # 只让看不让导出的状态是不完整的：没有 _表情 变体（或载入的不是立绘）时，

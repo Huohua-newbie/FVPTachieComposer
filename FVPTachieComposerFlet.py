@@ -64,6 +64,7 @@ from fvpapp.media import (  # noqa: F401  （历史脚本按老路径取这些�
     _thumb_bytes,
 )
 from fvpapp.resources import ResourceMixin
+from fvpapp.settings import dialog_dirs
 from fvpapp.state import StateMixin
 from fvpapp.theme import (  # noqa: F401  （历史脚本按老路径取这些常量）
     ANIM_ROW,
@@ -166,8 +167,10 @@ class ComposerApp(UiMixin, StateMixin, ResourceMixin, ExportMixin, DropFeedbackM
         self.page.services = [self.file_picker, self.clipboard]
         # 导入/导出各自记住自己的目录：Windows 原生对话框按进程记忆最后位置，
         # 不分别传 initial_directory 的话，导出一选完，下次打开 bin 就被带去导出目录。
-        self.import_dir = None
-        self.export_dir = None
+        # 记在 settings.json 里，关掉再开仍落在上次用过的文件夹（目录没了就回默认）。
+        stored_dirs = dialog_dirs()
+        self.import_dir = stored_dirs.get("import")
+        self.export_dir = stored_dirs.get("export")
         self._snack_seq = 0
         self._snack_overlay = None
         self._snack_toast = None

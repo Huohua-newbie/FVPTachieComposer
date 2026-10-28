@@ -1,10 +1,13 @@
-"""偏好设置落盘：目前只存窗口（尺寸 / 位置 / 最大化）。
+"""偏好设置落盘：窗口（尺寸 / 位置 / 最大化）与对话框上次用过的目录。
 
 文件在 `%LOCALAPPDATA%\\FVPTachieComposer\\settings.json`（非 Windows 走
 `$XDG_CONFIG_HOME`），`FVP_SETTINGS_PATH` 可以整条覆盖——测试与排障用。
 
 **读永远不抛**：文件不存在、JSON 坏掉、字段类型不对，一律当"没设过"回默认值。
 这是偏好不是素材，不能因为它让程序起不来；删掉文件要干净地回到 1280×760。
+
+对话框目录每次读盘都校验 `is_dir()`：上次用过的文件夹被删掉/改盘符之后，
+宁可让对话框回到系统默认位置，也不要传一个不存在的目录进去。
 
 位置必须校验：拔掉一块显示器、分辨率改小之后，上次记下的坐标可能整个落在屏幕外，
 窗口看不见也拖不回来。`screen_bounds()` 问 Win32 拿虚拟桌面的范围，
@@ -25,6 +28,7 @@ from .version import APP_NAME
 log = logging.getLogger("fvptachie")
 
 SECTION_WINDOW = "window"
+SECTION_DIALOGS = "dialogs"
 
 # 与 `ui._setup_page` 原来的写死值一致：第一次运行、或设置被删掉时的样子
 DEFAULT_WIDTH = 1280
@@ -66,10 +70,10 @@ def load() -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-def save_window(prefs: dict) -> None:
-    """写回 window 这一段（其他段原样保留）。写失败只记日志，不打扰用户。"""
+def _write_section(section: str, prefs: dict) -> None:
+    """写回指定段（其他段原样保留）。写失败只记日志，不打扰用户。"""
     data = load()
-    data[SECTION_WINDOW] = prefs
+    data[section] = prefs
     path = settings_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -79,6 +83,39 @@ def save_window(prefs: dict) -> None:
         os.replace(tmp, path)
     except OSError:
         log.debug("设置没写进去: %s", path, exc_info=True)
+
+
+def save_window(prefs: dict) -> None:
+    """写回 window 这一段。"""
+    _write_section(SECTION_WINDOW, prefs)
+
+
+def save_dialog_dirs(import_dir: Optional[str], export_dir: Optional[str]) -> None:
+    """记住打开/保存对话框各自的目录，跨重启保留；None 记为 null。"""
+    _write_section(SECTION_DIALOGS, {"import": import_dir or None,
+                                     "export": export_dir or None})
+
+
+def _clean_dir(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return value if Path(value).expanduser().is_dir() else None
+    except (OSError, ValueError):
+        return None
+
+
+def dialog_dirs() -> dict:
+    """存过的对话框目录；不存在的目录当作没设过（键直接不出现）。"""
+    raw = load().get(SECTION_DIALOGS)
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for key in ("import", "export"):
+        value = _clean_dir(raw.get(key))
+        if value is not None:
+            out[key] = value
+    return out
 
 
 def _clean_size(value: Any) -> Optional[float]:

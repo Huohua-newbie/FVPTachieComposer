@@ -51,6 +51,7 @@ from .settings import (
     MIN_WIDTH,
     capture_window,
     plan_window,
+    save_dialog_dirs,
     save_window,
     screen_bounds,
     window_prefs,
@@ -673,6 +674,7 @@ class UiMixin:
 
     async def _close(self, e):
         self._write_window()
+        self._write_dialog_dirs()
         await self.page.window.destroy()
 
 
@@ -691,6 +693,7 @@ class UiMixin:
             # 打包态关窗时进程是被 Dart 侧直接结束的，atexit / on_disconnect
             # 都来不及（实测只有窗口事件能收到 CLOSE）——「正常退出」只能写在这。
             mark_exit_once()
+            self._write_dialog_dirs()
         else:
             if t not in (ft.WindowEventType.RESIZED, ft.WindowEventType.MOVED):
                 return
@@ -715,6 +718,11 @@ class UiMixin:
             return
         self._win_prefs = prefs
         save_window(prefs)
+
+
+    def _write_dialog_dirs(self):
+        """退出时把两个对话框的目录留下来，下次启动直接落在那儿。"""
+        save_dialog_dirs(self.import_dir, self.export_dir)
 
 
     def _help(self, e):

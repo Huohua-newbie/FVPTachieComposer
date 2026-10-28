@@ -60,7 +60,7 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - **主题**：深浅两套配色一键切换（窗口标题栏右上角图标或按 `L`），当前浏览、选中的帧与预览全部保留
 - **成功提示走状态栏**：保存 / 导出 / 载入 / 载出成功后，底部状态栏显示结果并播一声轻提示音，不弹浮层打断操作（设 `FVP_SOUND=0` 可关掉声音）
 - **启动即见画面**：启动时先显示浅色底 +「正在载入界面…」，不会出现「黑屏一下再突然亮起来」
-- **记住上次的文件夹**：同一次运行里，打开和保存对话框各自记得上次用过的目录，下次打开直接落在那里；程序重启后不保留
+- **记住上次的文件夹**：打开和保存对话框各自记得上次用过的目录，下次打开直接落在那里；关掉程序再开也记得（和窗口偏好一起存在 `settings.json`，上次的目录被删掉就回系统默认位置）
 - **记住窗口**：窗口的大小、位置和最大化状态都按上次关掉程序时的样子还原，拖动/缩放之后不用等退出就记上了。偏好存在 `%LOCALAPPDATA%\FVPTachieComposer\settings.json`；删掉它回默认 1280×760，而上一次记下的坐标落在当前屏幕外时（拔掉一块显示器）只放弃位置，尺寸照常还原，由系统重新摆
 - **缩略图解过就留着**：树缩略图按「资源指纹 + 条目名 + 尺寸」的 SHA1 落盘到 `%LOCALAPPDATA%\FVPTachieComposer\thumbcache`（`FVP_THUMB_CACHE` 可覆盖），最多 50 张、按最近使用淘汰，关掉程序再开同一份资源也直接命中；键里带着源文件路径、大小和 mtime，所以同名动作不会串到上一份资源上，源文件改过缓存自动失效。同一份资源里整帧解码结果也在内存里按 50 帧 LRU 复用，来回切动作不再重解整包；换 `.bin` 或载出时内存缓存清空，磁盘缓存按指纹各管各的
 - **大资源载入看得见进度**：解析超过约四分之一秒，底部状态栏才亮起进度条，右侧同时报阶段与已处理数（如「读文件头 1200/9000」）；小资源在进度条亮起来之前就解析完了，全程安静不闪条。解析完成、失败或中途载出，进度条立刻收起，不会留在状态栏里
@@ -108,4 +108,6 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - 协作流程（分支、PR、什么算做完了）见 [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - 自检：`python tests/test_ui_smoke.py`、`python tests/test_thumb_threading.py`、
   `python tests/test_export_progress.py`、`python tests/test_thumb_cache.py`、
-  `python tests/test_crashlog.py`、`python .github/selfcheck.py`；人工冒烟清单见 [`TESTING.md`](TESTING.md)
+  `python tests/test_parse_progress.py`、`python tests/test_window_memory.py`、
+  `python tests/test_dialog_dirs.py`、`python tests/test_crashlog.py`、
+  `python .github/selfcheck.py`；人工冒烟清单见 [`TESTING.md`](TESTING.md)
