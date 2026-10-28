@@ -51,6 +51,8 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - **查看**：底图舞台支持滚轮缩放、拖拽平移，多帧底图翻帧查看
 - **合成**：点任意一帧表情差分，右侧即时看到合成结果
 - **导出**：保存当前这一张，或批量导出该底图的全部差分帧铺平成 PNG
+- **批量导出看得见、停得下**：导出途中状态栏亮进度条并报「导出 12/48」，旁边有「取消」；取消后已写出的 PNG 保留、状态栏报「已取消导出，已写出 N 张」。中途载入别的资源会直接叫停这一批，不会把旧资源的图写进新目录
+- **失败不吞掉成功的**：哪几张没写成功，状态栏报「N 张成功，M 张失败」，右侧「查看失败项」列出文件名与原因、可一键复制，也能「只重试这些」——成功的那几张不会重复写盘
 - **没有表情差分时直接导出底图**：非立绘文件夹、或该动作压根没有 `_表情` 变体，
   右侧显示的就是可导出的底图，导出的也就是你看到的这一张
 - **载入**：把 `.bin` / HZC 文件夹拖进窗口，或点「角色库」标题栏的图标，或把文件拖到 exe 图标上启动即载入
@@ -105,5 +107,5 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - **这份 README 就是功能说明**：用户能感觉到的行为变了，就在同一个提交里改它
 - 协作流程（分支、PR、什么算做完了）见 [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - 自检：`python tests/test_ui_smoke.py`、`python tests/test_thumb_threading.py`、
-  `python tests/test_thumb_cache.py`、`python tests/test_crashlog.py`、
-  `python .github/selfcheck.py`；人工冒烟清单见 [`TESTING.md`](TESTING.md)
+  `python tests/test_export_progress.py`、`python tests/test_thumb_cache.py`、
+  `python tests/test_crashlog.py`、`python .github/selfcheck.py`；人工冒烟清单见 [`TESTING.md`](TESTING.md)

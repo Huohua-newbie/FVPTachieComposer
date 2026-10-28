@@ -288,6 +288,20 @@ class UiMixin:
             bgcolor=self.ink["line_soft"],
             visible=False,
         )
+        # 批量导出进行中才露脸的「取消」；导出结束随进度条一起收起
+        self.export_cancel_btn = ft.Container(
+            content=ft.Text("取消", size=11, color=self.ink["text_dim"]),
+            on_click=self._cancel_export,
+            visible=False,
+            padding=ft.Padding.only(left=8, right=2),
+        )
+        # 有失败项时右侧出现「查看失败项」，点开是可复制的清单 + 只重试这些
+        self.status_fail_action = ft.Container(
+            content=ft.Text("查看失败项", size=11, color=self.ink["accent"]),
+            on_click=self._show_export_failures,
+            visible=False,
+            padding=ft.Padding.only(left=8, right=2),
+        )
         # 成功提示右侧的「打开文件夹」，默认藏起来，只在刚做完导出/保存时露脸
         self.status_action = ft.Container(
             content=ft.Text("打开文件夹", size=11, color=self.ink["accent"]),
@@ -302,6 +316,8 @@ class UiMixin:
                     ft.Container(width=6, height=6, border_radius=3, bgcolor=self.ink["accent"]),
                     ft.Container(self.status_text, expand=True),
                     self.parse_progress,
+                    self.export_cancel_btn,
+                    self.status_fail_action,
                     self.status_action,
                     self.status_meta,
                 ],
