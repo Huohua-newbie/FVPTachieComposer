@@ -79,30 +79,9 @@ py -3.13 scripts/feishu_sync.py --manifest feishu/changes/xxx.json
 
 变更发生后**先写清单并推送**，再继续做新目标 —— 这样协作者在拉代码时就被拦住了。
 
-## Agent 怎么知道飞书这边改了
+## 看板变更怎么通知
 
-飞书没有把「Base 记录变更」放进 `lark-cli event list` 的事件目录（只有 IM、任务、会议等），
-所以用一个很轻的轮询顶替：每轮先只拉 1 行读表级 `rev`，**rev 没动就不拉全表**；动了才
-拉全表逐条 diff，报新增 / 修改 / 删除 / 列变化。
-
-```bash
-# 会话开始时补看上次以来的变更（只打印，不改任何数据）
-python3 scripts/feishu_watch.py --once
-
-# 常驻：变更逐行写 stdout，接 Monitor / nohup 都行
-python3 scripts/feishu_watch.py --interval 20
-```
-
-- 首次运行只建基线，不会把现有几十行当成「新增」刷屏
-- 状态在 `.feishu-sync/watch-state.json`（不入库）；删掉它等于重新建基线
-- 默认盯 `tasks / tests / changes` 三张表，`--tables tests,changes` 可缩小
-- 轮询间隔默认 20 秒，可在 `config.json` 的 `watch.interval_s` 改
-
-这不是审计日志：只保证「下一轮能看到」，不保证每一次中间态都留痕。
-
-### 谁负责把变更告诉群里
-
-两条通道，各管一段，**不要互相补发**：
+看板变动由**维护者负责**，Agent 不需要开轮询或后台监视器。通知分三段，**不要互相补发**：
 
 | 触发 | 通知方式 | 覆盖 |
 |------|---------|------|
@@ -110,29 +89,26 @@ python3 scripts/feishu_watch.py --interval 20
 | 测试表 `期望/步骤/前置数据/用例` 被改 | Base 自动化「测试口径变更 → 开发组」 | 口径变了才发；跑用例改 `结果/备注` 不打扰 |
 | 变更行新增 | `feishu_sync.py` 汇总消息 | 带旧目标 / 新目标 / 要跑的用例 |
 
-自动化在飞书 Base 里配置（`+workflow-list` 可查），不依赖任何仓库外的服务。
+自动化在飞书 Base 里配置（`lark-cli base +workflow-list` 可核对），不依赖任何仓库外的服务。
 测试表只盯口径字段，是为了避免每次跑用例都刷屏；任务表盯状态，是为了让「谁做完了、
 该谁评审」直接可见。所以 Agent 的职责就一条：**把表写对**，不要去群里再发一遍进度。
 
-### 协作者的 Agent 怎么接
+### feishu_watch.py（可选，手动对比用）
 
-仓库根目录的 [`AGENTS.md`](../AGENTS.md) 已经写了硬约定：**每次会话开工前先跑
-`python3 scripts/feishu_watch.py --once`，有变更先停下核对**。OpenCode / Qoder
-会自动读 `AGENTS.md`，不需要额外插件。
+飞书没把「Base 记录变更」放进 `lark-cli event list` 的事件目录（只有 IM、任务、会议等），
+脚本用表级 `rev` 做闸门：每轮只拉 1 行，**rev 没动就不拉全表**；动了才拉全表逐条 diff，
+报新增 / 修改 / 删除 / 列变化。
 
-Windows 上常见的两种跑法：
-
-```powershell
-# ① lark-cli 在 WSL（nvm 里的 lark-cli 非登录 shell 找不到，要经 zsh 读 .zshrc）
-$env:FVP_LARK_CLI = 'wsl.exe -e zsh -lc ''exec lark-cli "$@"'' _'
-py -3.13 scripts/feishu_watch.py --once
-
-# ② 整条命令丢给 WSL（更省事）
-wsl.exe -e python3 scripts/feishu_watch.py --once
+```bash
+# 只在人类明确要求「对比板子改了什么」时手动跑一次
+python3 scripts/feishu_watch.py --once
 ```
 
-长任务时让 Agent 把 `python3 scripts/feishu_watch.py --interval 20` 挂在后台；
-看到 `[修改]` 之类的行就停下来读任务卡，别继续按旧口径写。
+- 不需要常驻：`--interval` 存在，但约定不开后台监视器
+- 首次运行只建基线，不会把现有几十行当成「新增」刷屏
+- 状态在 `.feishu-sync/watch-state.json`（不入库）；删掉它等于重新建基线
+- 默认盯 `tasks / tests / changes` 三张表，`--tables tests,changes` 可缩小
+- 这不是审计日志：只保证「下一次能看到」，不保证每一次中间态都留痕
 
 没有 `lark-cli` 的机器看不到看板：Agent 必须明说「未能检查飞书」，让人补清单，
 不能假装检查过。

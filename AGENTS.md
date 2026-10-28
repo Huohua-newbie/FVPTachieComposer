@@ -6,26 +6,9 @@
 ## 开工前必须做（每次会话）
 
 1. 同步 main：`git switch main && git pull`；如果已在任务分支，先 `git rebase origin/main`
-2. 查飞书看板有没有新变动：
-
-   ```bash
-   python3 scripts/feishu_watch.py --once
-   ```
-
-   - 没有输出 = 上次检查以来没有新变动
-   - 出现 `[修改] / [新增] / [删除] / [结构]` 行 = **先停下当前任务**，读对应任务卡的
-     「验收标准」和 `feishu/changes/` 下的清单，再决定是否继续；不要按旧口径写代码
-3. 读 `README.md` 里和当前任务有关的小节。
-
-Windows 上如果 `lark-cli` 装在 WSL：
-
-```powershell
-$env:FVP_LARK_CLI = 'wsl.exe -e zsh -lc ''exec lark-cli "$@"'' _'
-py -3.13 scripts/feishu_watch.py --once
-```
-
-（`lark-cli` / `node` 在 nvm 里，非登录 shell 找不到；这段让 WSL 先读 `.zshrc` 再把参数原样转发。
-直接在 WSL 里跑 `python3` 就不需要这个变量。）
+2. 读 `README.md` 里和当前任务有关的小节
+3. 手上的活如果可能被改过口径，直接读飞书任务卡的「验收标准」——**不要**开轮询或后台
+   监视器：看板口径的变动由维护者负责通知，Agent 只按当前的表和任务卡办事
 
 ## 维护看板（硬性责任）
 
@@ -38,21 +21,9 @@ py -3.13 scripts/feishu_watch.py --once
 | 测试 | 跑完一条用例 | `结果`（通过/失败/未跑）、`备注`；口径变了才改 `期望/步骤/前置数据/用例` |
 | 变更 | 用户能感觉到的行为变了 | 一行：`功能/类型/改了什么/为什么/版本/关联` |
 
-- 这三张表都配了 Base 自动化：任务表的 `状态/优先级/负责人` 被改、测试表的
-  `期望/步骤/前置数据/用例` 被改，会自动往开发组发一条消息；`feishu_sync.py` 负责
-  变更行 + 一条带上下文的汇总消息
+- 自动化在飞书 Base 里由维护者配置（`lark-cli base +workflow-list` 可核对）
 - 所以**不需要**另发群消息报进度；把表改对，通知自然发生（手动补发反而重复）
 - 改动做完必须回写：任务状态推进到「待评审」，测试跑过就把 `结果` 从「未跑」改掉
-
-## 长任务 / 多轮修改
-
-在后台跑监视器，看到新行就停下来核对：
-
-```bash
-python3 scripts/feishu_watch.py --interval 20
-```
-
-（OpenCode / Qoder 用各自的后台任务或终端跑；不要把输出吞掉。）
 
 ## 改完之后
 
@@ -65,5 +36,17 @@ python3 scripts/feishu_watch.py --interval 20
 
 - 飞书只通过本机 `lark-cli` 访问；不要把 webhook、app secret、token 写进仓库或 GitHub Secrets
 - 没有 `lark-cli` 时不要假装看过了看板：明确告诉人类「未能检查飞书」，让对方同步或给清单
-- `feishu_watch.py` 是 20 秒轮询 + 表 `rev` 闸门，不是逐事件审计；两次轮询之间的中间态可能看不到
+- 不要开后台监视器 / 轮询：看板变动由维护者负责通知；`feishu_watch.py` 只在人类明确
+  要求对比时手动跑一次 `--once`
 - 板上的聊天记录不算数；定下来的结论必须回写 `README.md` 或变成清单
+
+## Windows 上调 WSL 里的 lark-cli
+
+`lark-cli` / `node` 在 nvm 里，非登录 shell 找不到，`wsl.exe -e lark-cli` 会 `execvpe` 失败。
+跑 `feishu_sync.py` 等脚本前设：
+
+```powershell
+$env:FVP_LARK_CLI = 'wsl.exe -e zsh -lc ''exec lark-cli "$@"'' _'
+```
+
+（在 WSL 里直接跑 `python3` 则不需要这个变量。）
