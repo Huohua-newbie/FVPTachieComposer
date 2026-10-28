@@ -238,8 +238,8 @@ class Lark:
         self.notify = config.get("notify") or {}
         self._run = runner or run_lark
 
-    def call(self, args: list[str]) -> dict:
-        full = [*args, "--as", self.identity]
+    def call(self, args: list[str], identity: Optional[str] = None) -> dict:
+        full = [*args, "--as", identity or self.identity]
         if "--json" not in args:
             full += ["--format", "json"]
         return self._run(full)
@@ -269,11 +269,12 @@ class Lark:
                           "--json", json.dumps({"create_records": records}, ensure_ascii=False)])
         return list((resp.get("data") or {}).get("record_id_list") or [])
 
-    def send_markdown(self, chat_id: str, text: str, key: str) -> str:
+    def send_markdown(self, chat_id: str, text: str, key: str,
+                      identity: Optional[str] = None) -> str:
         resp = self.call(["im", "+messages-send",
                           "--chat-id", chat_id,
                           "--markdown", text,
-                          "--idempotency-key", key])
+                          "--idempotency-key", key], identity=identity)
         return str((resp.get("data") or {}).get("message_id") or "")
 
 
@@ -441,7 +442,11 @@ def _notify(lark: Lark, manifest: dict, commit: str, dry: bool, out) -> bool:
         _plan(out, f"群通知 {chat_id}", text)
     else:
         salt = json.dumps(manifest, sort_keys=True, ensure_ascii=False)
-        msg_id = lark.send_markdown(chat_id, text, idempotency_key(manifest["id"], salt))
+        # 发消息用 bot：user 身份要额外授权 im:message.send_as_user，
+        # 而群通知不该成为推送的前置条件。
+        send_as = notify.get("identity") or lark.notify.get("identity") or "bot"
+        msg_id = lark.send_markdown(chat_id, text, idempotency_key(manifest["id"], salt),
+                                    identity=send_as)
         out(f"[feishu-sync] 已发群通知 {msg_id or '(无 message_id)'}")
     return True
 

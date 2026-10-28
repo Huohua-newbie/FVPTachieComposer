@@ -17,6 +17,7 @@
   },
   "notify": {
     "chat_id": "oc_ba69c35210cb608abc374a906764996f",
+    "identity": "bot",
     "mentions": [
       "ou_552feb80ced621cefac37d2493962a09"
     ]

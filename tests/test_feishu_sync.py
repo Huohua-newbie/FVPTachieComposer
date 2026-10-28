@@ -99,6 +99,7 @@ class Fake:
                 "chat_id": args[args.index("--chat-id") + 1],
                 "text": args[args.index("--markdown") + 1],
                 "key": args[args.index("--idempotency-key") + 1],
+                "as": args[args.index("--as") + 1],
             })
             return {"ok": True, "data": {"message_id": "om_test"}}
         raise AssertionError(f"未预期的 lark-cli 调用: {args}")
@@ -147,6 +148,9 @@ check("变更记录自动补关联", change.get("关联") == "abc1234")
 check("变更记录保留正文", change.get("改了什么") == "改了目标")
 
 check("群消息只发一条", len(fake.messages) == 1)
+check("群消息默认用 bot 身份", fake.messages[0]["as"] == "bot")
+check("读表仍用 user 身份", all(c[c.index("--as") + 1] == "user" for c in fake.calls
+                                  if "+messages-send" not in c))
 text = fake.messages[0]["text"]
 check("群消息 @ 了配置里的默认人", '<at user_id="ou_test"></at>' in text)
 check("群消息带旧目标与新目标", "旧目标" in text and "新目标" in text)

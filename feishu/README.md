@@ -45,7 +45,10 @@ cp feishu/change.example.json feishu/changes/2026-10-31-dialog-memory.json
 | `tests.block[]` | 作废/暂停的旧测试行；默认把 `结果` 改成「阻塞」，`note_append` 写原因 |
 | `tests.create[]` | 新测试行，字段名与飞书表头一致（`用例`/`关联卡`/`类型`/`结果`/`前置数据`/`步骤`/`期望`/`备注`） |
 | `change` | 变更表一条；`日期`/`版本`/`关联` 没填会自动补 |
-| `notify` | 默认用 `config.json` 的群；`enabled: false` 可只改表不发消息 |
+| `notify` | 默认用 `config.json` 的群；`enabled: false` 可只改表不发消息；`identity` 可覆盖发送身份 |
+
+群消息默认用 **bot** 身份发（`notify.identity`，默认 `bot`）：user 身份发消息需要额外授权
+`im:message.send_as_user`，不该让群通知成为推送的前置条件。读表 / 改表仍用 `identity`（默认 `user`）。
 
 `acceptance_append` 是**追加**，不用把旧验收标准抄一遍；`note_append` 同理，旧备注保留。
 
