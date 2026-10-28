@@ -79,6 +79,28 @@ py -3.13 scripts/feishu_sync.py --manifest feishu/changes/xxx.json
 
 变更发生后**先写清单并推送**，再继续做新目标 —— 这样协作者在拉代码时就被拦住了。
 
+## Agent 怎么知道飞书这边改了
+
+飞书没有把「Base 记录变更」放进 `lark-cli event list` 的事件目录（只有 IM、任务、会议等），
+所以用一个很轻的轮询顶替：每轮先只拉 1 行读表级 `rev`，**rev 没动就不拉全表**；动了才
+拉全表逐条 diff，报新增 / 修改 / 删除 / 列变化。
+
+```bash
+# 会话开始时补看上次以来的变更（只打印，不改任何数据）
+python3 scripts/feishu_watch.py --once
+
+# 常驻：变更逐行写 stdout，接 Monitor / nohup 都行
+python3 scripts/feishu_watch.py --interval 20
+```
+
+- 首次运行只建基线，不会把现有几十行当成「新增」刷屏
+- 状态在 `.feishu-sync/watch-state.json`（不入库）；删掉它等于重新建基线
+- 默认盯 `tasks / tests / changes` 三张表，`--tables tests,changes` 可缩小
+- 需要本机 `lark-cli` + WSL 的 `python3`（Windows 的 `py -3.13` 找不到 lark-cli）
+- 轮询间隔默认 20 秒，可在 `config.json` 的 `watch.interval_s` 改
+
+这不是审计日志：只保证「下一轮能看到」，不保证每一次中间态都留痕。
+
 ## 配置与安全
 
 - `feishu/config.json`（入库）：Base / 表 / 群 ID、字段名映射

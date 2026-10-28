@@ -21,5 +21,8 @@
     "mentions": [
       "ou_552feb80ced621cefac37d2493962a09"
     ]
+  },
+  "watch": {
+    "interval_s": 20
   }
 }

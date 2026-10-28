@@ -111,5 +111,5 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
   `python tests/test_export_progress.py`、`python tests/test_thumb_cache.py`、
   `python tests/test_parse_progress.py`、`python tests/test_window_memory.py`、
   `python tests/test_dialog_dirs.py`、`python tests/test_feishu_sync.py`、
-  `python tests/test_crashlog.py`、`python .github/selfcheck.py`；
-  人工冒烟清单见 [`TESTING.md`](TESTING.md)
+  `python tests/test_feishu_watch.py`、`python tests/test_crashlog.py`、
+  `python .github/selfcheck.py`；人工冒烟清单见 [`TESTING.md`](TESTING.md)

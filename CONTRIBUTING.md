@@ -103,6 +103,7 @@ python tests/test_parse_progress.py
 python tests/test_window_memory.py
 python tests/test_dialog_dirs.py
 python tests/test_feishu_sync.py
+python tests/test_feishu_watch.py
 python tests/test_crashlog.py
 python .github/selfcheck.py
 ```
