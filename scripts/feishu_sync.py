@@ -20,7 +20,9 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -212,11 +214,30 @@ def idempotency_key(manifest_id: str, salt: str = "") -> str:
 
 
 # ── lark-cli 封装 ───────────────────────────────────────────────────────
-def run_lark(args: list[str]) -> dict:
+def lark_command() -> list[str]:
+    """lark-cli 的启动命令。
+
+    Windows 上的 Agent 如果 lark-cli 装在 WSL 里（node 走 nvm，非登录 shell
+    找不到），可设 `FVP_LARK_CLI='wsl.exe -e zsh -lc ''exec lark-cli "$@"'' _'`：
+    由 WSL 先读 `.zshrc` 加载 nvm，再把参数原样转发。
+    """
+    raw = os.environ.get("FVP_LARK_CLI", "").strip()
+    if raw:
+        parts = shlex.split(raw)
+        if not parts:
+            raise SyncError("FVP_LARK_CLI 是空的")
+        return parts
     exe = shutil.which("lark-cli")
     if not exe:
-        raise SyncError("找不到 lark-cli（先按 lark-shared 的说明登录）")
-    proc = subprocess.run([exe, *args], capture_output=True, text=True, encoding="utf-8")
+        raise SyncError("找不到 lark-cli（先按 lark-shared 的说明登录；"
+                        "Windows 上若 lark-cli 在 WSL，设 "
+                        "FVP_LARK_CLI='wsl.exe -e zsh -lc ''exec lark-cli \"$@\"'' _'）")
+    return [exe]
+
+
+def run_lark(args: list[str]) -> dict:
+    proc = subprocess.run([*lark_command(), *args],
+                          capture_output=True, text=True, encoding="utf-8")
     if proc.returncode != 0:
         detail = (proc.stdout or proc.stderr).strip().replace("\n", " ")[:500]
         raise SyncError(f"lark-cli 失败 (exit {proc.returncode}): {detail}")

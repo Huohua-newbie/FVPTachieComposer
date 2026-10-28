@@ -246,6 +246,26 @@ for bad in ("../outside.json", "/etc/passwd.json", "feishu/changes/x.txt"):
 check("仓库内清单路径可用",
       fs.resolve_manifest_path("feishu/change.example.json").name == "change.example.json")
 
+# lark-cli 启动命令可被环境变量覆盖（Windows 的 Agent 指向 WSL）
+import os  # noqa: E402
+
+old_lark = os.environ.get("FVP_LARK_CLI")
+try:
+    os.environ["FVP_LARK_CLI"] = "wsl.exe -e lark-cli"
+    check("FVP_LARK_CLI 支持带参数", fs.lark_command() == ["wsl.exe", "-e", "lark-cli"])
+    os.environ["FVP_LARK_CLI"] = '"C:\\Program Files\\lark-cli.exe" --profile x'
+    check("FVP_LARK_CLI 支持带空格路径",
+          fs.lark_command() == ["C:\\Program Files\\lark-cli.exe", "--profile", "x"])
+    os.environ["FVP_LARK_CLI"] = "wsl.exe -e zsh -lc 'exec lark-cli \"$@\"' _"
+    check("FVP_LARK_CLI 支持 zsh 转发壳",
+          fs.lark_command() == ["wsl.exe", "-e", "zsh", "-lc",
+                                'exec lark-cli "$@"', "_"])
+finally:
+    if old_lark is None:
+        os.environ.pop("FVP_LARK_CLI", None)
+    else:
+        os.environ["FVP_LARK_CLI"] = old_lark
+
 if fails:
     print("\nFAILED:", fails)
     sys.exit(f"FEISHU_SYNC_TEST_FAILED: {fails}")
