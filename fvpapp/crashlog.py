@@ -2,8 +2,9 @@
 
 用户报错时只要让他把当次的日志文件发过来：
 
-    Windows（打包态）：%LOCALAPPDATA%\\FVPTachieComposer\\logs\\
-    开发环境（非 Windows）：~/.local/state/FVPTachieComposer/logs/
+    应用根目录\\logs\\   （打包态 = exe 所在目录；源码运行 = 仓库根）
+    根目录不可写（装在 Program Files、只读介质等）时退回
+    %LOCALAPPDATA%\\FVPTachieComposer\\logs\\，非 Windows 退回 ~/.local/state/
 
 文件名 = 版本号 + 启动时刻，例如 `fvptachie-2.2.3-20261027-153012.log`，
 一次运行一个文件，天然对得上「用户说的是哪一版、哪一次」。只保留最近
@@ -57,22 +58,64 @@ _file_handler: Optional[logging.FileHandler] = None
 _fault_stream: Optional[Any] = None
 _hooked = False
 _atexit_done = False
+_exit_logged = False
 
 
 # ── 路径 ──────────────────────────────────────────────────────────────
-def logs_dir() -> Path:
-    """日志目录。`FVP_LOG_DIR` 可覆盖（测试与排障用）。"""
-    override = os.environ.get("FVP_LOG_DIR")
-    if override:
-        return Path(override).expanduser()
+_PKG_DIR = Path(__file__).resolve().parent  # fvpapp/ 所在目录
+
+
+def is_packaged() -> bool:
+    """是否跑在打包产物里。
+
+    flet 的 Windows 包用内嵌解释器跑 `.pyc`，**不设 `sys.frozen`**，代码树落在
+    `<exe>\\app\\fvpapp\\` 下；所以两种形态都要认，否则 banner 会把打包态误报成
+    「源码运行」，日志目录也会退到代码树里。
+    """
+    if getattr(sys, "frozen", False):
+        return True
+    return _PKG_DIR.parent == Path(sys.executable).resolve().parent / "app"
+
+
+def app_root() -> Path:
+    """应用根目录：打包态是 exe 所在目录，源码运行是仓库根。"""
+    if is_packaged():
+        return Path(sys.executable).resolve().parent
+    return _PKG_DIR.parent
+
+
+def _fallback_logs_dir() -> Path:
     local = os.environ.get("LOCALAPPDATA")
     if local:
         return Path(local) / APP_NAME / "logs"
-    if os.name == "nt":  # LOCALAPPDATA 被清掉的极端情况
+    if os.name == "nt":
         return Path.home() / "AppData" / "Local" / APP_NAME / "logs"
-    # 开发环境（WSL/Linux/macOS）
     state = os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
     return Path(state) / APP_NAME / "logs"
+
+
+def _creatable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".fvp-write-probe"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def logs_dir() -> Path:
+    """日志目录，放在应用根目录下。`FVP_LOG_DIR` 可覆盖（测试与排障用）。
+
+    根目录写不进去（装进 Program Files、放只读介质）才退回
+    `%LOCALAPPDATA%\\FVPTachieComposer\\logs`，不然日志会整个丢掉。
+    """
+    override = os.environ.get("FVP_LOG_DIR")
+    if override:
+        return Path(override).expanduser()
+    root = app_root() / "logs"
+    return root if _creatable(root) else _fallback_logs_dir()
 
 
 def app_version() -> str:
@@ -204,14 +247,14 @@ def _enable_faulthandler(path: Path) -> None:
 
 
 def _banner(path: Path) -> str:
-    frozen = getattr(sys, "frozen", False)
+    packaged = is_packaged()
     lines = [
         "=" * 62,
         f" {APP_NAME} {__version__}  启动于 {datetime.now():%Y-%m-%d %H:%M:%S}",
         "=" * 62,
         f"版本      : {__version__}",
         f"Python    : {sys.version.split()[0]}  {platform.machine()}",
-        f"打包态    : {'是' if frozen else '否（源码运行）'}",
+        f"打包态    : {'是' if packaged else '否（源码运行）'}",
         f"平台      : {platform.platform()}",
         f"工作目录  : {os.getcwd()}",
         f"命令行    : {sys.argv}",
@@ -321,6 +364,28 @@ def _flush() -> None:
         pass
 
 
+def mark_exit_once() -> None:
+    """给这趟运行收个尾：写一行「正常退出」并 flush。
+
+    打包态关窗口时，flet 客户端是直接结束内嵌 Python 进程的（实测 atexit
+    根本没机会跑）；所以入口把 `page.on_disconnect` 也接到这里——断连那一刻
+    进程还活着，日志来得及落。幂等：atexit 与断连谁先到算谁，只记一次。
+    """
+    global _exit_logged
+    if _exit_logged:
+        return
+    _exit_logged = True
+    try:
+        log.info("正常退出")
+        for h in logging.getLogger().handlers:
+            try:
+                h.flush()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _atexit_marker() -> None:
     """正常退出也留一行，用户发日志时能区分「崩了」和「关了」。"""
     global _atexit_done
@@ -329,15 +394,7 @@ def _atexit_marker() -> None:
     _atexit_done = True
 
     def _bye():
-        try:
-            log.info("正常退出")
-            for h in logging.getLogger().handlers:
-                try:
-                    h.flush()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        mark_exit_once()
         try:
             faulthandler.disable()
         except Exception:

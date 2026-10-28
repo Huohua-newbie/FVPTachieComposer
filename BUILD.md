@@ -176,6 +176,17 @@ args 转发给嵌入解释器，Python 侧 `sys.argv` 原样可见——「拖�
 干净树首建/模板更新会把补丁冲掉，脚本自动重打并重建一次。
 升级 flet 版本时要重新核对补丁的三处条件与新版模板的差异。
 
+## flet 会把仓库根整个拷进 `app\`，打包前按名单剔除
+
+`flet build windows` 的 python-app 阶段不是「只收包」，而是把**整个项目目录**拷成
+`build\windows\app\`。于是 `.pytest_cache\`、截图目录、构建日志、`CONTRIBUTING.md`
+这些开发期文件全部跟着进 zip；把日志改到应用根目录之后更明显——开发机自己跑出来的
+`logs\*.log` 也被原样发给用户（2.3.0 首次实测 `app\logs\` 里躺着 3 个日志）。
+
+`build_flet_win.ps1` 在打 zip 前按 `$StripNames` 剔除，并校验 `fvpapp\`、入口 pyc、
+`Shinku.ico` 仍在——运行时需要的只有这三样（`theme._app_icon()` 从 `app\` 根读图标），
+剔除名单配错了直接 `throw`，不产出起不来的包。
+
 ## 跑 `build_flet_win.ps1` 要用 pwsh，不能用 powershell
 
 脚本是 UTF-8 无 BOM 且含中文注释。Windows PowerShell 5.1（`powershell.exe`）按系统

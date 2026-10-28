@@ -12,7 +12,7 @@ from __future__ import annotations
 APP_NAME = "FVPTachieComposer"
 
 # 与 pyproject.toml 的 [project].version 保持一致（test_crashlog.py 守着）
-__version__ = "2.2.3"
+__version__ = "2.3.0"
 
 # 日志文件名里用它，避免出现 Windows 不允许的字符
 __all__ = ["APP_NAME", "__version__"]

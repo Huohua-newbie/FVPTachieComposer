@@ -47,6 +47,7 @@ def reset_logging():
     cl._log_path = None
     cl._file_handler = None
     cl._fault_stream = None
+    cl._exit_logged = False
 
 
 def read_all(path):
@@ -57,7 +58,9 @@ def read_all(path):
 
 
 def main():
-    tmp = Path(tempfile.mkdtemp(prefix="fvp-crashlog-"))
+    # resolve()：Windows 的 TEMP 常是 8.3 短名（ADMINI~1），而 app_root()
+    # 返回长路径，不先展开会因为大小写不同的同一路径判成不相等。
+    tmp = Path(tempfile.mkdtemp(prefix="fvp-crashlog-")).resolve()
 
     # ── 1. 版本号只有一处真源 ────────────────────────────
     pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
@@ -66,16 +69,37 @@ def main():
     check("fvpapp/version.py 与 pyproject.toml 版本一致",
           m is not None and m.group(1) == cl.app_version())
 
-    # ── 2. 目录规则 ──────────────────────────────────────
+    # ── 2. 目录规则：日志跟着应用根目录走 ────────────────
     old_local = os.environ.get("LOCALAPPDATA")
     old_dir = os.environ.pop("FVP_LOG_DIR", None)
+    real_app_root = cl.app_root
     try:
         os.environ["LOCALAPPDATA"] = str(tmp / "AppData" / "Local")
-        want = tmp / "AppData" / "Local" / "FVPTachieComposer" / "logs"
-        check("%LOCALAPPDATA%/FVPTachieComposer/logs", cl.logs_dir() == want)
+        check("默认落在应用根目录的 logs 下",
+              cl.logs_dir() == cl.app_root() / "logs")
+        # flet 打包态：内嵌解释器不设 sys.frozen，代码树在 <exe>\app\fvpapp 下
+        real_exe, real_pkg = sys.executable, cl._PKG_DIR
+        try:
+            pkg = tmp / "FVP" / "app" / "fvpapp"
+            pkg.mkdir(parents=True)
+            sys.executable = str(tmp / "FVP" / "FVPTachieComposer.exe")
+            cl._PKG_DIR = pkg.resolve()
+            check("flet 打包态认 exe 所在目录", cl.app_root() == tmp / "FVP")
+            check("flet 打包态 banner 报「打包态 是」", cl.is_packaged() is True)
+        finally:
+            sys.executable = real_exe
+            cl._PKG_DIR = real_pkg
+        check("源码运行不算打包态", cl.is_packaged() is False)
+        # 根目录写不进去（装进 Program Files、只读介质）才退回 LOCALAPPDATA
+        blocker = tmp / "not-a-dir"
+        blocker.write_text("", encoding="utf-8")
+        cl.app_root = lambda: blocker
+        check("根目录不可写时退回 %LOCALAPPDATA%",
+              cl.logs_dir() == tmp / "AppData" / "Local" / "FVPTachieComposer" / "logs")
         os.environ["FVP_LOG_DIR"] = str(tmp / "override")
         check("FVP_LOG_DIR 可覆盖", cl.logs_dir() == tmp / "override")
     finally:
+        cl.app_root = real_app_root
         os.environ.pop("FVP_LOG_DIR", None)
         if old_local is None:
             os.environ.pop("LOCALAPPDATA", None)
@@ -168,6 +192,12 @@ def main():
     asyncio.run(async_main())
     text = read_all(path)
     check("asyncio 任务异常落盘", "任务里炸了" in text)
+
+    # ── 8.5 退出标记：打包态 atexit 跑不到，断连事件调 mark_exit_once ──
+    cl.mark_exit_once()
+    cl.mark_exit_once()  # 幂等：atexit 与断连都到也只记一次
+    text = read_all(path)
+    check("退出标记落盘「正常退出」且只记一次", text.count("正常退出") == 1)
 
     # ── 9. 只留最近 N 个 ────────────────────────────────
     prune_dir = tmp / "prune"
