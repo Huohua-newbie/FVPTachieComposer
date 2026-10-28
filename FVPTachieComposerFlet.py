@@ -176,6 +176,15 @@ class ComposerApp(UiMixin, StateMixin, ResourceMixin, ExportMixin, DropFeedbackM
         self._busy_seq = None
         # 状态栏那条进度条亮了吗：慢载入才亮，快路径全程不出现
         self._parse_shown = False
+        # 批量导出：代数（换资源/再次导出即作废旧回调）、取消位、失败清单
+        # 与重试上下文（输出目录/底图/偏移）。失败项只留真正失败的那几张图。
+        self._export_gen = 0
+        self._export_cancel = None
+        self._export_shown = False
+        self._export_failed = []
+        self._export_ctx = None
+        self.export_cancel_btn = None
+        self.status_fail_action = None
         # 成功提示走状态栏：记住最近一次的目标文件夹与代数
         self._status_folder = None
         self._status_gen = 0

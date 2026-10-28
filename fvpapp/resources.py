@@ -113,6 +113,8 @@ class ResourceMixin:
         self._capture_loop()
         # 新一轮载入使上一轮（含进行中的解析/缩略图）全部作废
         self._state_gen += 1
+        # 在途的批量导出写的是旧资源的图，换资源就让它停手，别写进新目录
+        self._abort_export()
         gen = self._state_gen
         src = Path(path)
         self.import_dir = str(src if src.is_dir() else src.parent)
@@ -225,6 +227,8 @@ class ResourceMixin:
             return
         # 作废在途解析与缩略图解码，迟到的回调会因代数不符而自弃
         self._state_gen += 1
+        # 导出中途载出：这一批不再往下写，已写出的文件留在原处
+        self._abort_export()
         # 解析中途载出：进度条和"正在解析"都不能带进初始态
         self._end_parse_feedback()
 

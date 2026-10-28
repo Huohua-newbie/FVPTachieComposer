@@ -887,6 +887,27 @@ async def run():
         "载出把亮着的进度条带进了初始态"
     assert app.status_text.value == "就绪" and app.status_meta.value == ""
 
+    # 批量导出的状态栏控件：静止时都藏着，导出中「取消」与进度条一起亮，
+    # 收尾三个路口（成功/失败/取消）都不许留残影。真正的导出流程在
+    # tests/test_export_progress.py 里逐项验，这里只验装机与收起。
+    assert app.export_cancel_btn.visible is False, "静止时「取消」不该露脸"
+    assert app.status_fail_action.visible is False, "没有失败项时不该出现「查看失败项」"
+    assert app.export_cancel_btn.on_click is not None, "「取消」没接上 _cancel_export"
+    assert app.status_fail_action.on_click is not None, "「查看失败项」没接上清单"
+    gen = app._export_begin(4)
+    assert app.parse_progress.visible is True and app.export_cancel_btn.visible is True
+    assert app.status_meta.value == "导出 0/4", app.status_meta.value
+    app._show_export_progress(gen, 2, 4)
+    assert abs(app.parse_progress.value - 0.5) < 1e-6, app.parse_progress.value
+    assert app.status_meta.value == "导出 2/4", app.status_meta.value
+    app._finish_export(gen, 4, [], False, str(tmp))
+    assert app.parse_progress.visible is False and app.export_cancel_btn.visible is False, \
+        "导出收尾没收起进度条/取消"
+    assert "已导出 4 张" in app.status_text.value, app.status_text.value
+    # 作废后的迟到帧不许再把进度条点亮
+    app._show_export_progress(gen, 3, 4)
+    assert app.parse_progress.visible is False, "过期导出帧又把进度条画回去了"
+
     print("UI_SMOKE_OK")
 
 
