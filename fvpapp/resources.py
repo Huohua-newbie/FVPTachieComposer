@@ -26,27 +26,20 @@ from .engine import (
     parse_dir_infos,
 )
 
-from . import thumbcache
+from . import cache
 from .dropzone import DROPZONE_ON, _custom_client_available, _dropzone, _dropzone_on, pick_drop_path
 from .media import (
-    EXPR_SUFFIXES,
-    _SRC_CACHE,
-    _SRC_CACHE_MAX,
     _THUMB_POOL,
-    _THUMB_SRC_CACHE,
-    _THUMB_SRC_CACHE_MAX,
     _cached_src,
-    _cached_thumb,
     _checker_src,
     _find_expr_info,
-    _img_bytes,
     _img_src,
     _is_expr,
     _make_thumb_widget,
     _make_thumb_widget_from_src,
     _part_thumb_srcs,
-    _thumb_bytes,
-    reset_image_caches,
+    _png_data_uri,
+    _thumb_png,
 )
 from .theme import (
     ANIM_ROW,
@@ -153,10 +146,23 @@ class ResourceMixin:
                 log.debug("忽略异常（report）", exc_info=True)
 
         def work():
-            if Path(path).is_dir():
-                infos = parse_dir_infos(path, progress=report)
-            else:
-                infos = parse_bin_info_extended(path, progress=report)
+            is_dir = Path(path).is_dir()
+            # 索引缓存：跨会话复用解析结果。目录按文件清单汇总指纹，
+            # 改任何一个 HZC 都会换键；坏 JSON 当未命中，直接重新解析。
+            fp = cache.dir_fingerprint(path) if is_dir else cache.fingerprint(path)
+            key = cache.index_key(fp)
+            infos = None
+            if key is not None:
+                raw = cache.index.read(key)   # 读时已校验，坏 JSON 会被删掉
+                if raw is not None:
+                    infos = cache.decode_index(raw)
+            if infos is None:
+                if is_dir:
+                    infos = parse_dir_infos(path, progress=report)
+                else:
+                    infos = parse_bin_info_extended(path, progress=report)
+                if key is not None:
+                    cache.index.write(key, cache.encode_index(infos))
             hier = {}
             for info in infos:
                 if info["type"] != "hzc":
@@ -263,18 +269,14 @@ class ResourceMixin:
 
 
     def _drop_image_caches(self):
-        """换资源 / 载出：丢掉会话内的图缓存，释放上一份资源的整帧。
+        """换资源 / 载出：只丢「属于当前这棵树」的控件缓存。
 
-        三处内存缓存（底图与合成、树里的迷你缩略图、差分条）的 key 里都只有
-        文件名，没有"是哪一份资源"，而不同 BIN 出现同名动作太正常了——同一
-        角色的两份导出、换皮素材。不清的话新资源点开同名动作，看到的还是上一份。
-
-        磁盘缩略图不在这里清：它的键自带资源指纹，多份资源可以安全共存；
-        换资源后仍然能按各自指纹命中。
+        图片本身按资源指纹索引（见 `fvpapp/cache.py`），换资源不用清：
+        同名动作不会串到上一份资源上，切回上一份还能命中。`_cache_token`
+        只用来挡在途解码把旧控件写进新树。
         """
         self.role_thumb_cache = {}
-        thumbcache.clear_decoded()
-        self._cache_token = reset_image_caches()
+        self._cache_token += 1
 
 
     def _clear_previews(self):
@@ -315,8 +317,9 @@ class ResourceMixin:
         """必须在 UI 线程执行：替换占位内容并做控件级精确推送。
 
         token 在这里对而不是在解码线程对上：解码线程对完还可能排在队列里，
-        等它跑回来时资源已经换了——占位控件早不在新树里，缓存也清空了，
-        这时候再写进去就是给新资源的同名动作挂上上一份的图。
+        等它跑回来时资源已经换了——占位控件早不在新树里，这时候再写进去
+        就是给新资源的同名动作挂上上一份的图（缓存本身按指纹分开，这里
+        拦的是过时的控件树）。
         """
         if token != self._cache_token:
             return
@@ -333,14 +336,16 @@ class ResourceMixin:
 
 
     def _queue_thumb(self, placeholder, info, size, cache_key):
-        """后台线程先查磁盘，未命中再解码；完成后经事件循环把替换+刷新调度回 UI。
+        """后台线程先查内存与磁盘，未命中再解码；完成后经事件循环把替换+刷新调度回 UI。
 
-        磁盘键带资源指纹 + 文件名 + 尺寸，所以同名动作不会串图；写盘就在这个
-        工作线程里做，不占 UI 线程。
+        三个键都带资源指纹：同名动作在不同资源里各有各的条目，磁盘上也不会
+        互相覆盖；换资源后切回来仍能命中。写盘就在工作线程里做，不占 UI 线程。
         """
         gen = self._state_gen  # 解码期间若载出/换文件，结果作废
         token = self._cache_token
-        input_file = self.input_file
+        fp = cache.resource_fingerprint(info, self.input_file)
+        mem_key = cache.image_key(fp, "thumb", info["filename"], size)
+        disk_key = cache.thumb_key(fp, info["filename"], size)
 
         def deliver(widget):
             if gen != self._state_gen:
@@ -355,35 +360,34 @@ class ResourceMixin:
                     pass
             self._push_thumb(placeholder, widget, cache_key, token)
 
-        def job():
-            key = thumbcache.entry_key(info, size, input_file)
-            if key is not None:
-                png = thumbcache.load(key)
+        def build_src():
+            """内存 → 磁盘 → 解码，三级都未命中才算一次真实开销。"""
+            if disk_key is not None:
+                png = cache.thumbs.read(disk_key)
                 if png:
-                    try:
-                        deliver(_make_thumb_widget_from_src(thumbcache.data_uri(png), size))
-                    except Exception:
-                        log.debug("忽略异常（job/cache）", exc_info=True)
-                    else:
-                        return
-
-            try:
-                data, header = self._read_hzc_bytes(info)
-                img = self._read_first_frame(info, data, header)
-            except Exception:
-                log.debug("忽略异常（job）", exc_info=True)
-                return
+                    return _png_data_uri(png)
+            data, header = self._read_hzc_bytes(info)
+            img = self._read_first_frame(info, data, header)
             if img is None:
-                return
+                return None
+            png = _thumb_png(img, size)
+            if disk_key is not None:
+                cache.thumbs.write(disk_key, png)
+            return _png_data_uri(png)
+
+        def job():
             try:
-                png = thumbcache.thumb_png(img, size)
-                widget = _make_thumb_widget_from_src(thumbcache.data_uri(png), size)
+                # 走 images 的 single-flight：同一缩略图被多个占位同时请求时
+                # 只解码一次，其余等这份结果再各自建控件。
+                if mem_key is not None:
+                    src = cache.images.get_or_compute(mem_key, build_src, len)
+                else:
+                    src = build_src()
+                if not src:
+                    return
+                deliver(_make_thumb_widget_from_src(src, size))
             except Exception:
                 log.debug("忽略异常（job）", exc_info=True)
-                return
-            if key is not None:
-                thumbcache.save(key, png)
-            deliver(widget)
         _THUMB_POOL.submit(job)
 
 
@@ -474,15 +478,22 @@ class ResourceMixin:
 
 
     def _read_pil_list(self, info):
-        """整帧解码；同一份内容按 SHA-1 复用，来回切动作不再重解整包。"""
-        data, header = self._read_hzc_bytes(info)
-        key = thumbcache.source_digest(data)
-        cached = thumbcache.get_decoded(key)
-        if cached is not None:
-            return cached
-        images = hzc_data_to_pil_list(data, header)
-        thumbcache.put_decoded(key, images)
-        return images
+        """整帧解码；键带资源指纹，来回切动作、切回上一份资源都不重解整包。
+
+        同一个键被并发请求时只解一次，其余线程等这份结果（single-flight）。
+        """
+        fp = cache.resource_fingerprint(info, self.input_file)
+        key = cache.frames_key(fp, info["filename"])
+
+        def decode():
+            data, header = self._read_hzc_bytes(info)
+            return hzc_data_to_pil_list(data, header)
+
+        return cache.frames.get_or_compute(key, decode, cache.frames_bytes)
+
+
+    def _selected_fp(self):
+        return cache.resource_fingerprint(self.selected_info, self.input_file)
 
 
     async def _load_base(self, info):
@@ -564,11 +575,9 @@ class ResourceMixin:
             return
         img = self.base_imgs[self.base_idx]
         self.result_image.src = _cached_src(
-            _SRC_CACHE,
-            ("base", self.selected_filename, self.base_idx),
+            cache.image_key(self._selected_fp(), "base", self.selected_filename, self.base_idx),
             img,
             _img_src,
-            _SRC_CACHE_MAX,
         )
         self.result_hint.visible = False
         self.result_meta.value = self._result_meta_text(img.size, "底图（无表情差分）")
@@ -619,7 +628,9 @@ class ResourceMixin:
             return
 
         # 缩略图缩放 + PNG/base64 编码也丢线程里：几十帧在 UI 线程上做会明显掉帧
-        datas = await asyncio.to_thread(_part_thumb_srcs, part_info.get("filename"), imgs, self._cache_token)
+        part_fp = cache.resource_fingerprint(part_info, self.input_file)
+        datas = await asyncio.to_thread(
+            _part_thumb_srcs, part_fp, part_info.get("filename"), imgs)
         if gen != self._state_gen:
             return
 

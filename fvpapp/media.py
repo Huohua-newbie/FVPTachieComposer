@@ -1,4 +1,8 @@
-"""图像编码与缓存：data URI、LRU 缓存、缩略图工具、表情后缀判定。"""
+"""图像编码：data URI、缩略图工具、表情后缀判定。
+
+缓存不在这里——键、预算与淘汰都在 `fvpapp/cache.py`，这里只负责把
+PIL 图编码成控件能吃的字符串。
+"""
 
 from __future__ import annotations
 
@@ -6,13 +10,12 @@ import base64
 import io
 import logging
 import os
-import sys
-from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 
 import flet as ft
 from PIL import Image
 
+from . import cache
 from .theme import THUMB, _rgb
 
 log = logging.getLogger("fvptachie")
@@ -69,6 +72,10 @@ def _img_src(img: Image.Image, fmt: str = "PNG") -> str:
     return "data:image/png;base64," + base64.b64encode(_img_bytes(img, fmt)).decode()
 
 
+def _png_data_uri(png: bytes) -> str:
+    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+
 def _checker_src(a: str, b: str, cell: int = 11) -> str:
     """透明立绘的棋盘衬底：一眼分清“这里是透明的”和“这里是白的”。"""
     img = Image.new("RGB", (2, 2))
@@ -80,37 +87,33 @@ def _checker_src(a: str, b: str, cell: int = 11) -> str:
     return _img_src(img)
 
 
-def _cached_src(cache: OrderedDict, key: tuple, img: Image.Image, build, limit: int) -> str:
-    """按 key 取缓存里的 data URI，没有就 build(img) 出来放回去（LRU 上限淘汰）。
+def _cached_src(key, img: Image.Image, build) -> str:
+    """按内容键取显示用的字符串，没有就 build(img) 出来存回去。
 
-    缓存只在 UI 线程与缩略图工作线程之间共享，最多退化成偶尔重复编码，
-    不影响正确性。
+    key 为 None（拿不到资源指纹）时只算不存：宁可多编码一次，也不能让
+    两份资源的同名动作共用一个键。
     """
-    src = cache.get(key)
+    if key is None:
+        return build(img)
+    src = cache.images.get(key)
     if src is not None:
-        cache.move_to_end(key)
         return src
     src = build(img)
-    cache[key] = src
-    if len(cache) > limit:
-        cache.popitem(last=False)
+    cache.images.put(key, src, len(src))
     return src
 
 
-def _cached_thumb(key: tuple, img: Image.Image, size: int) -> str:
-    return _cached_src(_THUMB_SRC_CACHE, key, img, lambda im: _thumb_bytes(im, size), _THUMB_SRC_CACHE_MAX)
-
-
-def _part_thumb_srcs(filename: str, imgs: list[Image.Image], token: int) -> list[str]:
+def _part_thumb_srcs(fp: str | None, filename: str, imgs: list[Image.Image]) -> list[str]:
     """一次算好一批差分帧的缩略图 data URI（放在线程里跑，别占 UI 事件循环）。
 
-    token 是调用方在 UI 线程上取到的"当前资源"标记：这一批要是回来得太晚、
-    中间用户已经换了文件，就只算不存——否则上一份资源的图会以同一个文件名
-    赖在缓存里，新资源点开同名动作就是串图。
+    键带资源指纹：同名动作在不同 BIN 里各有各的条目，不会串图；切回上一份
+    资源仍然命中，不用重算。
     """
-    if token != _CACHE_TOKEN:
-        return [_thumb_bytes(img, THUMB) for img in imgs]
-    return [_cached_thumb(("part", filename, i), img, THUMB) for i, img in enumerate(imgs)]
+    return [
+        _cached_src(cache.image_key(fp, "part", filename, i), img,
+                    lambda im: _thumb_bytes(im, THUMB))
+        for i, img in enumerate(imgs)
+    ]
 
 
 def _thumb_bytes(img: Image.Image, size: int = 100) -> str:
@@ -120,38 +123,26 @@ def _thumb_bytes(img: Image.Image, size: int = 100) -> str:
     return _img_src(thumb)
 
 
+def _thumb_png(img: Image.Image, size: int) -> bytes:
+    """整帧缩到长边不超过 size 的 PNG 字节；小图不放大。"""
+    w, h = img.size
+    longest = max(w, h)
+    scale = min(1.0, size / longest) if longest else 1.0
+    thumb = img.resize(
+        (max(1, int(w * scale)), max(1, int(h * scale))),
+        Image.Resampling.LANCZOS,
+    )
+    return _img_bytes(thumb, "PNG")
+
+
 def _make_thumb_widget(img: Image.Image, size: int = 36) -> ft.Image:
     data = _thumb_bytes(img, size)
     return ft.Image(src=data, width=size, height=size, fit=ft.BoxFit.CONTAIN)
 
 
 def _make_thumb_widget_from_src(src: str, size: int = 36) -> ft.Image:
-    """缩略图已经编码好（磁盘命中）时直接用 data URI，不再过一遍 PIL。"""
+    """缩略图已经编码好（内存/磁盘命中）时直接用 data URI，不再过一遍 PIL。"""
     return ft.Image(src=src, width=size, height=size, fit=ft.BoxFit.CONTAIN)
-
-
-_SRC_CACHE = OrderedDict()
-_SRC_CACHE_MAX = 24
-_THUMB_SRC_CACHE = OrderedDict()
-_THUMB_SRC_CACHE_MAX = 256
-
-# 缓存的"代号"：两个缓存都只按文件名索引，而不同 BIN 里完全可能有一模一样的
-# 动作名（同一套素材换皮、或者干脆是同一个角色的两份导出）。代号每换一次资源
-# 自增一次，后台线程算完回来先对代号，对不上就只返回结果、不写缓存。
-_CACHE_TOKEN = 0
-
-
-def reset_image_caches() -> int:
-    """载入 / 载出另一份资源时调用：丢掉所有按文件名索引的图，返回新代号。
-
-    返回值要存到调用方身上（`ComposerApp._cache_token`），后面每次往线程池里
-    丢编码任务都带上它。
-    """
-    global _CACHE_TOKEN
-    _SRC_CACHE.clear()
-    _THUMB_SRC_CACHE.clear()
-    _CACHE_TOKEN += 1
-    return _CACHE_TOKEN
 
 
 EXPR_SUFFIXES = _expr_suffixes()

@@ -5,9 +5,9 @@
 ## 无头自检（不需要 GUI，先跑这几个）
 
 ```bash
-python tests/test_ui_smoke.py          # 用真实 flet 搭整棵树，查控件参数、滚动条留槽、缓存换资源即失效、载入进度条
+python tests/test_ui_smoke.py          # 用真实 flet 搭整棵树，查控件参数、滚动条留槽、缓存换资源不串/切回命中、索引跨会话、载入进度条
 python tests/test_thumb_threading.py   # 假 flet，查缩略图解码仍在后台线程、update 回 UI 线程
-python tests/test_thumb_cache.py       # 缩略图磁盘缓存：键绑资源指纹、严格 50 张 LRU、整帧 50 帧上限、坏目录不抛
+python tests/test_cache.py             # 缓存子系统：指纹与键、索引编解码与自愈、内存/磁盘字节预算 LRU、单条超限、single-flight、关缓存
 python tests/test_parse_progress.py    # 解析进度协议：阶段齐全、计数单调、末次报满、传不传回调结果一致
 python tests/test_export_progress.py   # 批量导出：进度单调报满、取消不再写盘、失败清单、只重试失败项、过期帧不改状态栏、对话框期间载出即作废
 python tests/test_window_memory.py     # 窗口偏好：读不到回默认、坐标出界不还原、最大化不覆盖几何
@@ -104,8 +104,22 @@ python .github/selfcheck.py            # 解析与差分合成的纯逻辑（不
 | 2.2 重建树 | 同上 | 展开若干后切深浅主题 | 已有的缩略图不重新解码 | 无头 |
 | 2.3 换资源不串图 | 两份**文件名相同、画面不同**的资源（夹具 `build_fixture(salt=…)`） | 载入 A → 展开 → 载入 B → 点同名动作 | 角色/服装/动作/底图/差分条全是 B 的图；磁盘键含资源指纹（路径+大小+mtime），同名条目不会命中 A 的缓存 | 无头 + 手测 |
 | 2.4 来回切动作不重解 | 大 BIN | 选一个动作 → 切走 → 切回；再在两个动作间来回切 | 切回已看过的动作不再走整包 zlib 解码（`hzc_data_to_pil_list` 计数不涨） | 无头（`test_ui_smoke.py`）+ 手测 |
-| 2.5 跨会话命中 | 同一份资源 | 载入、展开几个角色 → 关程序 → 重开载入同一份资源 → 再展开 | 缩略图直接出图，`_read_first_frame` 不再被调用；`%LOCALAPPDATA%\FVPTachieComposer\thumbcache` 里有 PNG | 无头（`test_ui_smoke.py`）+ 手测 |
-| 2.6 严格 50 张 | 任意 | 连续产生超过 50 张不同缩略图，再回头用最早那张 | `thumbcache` 目录始终 ≤ 50 个 PNG；被用过的那张留下，真正最老的被淘汰 | 无头（`test_thumb_cache.py`） |
+| ~~2.5 跨会话命中~~ | — | — | **作废**：缓存目录改为 `cache/v1/thumb`、容量改为字节预算，由 6.6 承接 | 阻塞 |
+| ~~2.6 严格 50 张~~ | — | — | **作废**：「严格 50 张」上限取消，改为按字节预算 LRU，由 6.3 / 6.5 承接 | 阻塞 |
+
+### 卡②扩　全应用缓存（6.x）
+
+| 用例 | 前置数据 | 步骤 | 期望 | 方式 |
+| --- | --- | --- | --- | --- |
+| 6.1 解析索引跨会话命中 | 一份大 `.bin`，或 400 个 `.hzc` 的目录 | 载入一次 → 关程序 → 重开再载入同一份 | 第二次不再逐条 seek 解析（`parse_bin_info_extended` / `parse_dir_infos` 计数不涨）；树、角色数与图像数与第一次一致 | 无头（`test_cache.py` + `test_ui_smoke.py`）+ 手测 |
+| 6.2 索引缓存失效与损坏 | 承 6.1 | 改动该 BIN / 目录里的文件（mtime 或大小变化）再载入；再把 `cache/v1/index` 下的 JSON 截断后载入 | 两种情况都回退到重新解析且结果正确；坏文件被当未命中并删除，不抛异常 | 无头（`test_cache.py`） |
+| 6.3 内存字节预算与 LRU | `FVP_CACHE_MEM_MB` 调小（如 8） | 连续解码多份不同资源，再回头用最早那份 | `stats().bytes` 始终 ≤ 预算；最早那份已被淘汰并重新解码，最近用过的仍命中 | 无头（`test_cache.py`） |
+| 6.4 单条超限不缓存 | 单条帧列表大于单条上限 | 连续解码该条目两次 | 两次都不入缓存（`oversize` 计数增加），且不会把已有条目全挤掉 | 无头（`test_cache.py`） |
+| 6.5 磁盘预算与坏文件 | `FVP_CACHE_DISK_MB` 调小 | 产生超过预算的缩略图；再往缓存目录塞一个坏 PNG | 目录总字节 ≤ 预算（最久未用先淘汰）；坏 PNG 当未命中并删除，不抛异常 | 无头（`test_cache.py`） |
+| 6.6 跨会话缩略图命中 | 同一份资源 | 载入、展开几个角色 → 关程序 → 重开载入同一份 → 再展开 | 缩略图直接出图，`_read_first_frame` 不再被调用；`%LOCALAPPDATA%\FVPTachieComposer\cache\v1\thumb` 里有 PNG | 无头（`test_ui_smoke.py`）+ 手测 |
+| 6.7 换资源可复用且不串图 | 两份文件名相同、画面不同的资源（`build_fixture(salt=…)`） | 载入 A → 展开 → 载入 B → 展开 → 切回 A | A/B 各自显示自己的图，不串；切回 A 时缩略图与整帧都命中缓存、不重新解码 | 无头（`test_ui_smoke.py`）+ 手测 |
+| 6.8 同一键并发只算一次 | 同一动作被多个占位同时请求 | 统计整帧与缩略图解码次数 | 同一键只解码一次，其余等同一结果（`inflight_waits` 增加） | 无头（`test_cache.py`） |
+| 6.9 关缓存 / 目录不可写不炸 | `FVP_CACHE=off`；或把缓存目录指到不可写路径 | 载入、展开、切动作、导出 | 功能与正常时一致，无异常、无卡顿；日志只留 DEBUG | 无头（`test_cache.py` + `test_thumb_threading.py`） |
 
 ### 卡③　大资源加载进度条
 

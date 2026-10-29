@@ -62,7 +62,7 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - **启动即见画面**：启动时先显示浅色底 +「正在载入界面…」，不会出现「黑屏一下再突然亮起来」
 - **记住上次的文件夹**：打开和保存对话框各自记得上次用过的目录，下次打开直接落在那里；关掉程序再开也记得（和窗口偏好一起存在 `settings.json`，上次的目录被删掉就回系统默认位置）
 - **记住窗口**：窗口的大小、位置和最大化状态都按上次关掉程序时的样子还原，拖动/缩放之后不用等退出就记上了。偏好存在 `%LOCALAPPDATA%\FVPTachieComposer\settings.json`；删掉它回默认 1280×760，而上一次记下的坐标落在当前屏幕外时（拔掉一块显示器）只放弃位置，尺寸照常还原，由系统重新摆
-- **缩略图解过就留着**：树缩略图按「资源指纹 + 条目名 + 尺寸」的 SHA1 落盘到 `%LOCALAPPDATA%\FVPTachieComposer\thumbcache`（`FVP_THUMB_CACHE` 可覆盖），最多 50 张、按最近使用淘汰，关掉程序再开同一份资源也直接命中；键里带着源文件路径、大小和 mtime，所以同名动作不会串到上一份资源上，源文件改过缓存自动失效。同一份资源里整帧解码结果也在内存里按 50 帧 LRU 复用，来回切动作不再重解整包；换 `.bin` 或载出时内存缓存清空，磁盘缓存按指纹各管各的
+- **缓存是一整套的，不只缩略图**：解析结果、整帧解码、树缩略图、显示用图像都走同一套缓存——内存默认 320 MiB、磁盘默认 128 MiB（落在 `%LOCALAPPDATA%\FVPTachieComposer\cache`），按字节预算、最久未用先淘汰。键里带着源文件路径、大小和 mtime，所以同名动作不会串到上一份资源上：换资源不用清缓存，切回去直接命中，源文件改过缓存自动失效；同一份资源再打开时连解析都省了。`FVP_CACHE=off` 可整条关掉，`FVP_CACHE_MEM_MB` / `FVP_CACHE_DISK_MB` 可调容量
 - **大资源载入看得见进度**：解析超过约四分之一秒，底部状态栏才亮起进度条，右侧同时报阶段与已处理数（如「读文件头 1200/9000」）；小资源在进度条亮起来之前就解析完了，全程安静不闪条。解析完成、失败或中途载出，进度条立刻收起，不会留在状态栏里
 
 ## 界面
@@ -108,7 +108,7 @@ FVP 引擎角色立绘查看与合成工具：浏览 `.bin` / HZC 资源里的 �
 - 协作流程（分支、PR、什么算做完了）见 [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - 需求变更同步到飞书（推送前自动改任务/测试/变更表并通知群）见 [`feishu/README.md`](feishu/README.md)
 - 自检：`python tests/test_ui_smoke.py`、`python tests/test_thumb_threading.py`、
-  `python tests/test_export_progress.py`、`python tests/test_thumb_cache.py`、
+  `python tests/test_export_progress.py`、`python tests/test_cache.py`、
   `python tests/test_parse_progress.py`、`python tests/test_window_memory.py`、
   `python tests/test_dialog_dirs.py`、`python tests/test_feishu_sync.py`、
   `python tests/test_feishu_watch.py`、`python tests/test_crashlog.py`、

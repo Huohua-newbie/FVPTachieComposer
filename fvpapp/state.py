@@ -25,19 +25,13 @@ from .engine import (
     parse_dir_infos,
 )
 
+from . import cache
 from .dropzone import DROPZONE_ON, _custom_client_available, _dropzone, _dropzone_on, pick_drop_path
 from .media import (
-    EXPR_SUFFIXES,
-    _SRC_CACHE,
-    _SRC_CACHE_MAX,
     _THUMB_POOL,
-    _THUMB_SRC_CACHE,
-    _THUMB_SRC_CACHE_MAX,
     _cached_src,
-    _cached_thumb,
     _checker_src,
     _find_expr_info,
-    _img_bytes,
     _img_src,
     _is_expr,
     _make_thumb_widget,
@@ -277,9 +271,9 @@ class StateMixin:
             self.thumb_refs = []
             self.thumb_list.controls.clear()
             datas = _part_thumb_srcs(
+                cache.resource_fingerprint(self.part_info, self.input_file) if self.part_info else None,
                 self.part_info.get("filename") if self.part_info else None,
                 self.part_imgs,
-                self._cache_token,
             )
             for idx, data in enumerate(datas):
                 self.thumb_list.controls.append(self._make_thumb(data, idx))
@@ -290,17 +284,10 @@ class StateMixin:
             ox = self.part_info.get("offset_x", 0)
             oy = self.part_info.get("offset_y", 0)
             self.result_image.src = _cached_src(
-                _SRC_CACHE,
-                (
-                    "composed",
-                    self.selected_info.get("filename") if self.selected_info else None,
-                    self.part_idx,
-                    ox,
-                    oy,
-                ),
+                cache.image_key(self._selected_fp(), "composed",
+                                self.selected_filename, self.part_idx, ox, oy),
                 self.composed_img,
                 _img_src,
-                _SRC_CACHE_MAX,
             )
             self.result_hint.visible = False
             self.result_meta.value = self._result_meta_text(
@@ -311,11 +298,9 @@ class StateMixin:
             # 无差分底图模式：镜像与两按钮由 _show_base_frame 之外单独兜底
             img = self.base_imgs[self.base_idx]
             self.result_image.src = _cached_src(
-                _SRC_CACHE,
-                ("base", self.selected_filename, self.base_idx),
+                cache.image_key(self._selected_fp(), "base", self.selected_filename, self.base_idx),
                 img,
                 _img_src,
-                _SRC_CACHE_MAX,
             )
             self.result_hint.visible = False
             self.result_meta.value = self._result_meta_text(
@@ -363,7 +348,12 @@ class StateMixin:
             oy,
         )
         self.composed_img = composed
-        self.result_image.src = _img_src(composed)
+        self.result_image.src = _cached_src(
+            cache.image_key(self._selected_fp(), "composed",
+                            self.selected_filename, self.part_idx, ox, oy),
+            composed,
+            _img_src,
+        )
         self.result_hint.visible = False
         self.result_meta.value = self._result_meta_text(composed.size, f"偏移 {ox:+d}/{oy:+d}")
         self.save_btn.disabled = False
@@ -374,11 +364,10 @@ class StateMixin:
     def _show_base_frame(self):
         img = self.base_imgs[self.base_idx]
         src = _cached_src(
-            _SRC_CACHE,
-            ("base", self.selected_filename, self.base_idx),
+            cache.image_key(self._selected_fp(), "base",
+                            self.selected_filename, self.base_idx),
             img,
             _img_src,
-            _SRC_CACHE_MAX,
         )
         self.base_image.src = src
         self.base_hint.visible = False

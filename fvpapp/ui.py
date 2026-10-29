@@ -29,13 +29,8 @@ from .crashlog import mark_exit_once
 from .dropzone import DROPZONE_ON, _custom_client_available, _dropzone, _dropzone_on, pick_drop_path
 from .media import (
     EXPR_SUFFIXES,
-    _SRC_CACHE,
-    _SRC_CACHE_MAX,
     _THUMB_POOL,
-    _THUMB_SRC_CACHE,
-    _THUMB_SRC_CACHE_MAX,
     _cached_src,
-    _cached_thumb,
     _checker_src,
     _find_expr_info,
     _img_bytes,

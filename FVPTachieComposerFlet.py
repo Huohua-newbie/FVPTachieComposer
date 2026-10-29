@@ -53,7 +53,6 @@ from fvpapp.export import ExportMixin
 from fvpapp.media import (  # noqa: F401  （历史脚本按老路径取这些工具）
     EXPR_SUFFIXES,
     _cached_src,
-    _cached_thumb,
     _checker_src,
     _find_expr_info,
     _img_bytes,

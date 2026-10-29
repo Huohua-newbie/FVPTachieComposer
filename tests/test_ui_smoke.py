@@ -23,10 +23,10 @@ os.environ.setdefault(
     "FVP_SETTINGS_PATH",
     str(Path(tempfile.mkdtemp(prefix="ui_smoke_settings_")) / "settings.json"),
 )
-# 缩略图磁盘缓存同理：测试用独立目录，避免读到上一次运行留下的 50 张缓存
+# 缓存目录同理：测试用独立目录，避免读到上一次运行留下的缓存
 os.environ.setdefault(
-    "FVP_THUMB_CACHE",
-    str(Path(tempfile.mkdtemp(prefix="ui_smoke_thumbcache_"))),
+    "FVP_CACHE_DIR",
+    str(Path(tempfile.mkdtemp(prefix="ui_smoke_cache_"))),
 )
 
 try:
@@ -758,20 +758,26 @@ async def run():
     assert all(w.opacity == 1.0 for w in app._tree_wraps), "拖入打断错峰时留下了半透明的角色"
     app._drop_armed = False
 
-    # ── 缩略图缓存 ─────────────────────────────────────────────
-    # 三个缓存的键都只带文件名（角色名、mini_<文件名>_<尺寸>、("part"/"base", 文件名, 帧号)），
-    # 而不同 bin / 不同拆包目录里文件名撞车是常态：载入新资源时不清缓存，新资源就直接
-    # 拿到上一份的图（串图）。这里用"文件名一模一样、画面不同"的两份资源来验。
-    from fvpapp import media as _media
+    # ── 缓存：换资源不清、不串、切回命中（6.7）────────────────
+    # 键里带资源指纹（路径 + 大小 + mtime）：换资源时不清缓存，同名动作各取各的，
+    # 切回上一份资源还能命中。用"文件名一模一样、画面不同"的两份资源验不串图。
+    from fvpapp import cache as _cache
 
-    def _role_thumb_src(role):
-        w = app.role_thumb_cache.get(role)
+    def _role_thumb_src(a, role):
+        w = a.role_thumb_cache.get(role)
         if w is None:
             return None
         return getattr(w, "src", None) or getattr(getattr(w, "content", None), "src", None)
 
-    def _strip_srcs():
-        return [getattr(c.content, "src", None) for c in app.thumb_list.controls]
+    def _strip_srcs(a):
+        return [getattr(c.content, "src", None) for c in a.thumb_list.controls]
+
+    def _expand_all(a):
+        for role in sorted(a.hierarchy):
+            a._tree_toggles[("role", role)][1](None)
+        for role in sorted(a.hierarchy):
+            for outfit in sorted(a.hierarchy[role]):
+                a._tree_toggles[("outfit", f"{role}/{outfit}")][1](None)
 
     decoded = []
     real_read = app._read_first_frame
@@ -780,18 +786,17 @@ async def run():
     )[1]
     try:
         target = next(i for i in app.file_infos if i["filename"] == "CHR_翠_喜_私服")
+        fp_a = _cache.resource_fingerprint(target, str(tmp))
         await app._select_action(target)
         await asyncio.sleep(0.6)                       # 底图与差分条都在后台解
-        base_a, strip_a = app.base_image.src, _strip_srcs()
+        base_a, strip_a = app.base_image.src, _strip_srcs(app)
         assert base_a.startswith("data:image/") and strip_a, "底图或差分条没出来"
-        role_a = _role_thumb_src("翠")
+        role_a = _role_thumb_src(app, "翠")
+        assert _cache.images.get(_cache.image_key(fp_a, "base", "CHR_翠_喜_私服", 0)), \
+            "底图 data URI 没进缓存"
 
         # 角色/服装现在才展开：这些层的缩略图此前不该提前解码
-        for role in sorted(app.hierarchy):
-            app._tree_toggles[("role", role)][1](None)
-        for role in sorted(app.hierarchy):
-            for outfit in sorted(app.hierarchy[role]):
-                app._tree_toggles[("outfit", f"{role}/{outfit}")][1](None)
+        _expand_all(app)
         await asyncio.sleep(0.6)
         first = len(decoded)
         assert first > 0, "展开后一张缩略图都没解码，这条断言没走到路径"
@@ -810,33 +815,62 @@ async def run():
         await asyncio.sleep(0.4)
         assert len(decoded) == first, f"收起再展开又解码了 {len(decoded) - first} 张缩略图"
 
-        # 换资源：同名不同画面，角色/服装/动作/底图/差分条都要跟着换
+        # 换资源：同名不同画面。缓存不清（A 的条目还在），B 也不能拿到 A 的图
         other = build_fixture(salt=90)
         await app._load_bin(str(other))
         await asyncio.sleep(0.6)
-        assert _role_thumb_src("翠") is not None, "新资源的角色缩略图没出来"
-        assert _role_thumb_src("翠") != role_a, "换资源后角色缩略图还是上一份的（同名串图）"
-        assert _media._SRC_CACHE == {}, "换资源后底图/合成缓存还留着上一份的（按文件名索引）"
-        assert _media._THUMB_SRC_CACHE == {}, "换资源后差分条缓存还留着上一份的（按文件名索引）"
+        assert _role_thumb_src(app, "翠") is not None, "新资源的角色缩略图没出来"
+        assert _role_thumb_src(app, "翠") != role_a, "换资源后角色缩略图还是上一份的（同名串图）"
+        assert _cache.images.get(_cache.image_key(fp_a, "base", "CHR_翠_喜_私服", 0)) is not None, \
+            "换资源把上一份资源的缓存清了（应该留着等切回时命中）"
         target_b = next(i for i in app.file_infos if i["filename"] == "CHR_翠_喜_私服")
+        assert _cache.resource_fingerprint(target_b, str(other)) != fp_a, "两份资源的指纹撞了"
         await app._select_action(target_b)
         await asyncio.sleep(0.6)
         assert app.base_image.src != base_a, "换资源后同一动作的底图还是上一份的"
-        assert _strip_srcs() != strip_a, "换资源后差分条还是上一份的"
+        assert _strip_srcs(app) != strip_a, "换资源后差分条还是上一份的"
+
+        # 切回 A：缩略图与整帧都该命中缓存，不再解码
+        n_back = len(decoded)
+        await app._load_bin(str(tmp))
+        await asyncio.sleep(0.4)
+        target_a2 = next(i for i in app.file_infos if i["filename"] == "CHR_翠_喜_私服")
+        await app._select_action(target_a2)
+        await asyncio.sleep(0.4)
+        assert app.base_image.src == base_a, "切回 A 后底图没命中缓存"
+        assert _strip_srcs(app) == strip_a, "切回 A 后差分条没命中缓存"
+        assert len(decoded) == n_back, f"切回 A 又解码了 {len(decoded) - n_back} 张缩略图"
     finally:
         app._read_first_frame = real_read
 
+    expected_hier, expected_infos = set(app.hierarchy), len(app.file_infos)
     await app._unload_bin(None)  # 幂等收尾：第二次载出同样干净
     assert app.input_file is None and app.empty_hint.visible is True
-    assert app.role_thumb_cache == {} and _media._SRC_CACHE == {} and _media._THUMB_SRC_CACHE == {}, \
-        "载出后图像缓存没清干净"
-    from fvpapp import thumbcache as _tc
-    assert _tc.decoded_frames() == 0, "载出后整帧缓存还占着内存"
+    assert app.role_thumb_cache == {}, "载出后缩略图控件字典没清"
+    assert _cache.images.get(_cache.image_key(fp_a, "base", "CHR_翠_喜_私服", 0)) is not None, \
+        "载出把可复用的缓存也清掉了（下次打开又要重算）"
+
+    import fvpapp.resources as _res
+
+    # ── 6.1 解析索引跨会话命中 ─────────────────────────────────
+    # 同一份目录再载入（等价于下次开会话）不该重扫：索引缓存直接给出清单与层级。
+    parsed = []
+    real_scan0 = _res.parse_dir_infos
+    _res.parse_dir_infos = lambda path, progress=None: (
+        parsed.append(str(path)), real_scan0(path, progress)
+    )[1]
+    app_idx = ComposerApp(FakePage())
+    try:
+        await app_idx._load_bin(str(tmp))
+    finally:
+        _res.parse_dir_infos = real_scan0
+    assert parsed == [], f"索引已缓存却又重新解析了 {len(parsed)} 次"
+    assert set(app_idx.hierarchy) == expected_hier, "索引缓存回来的层级与首次不一致"
+    assert len(app_idx.file_infos) == expected_infos, "索引缓存回来的条目数与首次不一致"
 
     # ── 大资源载入的进度反馈 ───────────────────────────────────
     # 小资源在进度条亮起来之前就解析完了，那条路全程安静；只有慢资源才把
     # "正在解析"和进度条一起亮出来，状态栏右侧报阶段，收尾立刻收起。
-    import fvpapp.resources as _res
 
     big = Path(tempfile.mkdtemp(prefix="ui_smoke_big_"))
     for i in range(400):
@@ -900,8 +934,8 @@ async def run():
     assert app.parse_progress.visible is False and app.parse_progress.value is None, \
         "收尾没清干净"
 
-    # ── 跨会话磁盘命中（50 张上限内的树缩略图）────────────────
-    # 换一个 App 实例、同一份资源、同一个 FVP_THUMB_CACHE：树里三级缩略图
+    # ── 6.6 跨会话磁盘命中（树缩略图）─────────────────────────
+    # 换一个 App 实例、同一份资源、同一个 FVP_CACHE_DIR：树里三级缩略图
     # 都应直接命中磁盘，_read_first_frame 一次都不该再走。
     app2 = ComposerApp(FakePage())
     decoded2 = []
@@ -924,8 +958,11 @@ async def run():
 
     # ── 卡片 2.4：来回切动作不重解整帧 ─────────────────────────
     # 计数挂在真正干整包 zlib 的 hzc_data_to_pil_list 上（不是树里的首帧解码）。
+    # 用一份没被前面流程碰过的新资源：帧缓存本身跨实例共享，拿旧资源测
+    # 会直接命中，计数永远是 0。
+    fixt3 = build_fixture(salt=77)
     app3 = ComposerApp(FakePage())
-    await app3._load_bin(str(tmp))
+    await app3._load_bin(str(fixt3))
     await asyncio.sleep(0.2)
     calls = []
     real_list = _res.hzc_data_to_pil_list
