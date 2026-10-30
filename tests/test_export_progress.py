@@ -249,6 +249,27 @@ async def main():
     check("无差分模式导出走 _base_ 命名",
           names6 == [f"CHR_T_基_私服_base_{i:03d}.png" for i in range(4)])
 
+    # ── 8. 对话框开着时载出/换资源：这一批直接作废，不许抛异常 ──────────
+    out7 = root / "unload_during_dialog"
+    out7.mkdir()
+    app7 = new_app(out7, 6)
+
+    async def unload_in_dialog(dialog_title=None, initial_directory=None, **kw):
+        # 模拟用户在目录对话框开着时点「载出」：状态清空、代数作废
+        app7._abort_export()
+        app7.selected_info = None
+        app7._clear_previews()
+        return str(out7)
+
+    app7.file_picker.get_directory_path = unload_in_dialog
+    crashed = None
+    try:
+        await app7._batch_export(None)
+    except Exception as ex:
+        crashed = ex
+    check("对话框期间载出不抛异常", crashed is None)
+    check("对话框期间载出不写任何文件", list(out7.glob("*.png")) == [])
+
     if fails:
         print("\nFAILED:", fails)
         sys.exit(f"EXPORT_PROGRESS_TEST_FAILED: {fails}")

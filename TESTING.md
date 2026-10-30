@@ -9,7 +9,7 @@ python tests/test_ui_smoke.py          # 用真实 flet 搭整棵树，查控件
 python tests/test_thumb_threading.py   # 假 flet，查缩略图解码仍在后台线程、update 回 UI 线程
 python tests/test_thumb_cache.py       # 缩略图磁盘缓存：键绑资源指纹、严格 50 张 LRU、整帧 50 帧上限、坏目录不抛
 python tests/test_parse_progress.py    # 解析进度协议：阶段齐全、计数单调、末次报满、传不传回调结果一致
-python tests/test_export_progress.py   # 批量导出：进度单调报满、取消不再写盘、失败清单、只重试失败项、过期帧不改状态栏
+python tests/test_export_progress.py   # 批量导出：进度单调报满、取消不再写盘、失败清单、只重试失败项、过期帧不改状态栏、对话框期间载出即作废
 python tests/test_window_memory.py     # 窗口偏好：读不到回默认、坐标出界不还原、最大化不覆盖几何
 python tests/test_dialog_dirs.py       # 对话框目录记忆：跨重启读回、目录没了回默认、不冲掉其它段
 python tests/test_feishu_sync.py       # 需求变更同步：清单校验、追加、幂等、断点续、pre-push 解析

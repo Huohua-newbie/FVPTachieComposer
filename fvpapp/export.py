@@ -113,6 +113,8 @@ class ExportMixin:
         if not self.base_imgs:
             self._snack("底图为空", error=True)
             return
+        # 对话框开着的时候可能被载出 / 换了资源，回来要先确认还是同一代
+        gen = self._export_gen
         try:
             result = await self.file_picker.get_directory_path(
                 dialog_title="选择导出目录",
@@ -122,6 +124,9 @@ class ExportMixin:
             self._snack(f"导出对话框失败: {ex}", error=True)
             return
         if not result:
+            return
+        if gen != self._export_gen:
+            # 这一批的底图已经作废，写出去只会是旧资源的图
             return
         save_dir = str(result)
         self.export_dir = save_dir
