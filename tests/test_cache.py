@@ -182,9 +182,12 @@ png = b"\x89PNG\r\n\x1a\n" + b"\0" * 992     # 每份 1000 字节
 keys = ["a" * 40, "b" * 40, "c" * 40, "d" * 40]
 for k in keys[:3]:
     dc.write(k, png)
-# 把 a 的 mtime 推远，保证它是最"新"的
-future = time.time() + 3600
-os.utime(dc.path_for(keys[0]), (future, future))
+# 显式指定 mtime 排出新旧：a 最新、c 居中、b 最老。
+# 不能依赖写入顺序——有些文件系统（drvfs/粗粒度）连续写会得到相同的 mtime_ns。
+now_ns = time.time_ns()
+for key, offset_s in ((keys[0], 3600), (keys[2], -1800), (keys[1], -7200)):
+    stamp = (now_ns + offset_s * 1_000_000_000) / 1_000_000_000
+    os.utime(dc.path_for(key), (stamp, stamp))
 dc.write(keys[3], png)
 check("磁盘总量不超预算", dc.stats()["bytes"] <= dc.max_bytes, dc.stats())
 disk_total = sum(p.stat().st_size for p in dc._dir().iterdir() if not dc._skip(p))
