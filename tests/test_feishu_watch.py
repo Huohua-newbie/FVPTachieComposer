@@ -1,39 +1,25 @@
-"""飞书 Base 变更监视的回归测试（不联网、不碰真飞书）。
+"""飞书 Base 变更监视的回归测试：不联网、不碰真飞书、状态落在用例临时目录。
 
-用假的 lark-cli runner 验证：
-- 首次运行只建基线，不把已有行当新增刷屏
-- rev 没动时不拉全表；rev 动了才逐条 diff
-- 新增 / 修改 / 删除 / 列变化各报一行，修改带旧值→新值
-- 状态落盘后续跑不重复报，坏状态自动重建基线
-- 取数失败不崩，--once 返回非零
+每个用例一份假的 lark-cli runner 与独立 state，断点/基线互不干扰。
 
-python tests/test_feishu_watch.py
+    python tests/test_feishu_watch.py -v
+    cd tests && python -m unittest test_feishu_watch.PaginationTest -v
 """
+
+from __future__ import annotations
+
 import json
-import sys
-import tempfile
-from pathlib import Path
+import unittest
 
-for _s in (sys.stdout, sys.stderr):
-    try:
-        _s.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+try:
+    from . import support
+except ImportError:  # 直接 python tests/test_feishu_watch.py
+    import support
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "scripts"))
+support.ensure_scripts_on_path()
 
 import feishu_sync as fs  # noqa: E402
 import feishu_watch as fw  # noqa: E402
-
-fails = []
-
-
-def check(name, ok):
-    print(("PASS " if ok else "FAIL ") + name)
-    if not ok:
-        fails.append(name)
-
 
 CONFIG = {
     "base_token": "base_test",
@@ -42,9 +28,11 @@ CONFIG = {
 }
 
 
-class Fake:
+class FakeWatch:
+    """按 `--limit/--offset` 分页返回记录的假 lark-cli。"""
+
     def __init__(self):
-        self.rev = {"tblTASKS": 1, "tblTESTS": 1, "tblCHANGES": 1}
+        self.rev: dict[str, int | None] = {"tblTASKS": 1, "tblTESTS": 1, "tblCHANGES": 1}
         self.fields = {
             "tblTASKS": ["任务", "状态"],
             "tblTESTS": ["用例", "结果", "备注"],
@@ -55,10 +43,11 @@ class Fake:
             "tblTESTS": {"recT1": {"用例": "1.2 最大化往返", "结果": ["未跑"], "备注": ""}},
             "tblCHANGES": {"recC1": {"功能": "—", "改了什么": "旧改动"}},
         }
-        self.calls = []
+        self.calls: list[tuple[str, int, int]] = []
 
     def bump(self, table):
-        self.rev[table] += 1
+        if self.rev[table] is not None:
+            self.rev[table] += 1
 
     def set(self, table, rid, values):
         self.rows[table][rid].update(values)
@@ -80,19 +69,26 @@ class Fake:
         ids = list(self.rows[table])[offset:offset + limit]
         data = [[self.rows[table][rid].get(name) for name in fields] for rid in ids]
         return {"ok": True, "data": {
-            "fields": list(fields), "record_id_list": ids, "data": data,
+            "fields": list(fields),
+            "record_id_list": ids,
+            "data": data,
             "has_more": offset + limit < len(self.rows[table]),
             "rev": self.rev[table],
         }}
 
-    def full_fetches(self):
-        return sum(1 for _t, limit, _o in self.calls if limit == fw.PAGE_SIZE)
+    def full_fetches(self, table=None):
+        return sum(1 for name, limit, _ in self.calls
+                   if limit == fw.PAGE_SIZE and (table is None or name == table))
+
+    def offsets(self, table):
+        return [offset for name, limit, offset in self.calls
+                if name == table and limit == fw.PAGE_SIZE]
 
 
 class Recorder:
     def __init__(self):
-        self.lines = []
-        self.errors = []
+        self.lines: list[str] = []
+        self.errors: list[str] = []
 
     def out(self, text):
         self.lines.append(text)
@@ -101,108 +97,229 @@ class Recorder:
         self.errors.append(text)
 
 
-def make_watcher(tmp: Path, fake, state="state.json"):
-    rec = Recorder()
-    watcher = fw.Watcher(CONFIG, state_path=tmp / state, runner=fake,
-                         out=rec.out, err=rec.err)
-    return watcher, rec
+class WatchTestBase(support.EnvTestCase):
+    def setUp(self):
+        super().setUp()
+        self.fake = FakeWatch()
+        self.rec = Recorder()
+        self.state = self.tmp / "state.json"
+
+    def watcher(self, *, state=None, tables=None, runner=None, config=None):
+        return fw.Watcher(config or CONFIG, state_path=state or self.state,
+                          runner=runner or self.fake,
+                          out=self.rec.out, err=self.rec.err, tables=tables)
+
+    def baseline(self, tables=None):
+        watcher = self.watcher(tables=tables)
+        watcher.poll_once()
+        self.rec.lines.clear()
+        self.rec.errors.clear()
+        return watcher
+
+    def read_state(self, path=None):
+        return json.loads((path or self.state).read_text(encoding="utf-8"))
 
 
-tmp = Path(tempfile.mkdtemp(prefix="fvp_watch_"))
-fake = Fake()
-watcher, rec = make_watcher(tmp, fake)
+class BaselineTest(WatchTestBase):
+    def test_first_poll_builds_baseline_without_reporting_existing_rows(self):
+        self.watcher().poll_once()
+        self.assertEqual(self.rec.lines, [], "首次运行不该把已有行当新增")
+        self.assertEqual(len(self.rec.errors), 3)
+        self.assertTrue(all("建基线" in e for e in self.rec.errors))
+        self.assertEqual(self.fake.full_fetches(), 3)
 
-watcher.poll_once()
-check("首次运行不报新增", rec.lines == [])
-check("首次运行给三张表建基线", len(rec.errors) == 3 and
-      all("建基线" in e for e in rec.errors))
-state = json.loads((tmp / "state.json").read_text(encoding="utf-8"))
-check("状态记下 rev", state["tables"]["tests"]["rev"] == 1)
-check("状态记下快照", state["tables"]["tests"]["snapshot"]["records"]["recT1"]["用例"]
-      == "1.2 最大化往返")
-check("基线拉过全表", fake.full_fetches() == 3)
-check("没有残留 .tmp", not list(tmp.glob("*.tmp")))
+        state = self.read_state()
+        self.assertEqual(state["tables"]["tests"]["rev"], 1)
+        self.assertEqual(state["tables"]["tests"]["snapshot"]["records"]["recT1"]["用例"],
+                         "1.2 最大化往返")
+        self.assertEqual(list(self.tmp.glob("*.tmp")), [], "状态写盘不该留下 .tmp")
 
-# rev 没动：只读 rev，不拉全表
-rec.lines.clear()
-calls_before = len(fake.calls)
-watcher.poll_once()
-check("rev 没动不发事件", rec.lines == [])
-check("rev 没动不拉全表", fake.full_fetches() == 3)
-check("rev 没动仍逐表查一次 rev", len(fake.calls) - calls_before == 3)
+    def test_only_selected_tables_are_polled(self):
+        self.watcher(tables=["tasks"]).poll_once()
+        self.assertEqual([name for name, _, _ in self.fake.calls], ["tblTASKS"] * 2)
+        self.assertEqual(list(self.read_state()["tables"]), ["tasks"])
 
-# 修改一行
-fake.set("tblTESTS", "recT1", {"结果": ["通过"]})
-fake.bump("tblTESTS")
-rec.lines.clear()
-watcher.poll_once()
-check("修改报一行", len(rec.lines) == 1)
-line = rec.lines[0] if rec.lines else ""
-check("修改标明表与用例", "[修改] 测试 · 1.2 最大化往返" in line)
-check("修改带旧值→新值", "结果: 未跑 → 通过" in line)
-check("只拉了改动的那张表", fake.full_fetches() == 4)
-
-# 同一份状态换进程续跑：不重复报
-watcher2, rec2 = make_watcher(tmp, fake)
-watcher2.poll_once()
-check("续跑不重复报", rec2.lines == [])
-
-# 新增一行
-fake.add("tblTESTS", "recT2", {"用例": "1.8 新用例", "结果": ["未跑"], "备注": ""})
-rec.lines.clear()
-watcher.poll_once()
-check("新增报一行", rec.lines == ["[新增] 测试 · 1.8 新用例"])
-
-# 删除一行
-fake.remove("tblTESTS", "recT2")
-rec.lines.clear()
-watcher.poll_once()
-check("删除报一行", len(rec.lines) == 1)
-check("删除带用例名", "[删除] 测试 · 1.8 新用例" in rec.lines[0])
-
-# 改表头：只报结构，不把整列变化刷成每行都改了
-fake.fields["tblTESTS"].append("负责人")
-fake.bump("tblTESTS")
-rec.lines.clear()
-watcher.poll_once()
-check("新增列只报一行结构", rec.lines == ["[结构] 测试 · 新增列 负责人"])
-
-# 删列同理
-fake.fields["tblTESTS"].remove("负责人")
-fake.bump("tblTESTS")
-rec.lines.clear()
-watcher.poll_once()
-check("删除列只报一行结构", rec.lines == ["[结构] 测试 · 删除列 负责人"])
-
-# 多字段修改只列前三项并标总数
-fake.set("tblTASKS", "recK1", {"任务": "卡①改名", "状态": ["已完成"]})
-fake.bump("tblTASKS")
-rec.lines.clear()
-watcher.poll_once()
-check("多字段修改只一行", len(rec.lines) == 1)
-check("多字段修改按行报", "任务: 卡① → 卡①改名" in rec.lines[0]
-      and "状态: 进行中 → 已完成" in rec.lines[0])
-
-# 坏状态文件：重建基线，不崩
-(tmp / "bad.json").write_text("{", encoding="utf-8")
-watcher3, rec3 = make_watcher(tmp, fake, state="bad.json")
-watcher3.poll_once()
-check("坏状态不崩", rec3.lines == [])
-check("坏状态被重写", "snapshot" in json.loads((tmp / "bad.json").read_text(encoding="utf-8"))
-      .get("tables", {}).get("tests", {}))
+    def test_unknown_table_is_rejected(self):
+        bad = {**CONFIG, "tables": {"tasks": "tblTASKS"}}
+        with self.assertRaises(fs.SyncError):
+            self.watcher(config=bad)
 
 
-class Boom:
-    def __call__(self, _args):
-        raise fs.SyncError("读表失败")
+class DiffTest(WatchTestBase):
+    def test_unchanged_rev_reads_one_row_per_table_and_skips_full_fetch(self):
+        watcher = self.baseline()
+        calls_before = len(self.fake.calls)
+        watcher.poll_once()
+        self.assertEqual(self.rec.lines, [])
+        self.assertEqual(self.fake.full_fetches(), 3, "rev 没动不该拉全表")
+        self.assertEqual(len(self.fake.calls) - calls_before, 3, "每张表查一次 rev")
+
+    def test_modified_row_reports_old_and_new_value(self):
+        watcher = self.baseline()
+        self.fake.set("tblTESTS", "recT1", {"结果": ["通过"]})
+        self.fake.bump("tblTESTS")
+        watcher.poll_once()
+        self.assertEqual(len(self.rec.lines), 1, self.rec.lines)
+        line = self.rec.lines[0]
+        self.assertIn("[修改] 测试 · 1.2 最大化往返", line)
+        self.assertIn("结果: 未跑 → 通过", line)
+        self.assertEqual(self.fake.full_fetches(), 4, "只该补拉改动的那张表")
+
+    def test_added_and_removed_rows_each_report_one_line(self):
+        watcher = self.baseline()
+        self.fake.add("tblTESTS", "recT2", {"用例": "1.8 新用例", "结果": ["未跑"], "备注": ""})
+        watcher.poll_once()
+        self.assertEqual(self.rec.lines, ["[新增] 测试 · 1.8 新用例"])
+
+        self.rec.lines.clear()
+        self.fake.remove("tblTESTS", "recT2")
+        watcher.poll_once()
+        self.assertEqual(len(self.rec.lines), 1)
+        self.assertIn("[删除] 测试 · 1.8 新用例", self.rec.lines[0])
+
+    def test_column_add_and_remove_report_structure_only(self):
+        watcher = self.baseline()
+        self.fake.fields["tblTESTS"].append("负责人")
+        self.fake.bump("tblTESTS")
+        watcher.poll_once()
+        self.assertEqual(self.rec.lines, ["[结构] 测试 · 新增列 负责人"])
+
+        self.rec.lines.clear()
+        self.fake.fields["tblTESTS"].remove("负责人")
+        self.fake.bump("tblTESTS")
+        watcher.poll_once()
+        self.assertEqual(self.rec.lines, ["[结构] 测试 · 删除列 负责人"])
+
+    def test_multi_field_change_stays_one_line_and_caps_detail(self):
+        self.fake.fields["tblTASKS"].extend(["优先级", "截止", "负责人"])
+        watcher = self.baseline()
+        self.fake.set("tblTASKS", "recK1", {"任务": "卡①改名", "状态": ["已完成"],
+                                            "优先级": "高", "截止": "明天",
+                                            "负责人": "kitsuneMori"})
+        self.fake.bump("tblTASKS")
+        watcher.poll_once()
+        self.assertEqual(len(self.rec.lines), 1, self.rec.lines)
+        line = self.rec.lines[0]
+        self.assertIn("任务: 卡① → 卡①改名", line)
+        self.assertIn("等 5 项", line)
+
+    def test_new_watcher_resumes_from_state_without_repeating(self):
+        self.baseline()
+        rec2 = Recorder()
+        watcher2 = fw.Watcher(CONFIG, state_path=self.state, runner=self.fake,
+                              out=rec2.out, err=rec2.err)
+        watcher2.poll_once()
+        self.assertEqual(rec2.lines, [], "续跑不应重复报基线里的行")
+
+    def test_rev_none_forces_full_snapshot_each_round(self):
+        for table in self.fake.rev:
+            self.fake.rev[table] = None
+        watcher = self.watcher()
+        watcher.poll_once()
+        self.assertEqual(self.fake.full_fetches(), 3)
+        self.assertIsNone(self.read_state()["tables"]["tests"]["rev"])
+
+        self.fake.calls.clear()
+        watcher.poll_once()
+        self.assertEqual(self.fake.full_fetches(), 3, "没有 rev 只能每轮重新拉")
+        self.assertEqual(self.rec.lines, [])
+        self.assertNotIn("rev", self.read_state()["tables"]["tests"])
+
+    def test_clean_state_is_written_with_snapshot(self):
+        self.baseline()
+        self.fake.set("tblTASKS", "recK1", {"任务": "新名字"})
+        self.fake.bump("tblTASKS")
+        self.watcher().poll_once()
+        snapshot = self.read_state()["tables"]["tasks"]["snapshot"]["records"]["recK1"]
+        self.assertEqual(snapshot["任务"], "新名字")
 
 
-rec4 = Recorder()
-bad = fw.Watcher(CONFIG, state_path=tmp / "boom.json", runner=Boom(),
-                 out=rec4.out, err=rec4.err)
-check("取数失败 --once 返回非零", fw.run_once(bad) == 1)
-check("取数失败有错误输出", any("读表失败" in e for e in rec4.errors))
+class PaginationTest(WatchTestBase):
+    def build(self, count=250):
+        self.fake.rows["tblTESTS"] = {
+            f"rec{i:04d}": {"用例": f"用例 {i}", "结果": ["未跑"], "备注": ""}
+            for i in range(count)
+        }
+        self.fake.fields["tblTESTS"] = ["用例", "结果", "备注"]
 
-if fails:
-    sys.exit(f"FEISHU_WATCH FAILED: {fails}")
-print("FEISHU_WATCH_OK")
+    def test_snapshot_walks_all_pages(self):
+        self.build(250)
+        self.baseline(tables=["tests"])
+        self.assertEqual(self.fake.offsets("tblTESTS"), [0, 200],
+                         "250 行应分两页拉，offset 依次 0/200")
+        records = self.read_state()["tables"]["tests"]["snapshot"]["records"]
+        self.assertEqual(len(records), 250)
+        self.assertIn("rec0249", records)
+
+    def test_change_in_last_page_is_detected(self):
+        self.build(250)
+        watcher = self.baseline(tables=["tests"])
+        self.fake.set("tblTESTS", "rec0249", {"结果": ["通过"]})
+        self.fake.bump("tblTESTS")
+        watcher.poll_once()
+        self.assertEqual(len(self.rec.lines), 1, self.rec.lines)
+        self.assertIn("用例 249", self.rec.lines[0])
+        self.assertIn("结果: 未跑 → 通过", self.rec.lines[0])
+        self.assertEqual(self.fake.offsets("tblTESTS")[-2:], [0, 200])
+
+
+class BadStateTest(WatchTestBase):
+    def test_corrupt_state_rebuilds_baseline(self):
+        bad = self.tmp / "bad.json"
+        bad.write_text("{", encoding="utf-8")
+        self.watcher(state=bad).poll_once()
+        self.assertEqual(self.rec.lines, [], "坏状态应静默重建基线")
+        state = self.read_state(bad)
+        self.assertIn("snapshot", state["tables"]["tests"])
+
+    def test_non_dict_state_is_ignored(self):
+        bad = self.tmp / "list.json"
+        bad.write_text("[1, 2]", encoding="utf-8")
+        self.watcher(state=bad).poll_once()
+        self.assertIn("snapshot", self.read_state(bad)["tables"]["tests"])
+
+    def test_unwritable_state_propagates_instead_of_silently_succeeding(self):
+        blocked = self.tmp / "state-dir"
+        blocked.mkdir()
+        with self.assertRaises(OSError):
+            self.watcher(state=blocked).poll_once()
+
+
+class LabelsTest(support.EnvTestCase):
+    def test_label_prefers_known_fields_in_order(self):
+        fields = {"用例": "1.2 最大化往返", "任务": "卡①"}
+        self.assertEqual(fw.record_label("tests", fields, "recT1"), "1.2 最大化往返")
+        self.assertEqual(fw.record_label("tasks", fields, "recK1"), "卡①")
+
+    def test_label_falls_back_to_first_non_empty_string(self):
+        self.assertEqual(fw.record_label("tests", {"其他": "", "说明": "随便"}, "recX"), "随便")
+
+    def test_label_falls_back_to_record_id(self):
+        self.assertEqual(fw.record_label("tests", {"结果": ["未跑"]}, "recX"), "recX")
+
+    def test_short_renders_empty_lists_and_truncates(self):
+        self.assertEqual(fw._short(None), "空")
+        self.assertEqual(fw._short([]), "空")
+        self.assertEqual(fw._short(["进行中", "高"]), "进行中、高")
+        long_text = "一" * 40
+        self.assertTrue(fw._short(long_text, 10).endswith("…"))
+        self.assertEqual(len(fw._short(long_text, 10)), 10)
+
+
+class RunOnceTest(WatchTestBase):
+    class Boom:
+        def __call__(self, _args):
+            raise fs.SyncError("读表失败")
+
+    def test_success_returns_zero(self):
+        self.assertEqual(fw.run_once(self.watcher()), 0)
+        self.assertEqual(self.rec.errors[0].count("建基线"), 1)
+
+    def test_fetch_failure_returns_one_and_reports(self):
+        watcher = self.watcher(runner=self.Boom())
+        self.assertEqual(fw.run_once(watcher), 1)
+        self.assertTrue(any("读表失败" in e for e in self.rec.errors), self.rec.errors)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

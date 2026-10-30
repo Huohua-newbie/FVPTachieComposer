@@ -1,236 +1,498 @@
-"""异常日志落盘的回归测试。
+"""崩溃与诊断日志落盘的回归测试（stdlib unittest，不碰真用户的日志目录）。
 
-覆盖：日志目录/filename 规则（版本号 + 启动时刻）、启动头信息、
-未捕获异常（主线程 / 子线程 / asyncio 任务）落盘、flet 事件回调异常落盘、
-旧日志清理、目录不可写时的降级、版本号与 pyproject.toml 一致。
+覆盖：文件名/目录规则（版本号 + 启动时刻 + 打包态 + 回退）、启动头信息、
+主线程 / 子线程 / asyncio / 析构异常落盘、原钩子仍被调用、旧日志清理、
+目录不可写时的降级、`FVP_NO_FILE_LOG` 开关、真实 faulthandler 崩溃（子进程）。
 
-Linux / Windows 都能直接跑：python tests/test_crashlog.py
+每个用例一份临时目录；`support.CrashlogSandbox` 负责还原 logging handler 与
+全部异常钩子，所以用例顺序无关、可单跑：
+
+    python tests/test_crashlog.py -v
+    cd tests && python -m unittest test_crashlog.HooksTest -v
 """
-import asyncio
+
+from __future__ import annotations
+
+import gc
 import logging
 import os
 import re
+import subprocess
 import sys
-import tempfile
 import threading
+import unittest
 from pathlib import Path
+from unittest import mock
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+try:
+    from . import support
+except ImportError:  # 直接 python tests/test_crashlog.py
+    import support
 
 import fvpapp.crashlog as cl  # noqa: E402
 
-fails = []
+LOG_NAME_RE = re.compile(
+    r"fvptachie-%s-\d{8}-\d{6}(-\d+)?\.log" % re.escape(cl.app_version()))
 
 
-def check(name, ok):
-    print(("PASS " if ok else "FAIL ") + name)
-    if not ok:
-        fails.append(name)
+class CrashlogTestBase(support.EnvTestCase):
+    """临时目录 + 环境沙箱 + crashlog 全局状态沙箱。"""
 
+    def setUp(self) -> None:  # noqa: N802
+        super().setUp()
+        # support 在导入期设了 FVP_NO_FILE_LOG，避免别的测试留 logs/；
+        # 本文件要测落盘，这里摘掉。
+        self.sandbox.pop("FVP_NO_FILE_LOG")
+        self.sandbox.set(FVP_LOG_LEVEL="CRITICAL")  # 别让用例往测试输出刷日志
+        self.addCleanup(support.CrashlogSandbox().start().restore)
+        self.logger = logging.getLogger(cl.APP_LOGGER)
+        self.root = logging.getLogger()
 
-def reset_logging():
-    """拆掉当前的文件 handler，让下一次 setup_logging 重新开一个。"""
-    root = logging.getLogger()
-    for h in list(root.handlers):
-        if getattr(h, "_fvp_file", False):
-            root.removeHandler(h)
+    # ── 小工具 ────────────────────────────────────────────────
+    def file_handlers(self) -> list[logging.Handler]:
+        return [h for h in self.root.handlers if getattr(h, "_fvp_file", False)]
+
+    def start_log(self, log_dir: Path | None = None) -> Path:
+        path = cl.setup_logging(log_dir if log_dir is not None else self.tmp / "logs")
+        self.assertIsNotNone(path, "日志应落盘，实际返回 None")
+        return path
+
+    def read_log(self, path: Path) -> str:
+        for h in self.root.handlers:
             try:
-                h.close()
+                h.flush()
             except Exception:
                 pass
-    if cl._fault_stream is not None:
-        try:
-            cl._fault_stream.close()
-        except Exception:
-            pass
-    cl._log_path = None
-    cl._file_handler = None
-    cl._fault_stream = None
-    cl._exit_logged = False
-
-
-def read_all(path):
-    try:
         return Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
+
+    def pretend_packaged(self) -> None:
+        """模拟 flet 打包态：内嵌解释器不设 sys.frozen，代码在 <exe>\\app\\fvpapp。"""
+        pkg = self.tmp / "FVP" / "app" / "fvpapp"
+        pkg.mkdir(parents=True)
+        old_exe, old_pkg = sys.executable, cl._PKG_DIR
+        sys.executable = str(self.tmp / "FVP" / "FVPTachieComposer.exe")
+        cl._PKG_DIR = pkg.resolve()
+        self.addCleanup(setattr, cl, "_PKG_DIR", old_pkg)
+        self.addCleanup(setattr, sys, "executable", old_exe)
+
+    def run_python(self, code: str, *args: str) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env.pop("FVP_NO_FILE_LOG", None)  # 子进程要真的写日志
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(support.REPO), env["PYTHONPATH"]] if env.get("PYTHONPATH")
+            else [str(support.REPO)])
+        return subprocess.run(
+            [sys.executable, "-c", code, *args],
+            capture_output=True, text=True, encoding="utf-8",
+            env=env, cwd=str(support.REPO), timeout=60,
+        )
 
 
-def main():
-    # resolve()：Windows 的 TEMP 常是 8.3 短名（ADMINI~1），而 app_root()
-    # 返回长路径，不先展开会因为大小写不同的同一路径判成不相等。
-    tmp = Path(tempfile.mkdtemp(prefix="fvp-crashlog-")).resolve()
+class LogPathTest(CrashlogTestBase):
+    def test_version_matches_pyproject(self):
+        pyproject = (support.REPO / "pyproject.toml").read_text(encoding="utf-8")
+        m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M)
+        self.assertIsNotNone(m, "pyproject.toml 里应有 version")
+        self.assertEqual(m.group(1), cl.app_version())
 
-    # ── 1. 版本号只有一处真源 ────────────────────────────
-    pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
-    m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M)
-    check("pyproject.toml 里有 version", m is not None)
-    check("fvpapp/version.py 与 pyproject.toml 版本一致",
-          m is not None and m.group(1) == cl.app_version())
+    def test_source_run_is_not_packaged(self):
+        self.assertFalse(cl.is_packaged())
+        self.assertEqual(cl.app_root(), support.REPO)
 
-    # ── 2. 目录规则：日志跟着应用根目录走 ────────────────
-    old_local = os.environ.get("LOCALAPPDATA")
-    old_dir = os.environ.pop("FVP_LOG_DIR", None)
-    real_app_root = cl.app_root
-    try:
-        os.environ["LOCALAPPDATA"] = str(tmp / "AppData" / "Local")
-        check("默认落在应用根目录的 logs 下",
-              cl.logs_dir() == cl.app_root() / "logs")
-        # flet 打包态：内嵌解释器不设 sys.frozen，代码树在 <exe>\app\fvpapp 下
-        real_exe, real_pkg = sys.executable, cl._PKG_DIR
-        try:
-            pkg = tmp / "FVP" / "app" / "fvpapp"
-            pkg.mkdir(parents=True)
-            sys.executable = str(tmp / "FVP" / "FVPTachieComposer.exe")
-            cl._PKG_DIR = pkg.resolve()
-            check("flet 打包态认 exe 所在目录", cl.app_root() == tmp / "FVP")
-            check("flet 打包态 banner 报「打包态 是」", cl.is_packaged() is True)
-        finally:
-            sys.executable = real_exe
-            cl._PKG_DIR = real_pkg
-        check("源码运行不算打包态", cl.is_packaged() is False)
-        # 根目录写不进去（装进 Program Files、只读介质）才退回 LOCALAPPDATA
-        blocker = tmp / "not-a-dir"
+    def test_default_dir_follows_app_root(self):
+        self.sandbox.pop("FVP_LOG_DIR")  # 否则 for_test 的覆盖优先
+        with mock.patch.object(cl, "app_root", lambda: self.tmp / "app"):
+            self.assertEqual(cl.logs_dir(), self.tmp / "app" / "logs")
+            self.assertTrue((self.tmp / "app" / "logs").is_dir(), "应创建日志目录")
+
+    def test_packaged_root_is_exe_dir(self):
+        self.sandbox.pop("FVP_LOG_DIR")
+        self.pretend_packaged()
+        self.assertTrue(cl.is_packaged())
+        self.assertEqual(cl.app_root(), self.tmp / "FVP")
+        self.sandbox.set(LOCALAPPDATA=self.tmp / "AppData" / "Local")
+        self.assertEqual(cl.logs_dir(), self.tmp / "FVP" / "logs")
+
+    def test_unwritable_root_falls_back_to_localappdata(self):
+        blocker = self.tmp / "not-a-dir"
         blocker.write_text("", encoding="utf-8")
-        cl.app_root = lambda: blocker
-        check("根目录不可写时退回 %LOCALAPPDATA%",
-              cl.logs_dir() == tmp / "AppData" / "Local" / "FVPTachieComposer" / "logs")
-        os.environ["FVP_LOG_DIR"] = str(tmp / "override")
-        check("FVP_LOG_DIR 可覆盖", cl.logs_dir() == tmp / "override")
-    finally:
-        cl.app_root = real_app_root
-        os.environ.pop("FVP_LOG_DIR", None)
-        if old_local is None:
-            os.environ.pop("LOCALAPPDATA", None)
-        else:
-            os.environ["LOCALAPPDATA"] = old_local
-        if old_dir is not None:
-            os.environ["FVP_LOG_DIR"] = old_dir
+        self.sandbox.pop("FVP_LOG_DIR")
+        local = self.tmp / "AppData" / "Local"
+        self.sandbox.set(LOCALAPPDATA=local)
+        with mock.patch.object(cl, "app_root", lambda: blocker):
+            self.assertEqual(cl.logs_dir(), local / cl.APP_NAME / "logs")
 
-    # ── 3. 落盘：文件名带版本号与时间戳 ──────────────────
-    reset_logging()
-    log_dir = tmp / "logs"
-    path = cl.setup_logging(log_dir)
-    check("日志文件已创建", path is not None and path.is_file())
-    name_ok = path is not None and re.fullmatch(
-        r"fvptachie-%s-\d{8}-\d{6}(-\d+)?\.log" % re.escape(cl.app_version()),
-        path.name,
-    )
-    check("文件名含版本号与时间戳", bool(name_ok))
-    check("setup_logging 幂等", cl.setup_logging(log_dir) == path)
+    @unittest.skipIf(os.name == "nt", "Windows 走 %LOCALAPPDATA%，另有分支")
+    def test_unwritable_root_falls_back_to_xdg(self):
+        blocker = self.tmp / "not-a-dir"
+        blocker.write_text("", encoding="utf-8")
+        self.sandbox.pop("LOCALAPPDATA", "FVP_LOG_DIR")
+        self.sandbox.set(XDG_STATE_HOME=self.tmp / "state")
+        with mock.patch.object(cl, "app_root", lambda: blocker):
+            self.assertEqual(cl.logs_dir(), self.tmp / "state" / cl.APP_NAME / "logs")
 
-    text = read_all(path)
-    check("启动头信息有版本号", cl.app_version() in text)
-    check("启动头信息有 Python 版本", sys.version.split()[0] in text)
-    check("启动头信息有日志文件自身路径", str(path) in text)
+    def test_fvp_log_dir_overrides_everything(self):
+        self.sandbox.set(FVP_LOG_DIR=self.tmp / "override")
+        with mock.patch.object(cl, "app_root",
+                                       lambda: self.tmp / "app"):
+            self.assertEqual(cl.logs_dir(), self.tmp / "override")
 
-    # ── 4. 我们自己的 debug 也要进文件（排查"被吞的异常"）─
-    log = logging.getLogger("fvptachie")
-    log.debug("静默调试行")
-    check("应用 logger 的 DEBUG 落盘", "静默调试行" in read_all(path))
+    def test_fvp_log_dir_expands_home(self):
+        self.sandbox.set(FVP_LOG_DIR="~/fvp-logs")
+        self.assertEqual(cl.logs_dir(), Path.home() / "fvp-logs")
 
-    # ── 5. flet 事件回调异常走它自己的 logger，也要收进来 ──
-    flet_log = logging.getLogger("flet.messaging.session")
-    try:
-        raise RuntimeError("回调里炸了")
-    except RuntimeError:
-        flet_log.error("Unhandled error in 'on_%s' handler", "click", exc_info=True)
-    text = read_all(path)
-    check("flet 回调异常落盘", "Unhandled error in 'on_click' handler" in text)
-    check("flet 回调异常带完整栈", "回调里炸了" in text and "Traceback" in text)
 
-    # ── 6. 主线程未捕获异常：落盘 + 原钩子仍然被调用 ──────
-    hit = []
+class SetupLoggingTest(CrashlogTestBase):
+    def test_filename_and_banner(self):
+        path = self.start_log()
+        self.assertTrue(path.is_file())
+        self.assertRegex(path.name, LOG_NAME_RE)
+        text = self.read_log(path)
+        self.assertIn(cl.app_version(), text)
+        self.assertIn(sys.version.split()[0], text)
+        self.assertIn(str(path), text)
+        self.assertIn("启动于", text)
 
-    def fake_prev(*args):
-        hit.append(args)
+    def test_packaged_banner(self):
+        self.pretend_packaged()
+        text = self.read_log(self.start_log())
+        self.assertIn("打包态    : 是", text)
 
-    real = sys.excepthook
-    sys.excepthook = fake_prev
-    cl._hooked = False  # 允许再包一层
-    cl.install_hooks()
-    try:
+    def test_idempotent(self):
+        path = self.start_log()
+        again = cl.setup_logging(self.tmp / "elsewhere")
+        self.assertEqual(again, path)
+        self.assertEqual(len(self.file_handlers()), 1)
+        self.assertEqual(self.read_log(path).count("启动于"), 1)
+
+    def test_same_second_gets_suffix(self):
+        d = self.tmp / "same-second"
+        first = cl._make_path(d)
+        first.write_text("", encoding="utf-8")
+        second = cl._make_path(d)
+        self.assertNotEqual(first, second)
+        self.assertRegex(second.name, r"-\d+\.log$")
+
+    def test_custom_log_dir_is_used(self):
+        path = self.start_log(self.tmp / "custom" / "nested")
+        self.assertEqual(path.parent, self.tmp / "custom" / "nested")
+        self.assertEqual(cl.current_log_path(), path)
+
+    def test_default_dir_uses_fvp_log_dir(self):
+        # support 的 for_test 把 FVP_LOG_DIR 指到 tmp/logs
+        path = self.start_log(None)
+        self.assertEqual(path.parent, self.tmp / "logs")
+
+    def test_app_logger_debug_is_written(self):
+        path = self.start_log()
+        self.assertEqual(self.root.level, logging.WARNING)
+        self.assertEqual(self.logger.level, logging.DEBUG)
+        self.logger.debug("静默调试行")
+        self.assertIn("静默调试行", self.read_log(path))
+
+    def test_flet_callback_error_written(self):
+        path = self.start_log()
+        flet_log = logging.getLogger("flet.messaging.session")
+        try:
+            raise RuntimeError("回调里炸了")
+        except RuntimeError:
+            flet_log.error("Unhandled error in 'on_%s' handler", "click",
+                           exc_info=True)
+        text = self.read_log(path)
+        self.assertIn("Unhandled error in 'on_click' handler", text)
+        self.assertIn("回调里炸了", text)
+        self.assertIn("Traceback", text)
+
+    def test_no_file_log_env_disables_writing(self):
+        self.sandbox.set(FVP_NO_FILE_LOG="1")
+        self.assertIsNone(cl.setup_logging(self.tmp / "logs"))
+        self.assertIsNone(cl.current_log_path())
+        self.assertEqual(self.file_handlers(), [])
+        self.assertFalse((self.tmp / "logs").exists())
+
+    def test_console_level_from_env(self):
+        self.sandbox.pop("FVP_LOG_LEVEL", "FVP_DEBUG")
+        self.assertEqual(cl._console_level(), logging.WARNING)
+        self.sandbox.set(FVP_LOG_LEVEL="debug")
+        self.assertEqual(cl._console_level(), logging.DEBUG)
+        self.sandbox.set(FVP_LOG_LEVEL="不认识的级别")
+        self.assertEqual(cl._console_level(), logging.WARNING)
+        self.sandbox.pop("FVP_LOG_LEVEL")
+        self.sandbox.set(FVP_DEBUG="1")
+        self.assertEqual(cl._console_level(), logging.DEBUG)
+
+    def test_console_handler_level_follows_env(self):
+        self.sandbox.set(FVP_LOG_LEVEL="DEBUG")
+        self.start_log()
+        console = [h for h in self.root.handlers
+                   if getattr(h, "_fvp_console", False)]
+        self.assertEqual(len(console), 1)
+        self.assertEqual(console[0].level, logging.DEBUG)
+        # 根 logger 跟随控制台级别；默认 WARNING 时压住 flet 的 debug 刷屏
+        self.assertEqual(self.root.level, logging.DEBUG)
+
+    def test_faulthandler_enabled(self):
+        import faulthandler
+        self.start_log()
+        self.assertIsNotNone(cl._fault_stream)
+        self.assertTrue(faulthandler.is_enabled())
+
+    def test_exit_marker_logged_once(self):
+        path = self.start_log()
+        cl.mark_exit_once()
+        cl.mark_exit_once()  # atexit 与断连都到也只记一次
+        self.assertEqual(self.read_log(path).count("正常退出"), 1)
+
+    def test_atexit_marker_in_subprocess(self):
+        code = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from fvpapp.crashlog import setup_logging, install_hooks\n"
+            "p = setup_logging(Path(sys.argv[1]))\n"
+            "install_hooks()\n"
+            "print(p)\n"
+        )
+        log_dir = self.tmp / "sub"
+        proc = self.run_python(code, str(log_dir))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        path = Path(proc.stdout.strip())
+        self.assertTrue(path.is_file())
+        text = self.read_log(path)
+        self.assertIn("正常退出", text)
+        self.assertIn("启动于", text)
+
+
+class HooksTest(CrashlogTestBase):
+    def install(self) -> list[tuple]:
+        calls: list[tuple] = []
+        sys.excepthook = lambda *a: calls.append(a)
+        cl.install_hooks()
+        return calls
+
+    def test_main_thread_exception_logged_and_chained(self):
+        path = self.start_log()
+        calls = self.install()
         try:
             raise ValueError("主线程炸了")
         except ValueError:
             sys.excepthook(*sys.exc_info())
-        text = read_all(path)
-        check("主线程未捕获异常落盘", "主线程炸了" in text)
-        check("主线程异常留了 CRITICAL 标记", "主线程未捕获异常" in text)
-        check("原 excepthook 仍被调用（不改原提示）", len(hit) == 1)
-    finally:
-        sys.excepthook = real
+        text = self.read_log(path)
+        self.assertIn("主线程炸了", text)
+        self.assertIn("主线程未捕获异常", text)
+        self.assertIn("CRITICAL", text)
+        self.assertEqual(len(calls), 1, "原 excepthook 仍应被调用")
 
-    # ── 7. 子线程异常（缩略图线程池那条路）──────────────
-    def boom():
-        raise RuntimeError("线程里炸了")
+    def test_keyboard_interrupt_not_logged(self):
+        path = self.start_log()
+        calls = self.install()
+        try:
+            raise KeyboardInterrupt
+        except KeyboardInterrupt:
+            sys.excepthook(*sys.exc_info())
+        text = self.read_log(path)
+        self.assertNotIn("KeyboardInterrupt", text)
+        self.assertNotIn("主线程未捕获异常", text)
+        self.assertEqual(len(calls), 1)
 
-    t = threading.Thread(target=boom, name="thumb-0")
-    t.start()
-    t.join()
-    text = read_all(path)
-    check("子线程异常落盘", "线程里炸了" in text)
-    check("子线程异常记了线程名", "thumb-0" in text)
+    def test_system_exit_not_logged(self):
+        path = self.start_log()
+        self.install()
+        try:
+            raise SystemExit(3)
+        except SystemExit:
+            sys.excepthook(*sys.exc_info())
+        self.assertNotIn("SystemExit", self.read_log(path))
 
-    # ── 8. asyncio 任务异常 ─────────────────────────────
-    async def async_main():
-        loop = asyncio.get_running_loop()
+    def test_thread_exception_logged_with_name(self):
+        path = self.start_log()
+        seen: list = []
+        threading.excepthook = lambda args: seen.append(args)
+        cl.install_hooks()
+
+        def boom():
+            raise RuntimeError("线程里炸了")
+
+        t = threading.Thread(target=boom, name="thumb-0")
+        t.start()
+        t.join()
+        text = self.read_log(path)
+        self.assertIn("线程里炸了", text)
+        self.assertIn("thumb-0", text)
+        self.assertIn("线程未捕获异常", text)
+        self.assertEqual(len(seen), 1, "原 threading.excepthook 仍应被调用")
+
+    @unittest.skipUnless(hasattr(sys, "unraisablehook"), "3.8+ 才有 unraisablehook")
+    def test_unraisable_exception_logged(self):
+        path = self.start_log()
+        seen: list = []
+        sys.unraisablehook = lambda args: seen.append(args)
+        cl.install_hooks()
+        exc = RuntimeError("析构里炸了")
+        sys.unraisablehook(type("A", (), {
+            "exc_type": RuntimeError,
+            "exc_value": exc,
+            "exc_traceback": None,
+            "err_msg": "Exception ignored in __del__",
+            "object": None,
+        })())
+        text = self.read_log(path)
+        self.assertIn("析构里炸了", text)
+        self.assertIn("无法抛出的异常", text)
+        self.assertEqual(len(seen), 1)
+
+    def test_duplicate_install_does_not_double_wrap(self):
+        path = self.start_log()
+        self.install()
+        hook = sys.excepthook
+        cl.install_hooks()
+        self.assertIs(sys.excepthook, hook)
+        try:
+            raise ValueError("只该记一次")
+        except ValueError:
+            sys.excepthook(*sys.exc_info())
+        self.assertEqual(self.read_log(path).count("主线程未捕获异常"), 1)
+
+    def test_asyncio_task_exception_logged_and_chained(self):
+        import asyncio
+
+        path = self.start_log()
+        states: list[dict] = []
+
+        async def main():
+            loop = asyncio.get_running_loop()
+            loop.set_exception_handler(lambda _l, ctx: states.append(ctx))
+            cl.install_asyncio_handler(loop)
+
+            async def bad():
+                raise RuntimeError("任务里炸了")
+
+            task = asyncio.create_task(bad())
+            await asyncio.sleep(0)   # 让任务跑完并把异常记在 Task 上
+            del task                 # 没人 await，Task 回收时才交给 loop
+            gc.collect()
+
+        asyncio.run(main())
+        self.assertIn("任务里炸了", self.read_log(path))
+        self.assertTrue(states, "原 loop 异常处理器仍应被调用")
+        self.assertIsInstance(states[0].get("exception"), RuntimeError)
+
+    def test_asyncio_context_without_exception(self):
+        path = self.start_log()
+
+        class Loop:
+            handler = None
+
+            def get_exception_handler(self):
+                return None
+
+            def set_exception_handler(self, handler):
+                self.handler = handler
+
+        loop = Loop()
         cl.install_asyncio_handler(loop)
+        loop.handler(loop, {"message": "没有异常对象的上下文"})
+        self.assertIn("没有异常对象的上下文", self.read_log(path))
 
-        async def bad():
-            raise RuntimeError("任务里炸了")
+    def test_asyncio_previous_handler_raising_does_not_escape(self):
+        import asyncio
 
-        task = asyncio.create_task(bad())
-        await asyncio.sleep(0.05)
-        # 任务没人 await 时，异常要等 Task 被回收才交给 loop 的异常钩子
-        del task
-        import gc
-        gc.collect()
-        await asyncio.sleep(0.05)
-    
-    asyncio.run(async_main())
-    text = read_all(path)
-    check("asyncio 任务异常落盘", "任务里炸了" in text)
+        path = self.start_log()
+        loop = asyncio.new_event_loop()
+        self.addCleanup(loop.close)
 
-    # ── 8.5 退出标记：打包态 atexit 跑不到，断连事件调 mark_exit_once ──
-    cl.mark_exit_once()
-    cl.mark_exit_once()  # 幂等：atexit 与断连都到也只记一次
-    text = read_all(path)
-    check("退出标记落盘「正常退出」且只记一次", text.count("正常退出") == 1)
+        def angry(_l, _ctx):
+            raise RuntimeError("旧处理器也炸了")
 
-    # ── 9. 只留最近 N 个 ────────────────────────────────
-    prune_dir = tmp / "prune"
-    prune_dir.mkdir()
-    for i in range(5):
-        p = prune_dir / f"fvptachie-2.2.3-2026010{i + 1}-000000.log"
-        p.write_text("x", encoding="utf-8")
-        os.utime(p, (1_700_000_000 + i, 1_700_000_000 + i))
-    cl._prune(prune_dir, 2)
-    left = sorted(p.name for p in prune_dir.glob("fvptachie-*.log"))
-    check("旧日志被清理，只留最近 2 个",
-          left == ["fvptachie-2.2.3-20260104-000000.log",
-                   "fvptachie-2.2.3-20260105-000000.log"])
+        loop.set_exception_handler(angry)
+        cl.install_asyncio_handler(loop)
+        loop.call_exception_handler({"message": "新消息"})
+        self.assertIn("新消息", self.read_log(path))
 
-    # ── 10. 目录不可写：降级成只有控制台，不抛 ──────────
-    reset_logging()
-    blocker = tmp / "not-a-dir"
-    blocker.write_text("", encoding="utf-8")
-    try:
-        got = cl.setup_logging(blocker / "logs")
-    except Exception as exc:  # 绝不能往上抛
-        got = f"raised {exc!r}"
-    check("目录不可写时返回 None 而不是抛异常", got is None)
-
-    # 恢复一个能用的，避免影响后续（同进程内的其它测试）输出
-    reset_logging()
-    cl.setup_logging(tmp / "after")
-    check("降级后还能重新装上", cl.current_log_path() is not None)
-
-    if fails:
-        print("\nFAILED:", fails)
-        sys.exit(f"CRASHLOG_TEST_FAILED: {fails}")
-    print("CRASHLOG_OK")
+    def test_asyncio_handler_none_loop_is_noop(self):
+        cl.install_asyncio_handler(None)
 
 
-main()
+class PruneTest(CrashlogTestBase):
+    def make_logs(self, d: Path, n: int, start: int = 0) -> list[Path]:
+        d.mkdir(parents=True, exist_ok=True)
+        out = []
+        for i in range(n):
+            p = d / f"fvptachie-2.2.3-202601{i + 1:02d}-000000.log"
+            p.write_text("x", encoding="utf-8")
+            stamp = 1_700_000_000 + start + i
+            os.utime(p, (stamp, stamp))
+            out.append(p)
+        return out
+
+    def test_keeps_newest_by_mtime(self):
+        files = self.make_logs(self.tmp / "prune", 5)
+        cl._prune(self.tmp / "prune", 2)
+        left = sorted(p.name for p in (self.tmp / "prune").glob("fvptachie-*.log"))
+        self.assertEqual(left, [files[3].name, files[4].name])
+
+    def test_keeps_all_when_below_limit(self):
+        files = self.make_logs(self.tmp / "few", 3)
+        cl._prune(self.tmp / "few", 5)
+        self.assertTrue(all(p.exists() for p in files))
+
+    def test_ignores_unrelated_files(self):
+        files = self.make_logs(self.tmp / "mixed", 3)
+        other = self.tmp / "mixed" / "other.log"
+        other.write_text("keep me", encoding="utf-8")
+        cl._prune(self.tmp / "mixed", 1)
+        self.assertTrue(other.exists())
+        self.assertEqual([p for p in files if p.exists()], [files[-1]])
+
+    def test_missing_dir_is_quiet(self):
+        cl._prune(self.tmp / "does-not-exist", 2)
+
+    def test_setup_prunes_to_keep_runs(self):
+        files = self.make_logs(self.tmp / "many", cl.KEEP_RUNS + 5)
+        path = self.start_log(self.tmp / "many")
+        remaining = sorted((self.tmp / "many").glob("fvptachie-*.log"))
+        # FileHandler(delay=True)：新文件在 _prune 之后才因首条记录落盘，
+        # 所以磁盘上会短暂是 KEEP_RUNS + 1 个。
+        self.assertEqual(len(remaining), cl.KEEP_RUNS + 1)
+        self.assertIn(path, remaining)
+        for gone in files[:5]:
+            self.assertFalse(gone.exists(), f"{gone.name} 应被清掉")
+
+
+class DegradeTest(CrashlogTestBase):
+    def test_unwritable_dir_returns_none(self):
+        blocker = self.tmp / "not-a-dir"
+        blocker.write_text("", encoding="utf-8")
+        self.assertIsNone(cl.setup_logging(blocker / "logs"))
+        self.assertIsNone(cl.current_log_path())
+        self.assertEqual(self.file_handlers(), [])
+
+    def test_recovers_after_degrade(self):
+        blocker = self.tmp / "not-a-dir"
+        blocker.write_text("", encoding="utf-8")
+        self.assertIsNone(cl.setup_logging(blocker / "logs"))
+        path = self.start_log(self.tmp / "after")
+        self.assertTrue(path.is_file())
+        self.assertEqual(cl.current_log_path(), path)
+
+    @unittest.skipUnless(hasattr(__import__("faulthandler"), "_sigsegv"),
+                         "需要 CPython 的 faulthandler._sigsegv")
+    def test_native_crash_leaves_fatal_traceback(self):
+        code = (
+            "import faulthandler, sys\n"
+            "from pathlib import Path\n"
+            "from fvpapp.crashlog import setup_logging\n"
+            "print(setup_logging(Path(sys.argv[1])))\n"
+            "faulthandler._sigsegv()\n"
+        )
+        log_dir = self.tmp / "crash"
+        proc = self.run_python(code, str(log_dir))
+        self.assertNotEqual(proc.returncode, 0, "段错误子进程应异常退出")
+        logs = list(log_dir.glob("fvptachie-*.log"))
+        self.assertEqual(len(logs), 1)
+        text = self.read_log(logs[0])
+        self.assertIn("Fatal Python error", text)
+        self.assertIn("Current thread", text)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

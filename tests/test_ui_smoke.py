@@ -1,51 +1,52 @@
 """真实 flet 下的 UI 冒烟测试：把整棵控件树建出来并驱动一遍主流程。
 
-与 test_thumb_threading.py 的区别：那个用宽容的假 flet 验证线程契约，
-这个用**真** flet 构造控件，任何拼错的属性名/类型都会在这里炸出来，
+与 test_thumb_threading.py 的分工：那个用宽容的假 flet 验证线程契约，
+这个用**真** flet 构造控件——任何拼错的属性名/类型都会在这里炸出来，
 顺带断言"滚动条必须留在预留槽内"这类布局不变量（重合 bug 的回归防线）。
 
-需要已安装 flet + Pillow：python3 tests/test_ui_smoke.py
+需要已安装 flet + Pillow 的解释器（Windows：`py.exe -3.13 tests/test_ui_smoke.py`）。
+缺依赖是**失败**不是跳过——静默跳过的回归防线等于没有。
+真 flet 与假 flet 不能混在一个进程里跑，入口见 tests/run_all.py。
 """
+
 import asyncio
-import hashlib
-import os
-import struct
+import shutil
 import sys
-import tempfile
-import zlib
+import unittest
 from pathlib import Path
-
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
-
-# 窗口偏好写进临时文件：测试不该碰 %LOCALAPPDATA% 下真用户的那份 settings.json
-os.environ.setdefault(
-    "FVP_SETTINGS_PATH",
-    str(Path(tempfile.mkdtemp(prefix="ui_smoke_settings_")) / "settings.json"),
-)
-# 缓存目录同理：测试用独立目录，避免读到上一次运行留下的缓存
-os.environ.setdefault(
-    "FVP_CACHE_DIR",
-    str(Path(tempfile.mkdtemp(prefix="ui_smoke_cache_"))),
-)
+from unittest import mock
 
 try:
-    import flet as ft  # noqa: F401
+    from . import support
+except ImportError:  # 直接 `python tests/test_ui_smoke.py` 时没有包上下文
+    import support
+
+try:
+    import flet as ft
     import PIL.Image  # noqa: F401
-except Exception as ex:  # 环境缺依赖时跳过，不算失败
-    print(f"UI_SMOKE_SKIP (缺依赖: {ex})")
-    sys.exit(0)
+except Exception as ex:
+    raise RuntimeError(
+        f"test_ui_smoke 需要真实 flet 与 Pillow（当前缺失: {ex}）。"
+        "请在装有 flet 的解释器上运行本文件，例如 Windows: py.exe -3.13 tests/test_ui_smoke.py"
+    ) from ex
 
-# 真实控件的 update() 会沿 parent 链找 ft.Page 实例；这里把 page 解析改成
-# 指向当前 FakePage，于是 app 里所有 update 调用都能真的走一遍（而不是被
-# try/except 静默吞掉），同时不需要起会话。
-import flet.controls.base_control as _bc  # noqa: E402
+from FVPTachieComposerFlet import ComposerApp, main as app_main
+from fvpapp import settings as st
+from fvpapp.dropzone import (
+    DROPZONE_ON,
+    _custom_client_available,
+    _dropzone,
+    _dropzone_on,
+    pick_drop_path,
+)
+from fvpapp.theme import TRANSPARENT
 
-_CURRENT_PAGE = []
-_bc.BaseControl.page = property(lambda self: _CURRENT_PAGE[-1] if _CURRENT_PAGE else None)
+_need_dropzone = unittest.skipUnless(
+    DROPZONE_ON, "flet_dropzone 不可用或非自定义客户端：拖放反馈整条链路不存在")
 
 
-class _CanvasSize:
+# ── 事件替身 ──────────────────────────────────────────────────────────────
+class _Resize:
     """假 CanvasResizeEvent：只带宽高，够驱动 _on_drop_resize。"""
 
     def __init__(self, w, h):
@@ -53,973 +54,1144 @@ class _CanvasSize:
         self.height = h
 
 
-class FakeWindow:
-    def __init__(self):
-        self.width = 1280
-        self.height = 760
-        self.left = None
-        self.top = None
-        self.min_width = 1020
-        self.min_height = 600
-        self.title_bar_hidden = False
-        self.icon = None
-        self.maximized = False
-        self.minimized = False
-        self.on_event = None
+class _Key:
+    """假键盘事件：只带 _on_keyboard 真正读的三个字段。"""
 
-    async def destroy(self):
-        pass
+    def __init__(self, key, control=None, ctrl=False):
+        self.key = key
+        self.control = control
+        self.ctrl = ctrl
 
 
-class FakeSession:
-    """记录控件方法调用（InteractiveViewer.reset 之类走 session 的指令）。"""
+class _WinEvt:
+    def __init__(self, t):
+        self.type = t
 
-    def __init__(self):
-        self.calls = []
 
-    async def invoke_method(self, target, method, args=None, timeout=None):
-        self.calls.append((method, args))
+class _DropFile:
+    def __init__(self, p):
+        self.path, self.name = p, Path(p).name
+
+
+class _DropEvt:
+    def __init__(self, ps):
+        self.files = [_DropFile(p) for p in ps]
+
+
+# ── 控件树取点的小工具 ────────────────────────────────────────────────────
+def _unwrap(wrap):
+    """载入时角色套在错峰动画的 Container 外壳里，剥壳取里层 Column。"""
+    if isinstance(wrap, ft.Container):
+        return wrap.content
+    return wrap
+
+
+def _tile_title(ctrl):
+    title = getattr(ctrl, "title", None)
+    return getattr(title, "value", None)
+
+
+def _find_role(app, role):
+    for wrap in app.tree_list.controls:
+        col = _unwrap(wrap)
+        if col.controls and _tile_title(col.controls[0]) == role:
+            return col
+    raise AssertionError(f"树里找不到角色 {role}")
+
+
+def _find_outfit(app, role, outfit):
+    body = _find_role(app, role).controls[1]
+    for wrap in body.controls:
+        col = _unwrap(wrap)
+        if col.controls and _tile_title(col.controls[0]) == outfit:
+            return col
+    raise AssertionError(f"树里找不到服装 {role}/{outfit}")
+
+
+def strip_srcs(app):
+    return [getattr(c.content, "src", None) for c in app.thumb_list.controls]
+
+
+def role_thumb_src(app, role):
+    w = app.role_thumb_cache.get(role)
+    if w is None:
         return None
+    return getattr(w, "src", None) or getattr(getattr(w, "content", None), "src", None)
 
 
-class FakePage:
-    """只覆盖 ComposerApp 用到的 page 接口；控件级 update() 由 app 自身 try 兜住。"""
+class RealFletUiTest(support.AsyncEnvTestCase):
+    """每用例：新的事件循环 + 独立缓存/设置目录 + 全新 App 实例。
 
-    def __init__(self):
-        _CURRENT_PAGE.append(self)
-        self.session = FakeSession()
-        self.window = FakeWindow()
-        self.overlay = []
-        self.services = None
-        self.dialogs = []
-        self.added = []
-        self.updates = 0
-        self.theme = None
-        self.dark_theme = None
-        self.theme_mode = None
-        self.bgcolor = None
-        self.padding = None
-        self.spacing = None
-        self.title = None
-        self.on_keyboard_event = None
+    夹具源文件按类共享（只读）；缓存目录每个用例新建，命中/未命中才可预期。
+    """
 
-    def add(self, *controls):
-        self.added.extend(controls)
+    @classmethod
+    def setUpClass(cls):
+        cls.fixture = support.build_fixture()
+        cls.addClassCleanup(shutil.rmtree, cls.fixture, True)
 
-    def update(self, *a, **k):
-        self.updates += 1
+    def setUp(self):
+        super().setUp()
+        self.page = support.RealFletPage()
+        self.addCleanup(self.page.close)
+        self.app = ComposerApp(self.page)
+        self._apps = [self.app]
+        # 线程池是模块级单例：收尾先作废代数、再等池里在途任务落地，
+        # 保证无论用例走到哪一步失败都不把解码带进下一个用例。
+        # addCleanup 是 LIFO，这条登记在最后、最先执行。
+        self.addCleanup(self._invalidate)
 
-    def clean(self):
-        self.added.clear()
+    def _invalidate(self):
+        for app in self._apps:
+            app._state_gen += 1
+            app._cache_token += 1
+        try:
+            import fvpapp.resources as res
+            res._THUMB_POOL.submit(lambda: None).result(timeout=5)
+        except Exception:
+            pass
 
-    def show_dialog(self, dialog):
-        self.dialogs.append(dialog)
-        return True
+    def new_page(self):
+        page = support.RealFletPage()
+        self.addCleanup(page.close)
+        return page
 
-    def pop_dialog(self):
-        if self.dialogs:
-            self.dialogs.pop()
-        return None
+    def new_app(self):
+        app = ComposerApp(self.new_page())
+        self._apps.append(app)
+        return app
 
+    async def load(self, app=None, target=None):
+        app = app if app is not None else self.app
+        ok = await app._load_bin(str(target if target is not None else self.fixture))
+        self.assertTrue(ok, "载入返回失败")
+        await support.pump_until(lambda: app.tree_list.visible, what="树显示")
+        return app
 
-def make_hzc(path, image_type=1, w=8, h=8, frames=1, salt=0):
-    head = bytearray(44)
-    head[0:4] = b"hzc1"
-    struct.pack_into("<H", head, 18, image_type)
-    struct.pack_into("<H", head, 20, w)
-    struct.pack_into("<H", head, 22, h)
-    struct.pack_into("<I", head, 32, frames)
-    bpp = 3 if image_type == 0 else 4
-    need = w * h * bpp * (frames if image_type == 2 else 1)
-    stride = w * h * bpp
-    # 纯线性序列的周期是 256，正好等于一帧的字节数，多帧会解出一堆一模一样的画面。
-    # 混进帧号（i // stride）并取 251 为周期，翻帧断言才能真的看出画面变了。
-    # salt 让"同名的另一份资源"画面确实不同：换资源串图与否只能这样验。
-    # 文件名也掺一点：同一份资源里不同动作是两张不同的图，否则整帧缓存
-    # 会（正确地）把同样字节当成同一张，切动作的断言就验不出东西。
-    name_salt = int(hashlib.sha1(path.name.encode("utf-8")).hexdigest()[:8], 16) % 251
-    body = bytes(((i % 251) * 7 + (i // stride) * 53 + salt + name_salt) % 256
-                 for i in range(need))
-    path.write_bytes(bytes(head) + zlib.compress(body))
+    @staticmethod
+    def toggle(app, key):
+        state, tog = app._tree_toggles[key]
+        if not state["open"]:
+            tog(None)
 
+    def expand_all(self, app=None):
+        app = app if app is not None else self.app
+        for role in sorted(app.hierarchy):
+            self.toggle(app, ("role", role))
+        for role in sorted(app.hierarchy):
+            for outfit in sorted(app.hierarchy[role]):
+                self.toggle(app, ("outfit", f"{role}/{outfit}"))
 
-def build_fixture(salt=0):
-    tmp = Path(tempfile.mkdtemp(prefix="ui_smoke_"))
-    for role in ("翠", "真紅"):
-        for outfit in ("私服", "制服"):
-            for action in ("基", "喜"):
-                make_hzc(tmp / f"CHR_{role}_{action}_{outfit}.hzc", salt=salt)
-                make_hzc(tmp / f"CHR_{role}_{action}_{outfit}_表情.hzc",
-                         image_type=2, frames=3, salt=salt)
-    # 没有 _表情 变体的多帧底图：走「直接导出底图」那条退路
-    make_hzc(tmp / "CHR_翠_无_私服.hzc", image_type=2, frames=3, salt=salt)
-    return tmp
+    @staticmethod
+    def info(app, filename):
+        return next(i for i in app.file_infos if i["filename"] == filename)
 
-
-def _walk(ctrl):
-    """递归走完一棵真实 flet 控件树（controls 列表 + 单个 content 子控件）。"""
-    yield ctrl
-    for child in getattr(ctrl, "controls", None) or []:
-        yield from _walk(child)
-    inner = getattr(ctrl, "content", None)
-    if isinstance(inner, ft.Control):
-        yield from _walk(inner)
+    async def select(self, app, filename):
+        await app._select_action(self.info(app, filename))
+        await support.pump_until(
+            lambda: app.base_image.src != TRANSPARENT and all(strip_srcs(app)),
+            what="底图与差分条上屏")
 
 
-def _right_pad(lv):
-    p = lv.padding
-    if p is None:
-        return 0, 0
-    return (getattr(p, "right", 0) or 0), (getattr(p, "bottom", 0) or 0)
+# ── 装机与布局不变量 ──────────────────────────────────────────────────────
+class BootstrapTest(RealFletUiTest):
+    async def test_theme_switch_survives_full_rebuild(self):
+        """两套主题都要能把整棵控件树建出来（属性拼错在真 flet 下当场炸）。"""
+        self.assertTrue(self.page.added, "页面根控件未添加")
+        await self.app._toggle_theme(None)
+        await self.app._toggle_theme(None)
+        self.assertTrue(self.page.added, "换主题后根控件丢了")
+
+    async def test_images_and_scroll_lanes(self):
+        """图像 src 必须是字符串 data URI，滚动条必须留在预留槽内。
+
+        src 给 bytes 只在构造时有效，之后 `img.src = bytes` 不会被重新编码，
+        客户端当成路径解析 → 预览区空白（真机踩过）。
+        """
+        await self.load()
+        self.toggle(self.app, ("role", "翠"))
+        self.toggle(self.app, ("outfit", "翠/私服"))
+        await self.select(self.app, "CHR_翠_基_私服")
+        for name in ("base_image", "result_image"):
+            src = getattr(self.app, name).src
+            self.assertTrue(isinstance(src, str) and src.startswith("data:image/"),
+                            f"{name}.src 不是 data URI: {type(src)}")
+        nodes = [c for r in self.page.added for c in support.walk_controls(r)]
+        for c in nodes:
+            if getattr(c, "image", None) is not None:
+                self.assertIsInstance(
+                    c.image, ft.DecorationImage,
+                    "Container.image 只认 DecorationImage，塞 ft.Image 会被静默丢掉")
+        for name, lv in (("tree_list", self.app.tree_list),
+                        ("thumb_list", self.app.thumb_list)):
+            p = lv.padding
+            right = getattr(p, "right", 0) or 0
+            bottom = getattr(p, "bottom", 0) or 0
+            self.assertTrue(right >= 8 or bottom >= 8,
+                            f"{name} 未为滚动条预留槽位 (right={right}, bottom={bottom})")
+        sb = self.page.theme.scrollbar_theme
+        self.assertIs(sb.track_visibility, False, "滚动条轨道不应占视觉重量")
+        self.assertLessEqual(sb.thickness or 0, 10, f"滚动条过粗: {sb.thickness}")
+
+    async def test_rolling_containers_and_tile_rows(self):
+        """交叉轴 STRETCH 在滚动容器里给不出有界高度，布局当场抛异常、
+        该项之后的节点全部消失（ListView 沿滚动方向不约束高度）。"""
+        await self.load()
+        nodes = [c for r in self.page.added for c in support.walk_controls(r)]
+        for c in nodes:
+            if isinstance(c, ft.Row):
+                self.assertNotEqual(c.vertical_alignment, ft.CrossAxisAlignment.STRETCH,
+                                    "Row 在滚动容器里不能用 STRETCH")
+            if isinstance(c, ft.Column):
+                self.assertNotEqual(c.horizontal_alignment, ft.CrossAxisAlignment.STRETCH,
+                                    "Column 在滚动容器里不能用 STRETCH")
+            if isinstance(c, ft.ListTile) and isinstance(c.trailing, ft.Row):
+                self.assertTrue(c.trailing.tight,
+                                "ListTile.trailing 的 Row 必须 tight，否则标题被挤成竖排")
+
+    async def test_visual_baseline(self):
+        """白卡片 + 浅灰页底 + 1px 细描边；禁止材质特效与重复入口回潮。"""
+        await self.load()
+        nodes = [c for r in self.page.added for c in support.walk_controls(r)]
+        from fvpapp.theme import RADIUS_PANEL
+        self.assertTrue(self.app._checker, "透明棋盘底缺失")
+        panels = [c for c in nodes
+                  if type(c) is ft.Container
+                  and c.border_radius == RADIUS_PANEL
+                  and c.bgcolor == self.app.ink["panel"]
+                  and c.border is not None and c.border.top.width == 1]
+        self.assertGreaterEqual(len(panels), 3, "三栏必须是实色细描边卡片")
+        for c in panels:
+            self.assertIsNone(c.gradient, "面板不该再用渐变")
+            self.assertIsNone(c.shadow, "面板不该再用投影")
+        for c in nodes:
+            if getattr(c, "image", None) is not None \
+                    and c.image.repeat == ft.ImageRepeat.REPEAT:
+                self.assertIsNotNone(c.border_radius, "页面底层不该再铺满无边界纹理")
+        from flet.controls.material.button import Button as _Button
+        empty_btns = [c for c in support.walk_controls(self.app.empty_hint)
+                      if isinstance(c, _Button)]
+        self.assertFalse(empty_btns, "载入入口只留角色库标题栏那两个图标")
+        solid = [c for c in nodes if isinstance(c, _Button)
+                 and c.style is not None and c.style.bgcolor == self.app.ink["accent"]]
+        self.assertFalse(solid, "不许有实心 accent 大按钮")
+
+    def test_dropzone_wraps_root(self):
+        """开启拖放时整扇窗口根节点是 Dropzone（未开启时保持原 Column）。"""
+        self.assertTrue(self.page.added, "页面根控件未添加")
+        root = self.page.added[0]
+        if DROPZONE_ON:
+            self.assertIsInstance(root, _dropzone.Dropzone)
+        else:
+            self.assertNotIsInstance(root, type(_dropzone.Dropzone)
+                                     if _dropzone is not None else ft.Container)
 
 
-async def run():
-    from FVPTachieComposerFlet import ComposerApp, main as app_main
+# ── 拖放能力门控 ──────────────────────────────────────────────────────────
+class DropzoneGateTest(support.EnvTestCase):
+    def test_dropzone_flag_follows_client(self):
+        """官方客户端没有 desktop_drop 插件，未 build 的运行时塞 Dropzone
+        会让整棵控件树渲染失败——门控必须跟着"客户端是谁"走。"""
+        self.assertIs(DROPZONE_ON, bool(_dropzone) and _custom_client_available())
 
-    page = FakePage()
-    app = ComposerApp(page)
-    assert page.added, "页面根控件未添加"
+    def test_env_flag_forces_off(self):
+        self.sandbox.set(FVP_DROPZONE="0")
+        self.assertIs(_dropzone_on(), False)
 
-    # 主题切换：两套主题都要能整树重建
-    await app._toggle_theme(None)
-    await app._toggle_theme(None)
+    def test_env_flag_forces_on(self):
+        if _dropzone is None:
+            self.skipTest("flet_dropzone 未安装：强制开关无从谈起")
+        self.sandbox.set(FVP_DROPZONE="1")
+        self.assertIs(_dropzone_on(), True)
 
-    tmp = build_fixture()
-    await app._load_bin(str(tmp))
-    assert app.tree_list.visible, "树未显示"
+    def test_pick_drop_path(self):
+        d = self.tmp / "dir"
+        d.mkdir()
+        bin_a = self.tmp / "graph_a.bin"
+        bin_a.write_bytes(b"x")
+        missing = str(self.tmp / "graph_b.bin")
+        self.assertEqual(pick_drop_path([str(d), str(bin_a)]), str(bin_a),
+                         ".bin 应优先于文件夹")
+        self.assertEqual(pick_drop_path([str(bin_a), str(d)]), str(bin_a))
+        self.assertEqual(pick_drop_path([str(d)]), str(d))
+        self.assertEqual(pick_drop_path([missing]), missing,
+                         "不存在的 bin 仍要交给 _load_bin 报错")
+        self.assertIsNone(pick_drop_path(["", None]))
 
-    # 布局不变量：滚动条必须走预留槽，不能压在内容上
-    for name, lv in (("tree_list", app.tree_list), ("thumb_list", app.thumb_list)):
-        right, bottom = _right_pad(lv)
-        assert right >= 8 or bottom >= 8, f"{name} 未为滚动条预留槽位 (right={right}, bottom={bottom})"
-    sb = page.theme.scrollbar_theme
-    assert sb.track_visibility is False, "滚动条轨道不应占视觉重量"
-    assert (sb.thickness or 0) <= 10, f"滚动条过粗: {sb.thickness}"
 
-    # 拖放入口：门控必须跟着"客户端是谁"走——官方客户端没有 desktop_drop 插件，
-    # 未 build 的运行时塞 Dropzone 会让整棵控件树渲染失败。
-    import os as _os
+# ── 树交互：展开、缩进、选中、合成链路 ────────────────────────────────────
+class TreeInteractionTest(RealFletUiTest):
+    async def _open(self):
+        await self.load()
+        self.toggle(self.app, ("role", "翠"))
+        self.toggle(self.app, ("outfit", "翠/私服"))
+        return self.app
 
-    from FVPTachieComposerFlet import (
-        DROPZONE_ON,
-        _custom_client_available,
-        _dropzone,
-        _dropzone_on,
-        pick_drop_path,
-    )
+    async def test_hierarchy_indent_and_rail(self):
+        """第三级必须比第二级更深，且带一条导轨线，否则层级读起来像同级。"""
+        from fvpapp.theme import INDENT_ACTION, INDENT_OUTFIT
+        self.assertGreater(INDENT_ACTION, INDENT_OUTFIT)
+        app = await self._open()
+        outfit_col = _find_outfit(app, "翠", "私服")
+        action_row = outfit_col.controls[1].controls[0]
+        self.assertTrue(outfit_col.controls[1].controls, "动作层为空")
+        self.assertEqual(action_row.margin.left, INDENT_ACTION)
+        self.assertEqual(outfit_col.controls[0].content_padding.left, INDENT_OUTFIT)
+        self.assertEqual(action_row.border.left.width, 1, "动作层缺少导轨线")
+        self.assertIsNotNone(action_row.content.animate,
+                             "选中态必须有过渡，不能只是闪一下变色")
 
-    assert DROPZONE_ON is (bool(_dropzone) and _custom_client_available()), \
-        "DROPZONE_ON 应由 flet_dropzone 可导入 + 自定义客户端可用共同决定"
-    _saved_flag = _os.environ.pop("FVP_DROPZONE", None)
-    try:
-        _os.environ["FVP_DROPZONE"] = "0"
-        assert _dropzone_on() is False, "FVP_DROPZONE=0 必须强制关闭"
-        if _dropzone is not None:
-            _os.environ["FVP_DROPZONE"] = "1"
-            assert _dropzone_on() is True, "FVP_DROPZONE=1 应强制开启"
-    finally:
-        _os.environ.pop("FVP_DROPZONE", None)
-        if _saved_flag is not None:
-            _os.environ["FVP_DROPZONE"] = _saved_flag
+    async def test_selection_highlight_is_exclusive(self):
+        """选中态由 filename 决定而不是"上次点了哪个控件"：换选后不许两行同时亮。"""
+        app = await self._open()
+        info = self.info(app, "CHR_翠_基_私服")
+        await app._select_action(info)
+        row = support.find_action_row(app, info["filename"])
+        self.assertEqual(row.hl.bgcolor, app.ink["sel"])
+        self.assertEqual(row.hl.border.left.color, app.ink["accent"])
+        self.assertEqual(row.hl.content.title.weight, ft.FontWeight.W_700)
+        other = support.find_action_row(app, "CHR_翠_喜_私服")
+        self.assertNotEqual(other.hl.bgcolor, app.ink["sel"])
 
-    bin_a, bin_b = str(tmp / "graph_a.bin"), str(tmp / "graph_b.bin")
-    Path(bin_a).touch()
-    assert pick_drop_path([str(tmp), bin_a]) == bin_a, ".bin 应优先于文件夹"
-    assert pick_drop_path([bin_a, str(tmp)]) == bin_a
-    assert pick_drop_path([str(tmp)]) == str(tmp), "只拖文件夹时应返回该目录"
-    assert pick_drop_path([bin_b]) == bin_b, "不存在的 bin 仍要交给 _load_bin 报错"
-    assert pick_drop_path(["", None]) is None, "空路径应返回 None"
+        await app._select_action(self.info(app, "CHR_翠_喜_私服"))
+        self.assertEqual(other.hl.bgcolor, app.ink["sel"], "新选中的行没有亮起")
+        self.assertEqual(row.hl.bgcolor, "#00000000", "上一行的选中态没被清掉")
+        self.assertEqual(row.hl.content.title.weight, ft.FontWeight.W_400)
 
-    # 图像源必须是字符串 data URI：src 给 bytes 只在构造时有效，
-    # 之后 `img.src = bytes` 不会被重新编码，客户端当成路径解析 → 预览区空白。
+    async def test_preview_pipeline(self):
+        """底图 → 差分 → 合成 全链路，以及两个面板头的尺寸不重复显示。"""
+        app = await self._open()
+        await app._select_action(self.info(app, "CHR_翠_基_私服"))
+        self.assertTrue(app.base_imgs, "底图未加载")
+        self.assertTrue(app.part_imgs, "差分部件未加载")
+        self.assertIsNotNone(app.composed_img, "合成结果为空")
+        self.assertIn("×", app.base_meta.value)
+        self.assertNotIn("×", app.result_meta.value, "结果面板头不该重复底图尺寸")
+        self.assertTrue(app.result_meta.value.startswith("偏移"))
+        self.assertTrue(app.thumb_list.visible, "缩略图条未显示")
 
-    roots = page.added if isinstance(page.added, list) else [page.added]
-    nodes = [c for r in roots for c in _walk(r)]
-    bad_img = [c for c in nodes
-               if getattr(c, "image", None) is not None
-               and not isinstance(c.image, ft.DecorationImage)]
-    assert not bad_img, \
-        f"Container.image 只认 DecorationImage，塞 ft.Image 会被静默丢掉: {type(bad_img[0].image)}"
+        app._pick_part(min(2, len(app.part_imgs) - 1))
+        badges = {t.badge.bgcolor for t in app.thumb_list.controls}
+        self.assertEqual(badges, {app.ink["badge_bg"]},
+                         "差分角标只做编号，不许被选中态带跑")
+        picked = app.thumb_list.controls[app.part_idx]
+        self.assertEqual(picked.border.top.color, app.ink["accent"],
+                         "选中的差分没有描边提示")
+        self.assertIsNotNone(picked.animate, "差分切换应有过渡")
+        # Flet 0.86 下给 Container 显式设 animate_size/position=False 会让
+        # 整块内容不渲染（真机截图里动作行和差分条变成纯灰矩形），必须保持默认。
+        self.assertIsNone(picked.animate_size)
+        self.assertIsNone(picked.animate_position)
+        self.assertTrue(isinstance(app.thumb_list.controls[0].content.src, str),
+                        "差分缩略图 src 必须是字符串")
 
-    # ListTile.trailing 里的 Row 默认撑满主轴，会把标题/副标题挤成竖排
-    for c in nodes:
-        if isinstance(c, ft.ListTile) and isinstance(c.trailing, ft.Row):
-            assert c.trailing.tight, "ListTile.trailing 的 Row 必须 tight=True"
 
-    # 交叉轴 STRETCH 需要"有界高度"，而 ListView/滚动列给不出：
-    # 一旦写出来，布局当场抛异常，列表里该项之后的节点全部消失（真机踩过）。
-    for c in nodes:
-        if isinstance(c, ft.Row):
-            assert c.vertical_alignment != ft.CrossAxisAlignment.STRETCH, \
-                "Row 在滚动容器里不能用 vertical_alignment=STRETCH"
-        if isinstance(c, ft.Column):
-            assert c.horizontal_alignment != ft.CrossAxisAlignment.STRETCH, \
-                "Column 在滚动容器里不能用 horizontal_alignment=STRETCH"
+# ── 换主题：现场保留与拖放态复位 ──────────────────────────────────────────
+class ThemeRebuildTest(RealFletUiTest):
+    async def test_rebuild_keeps_everything_visible(self):
+        await self.load()
+        app = self.app
+        self.toggle(app, ("role", "翠"))
+        self.toggle(app, ("outfit", "翠/私服"))
+        info = self.info(app, "CHR_翠_基_私服")
+        await app._select_action(info)
+        app._pick_part(min(2, len(app.part_imgs) - 1))
+        kept_idx = app.part_idx
+        snapshot = app.composed_img
+        kept_sel = app.selected_filename
+        kept_base_src = app.base_image.src
 
-    # 视觉基线：白卡片 + 浅灰页底 + 1px 细描边，禁止材质特效回潮
-    # （和纸纹理/琉璃渐变试过，实测与三栏工具界面不搭，已明确放弃）。
-    from FVPTachieComposerFlet import RADIUS_PANEL
-    assert app._checker, "透明棋盘底缺失"
-    panels = [c for c in nodes
-              if type(c) is ft.Container
-              and getattr(c, "border_radius", None) == RADIUS_PANEL
-              and c.bgcolor == app.ink["panel"]
-              and c.border is not None and c.border.top.width == 1]
-    assert len(panels) >= 3, f"三栏不是实色细描边卡片（只找到 {len(panels)} 个）"
-    for c in panels:
-        assert c.gradient is None, "面板不该再用渐变"
-        assert c.shadow is None, "面板不该再用投影"
-    bare_texture = [c for c in nodes
-                    if getattr(c, "image", None) is not None
-                    and c.image.repeat == ft.ImageRepeat.REPEAT
-                    and getattr(c, "border_radius", None) is None]
-    assert not bare_texture, "页面底层不该再铺满纹理"
+        await app._toggle_theme(None)
+        self.assertTrue(app.is_dark)
+        self.assertEqual(app.selected_filename, kept_sel, "换主题后选中的动作变了")
+        self.assertEqual(app.base_image.src, kept_base_src, "换主题后底图被换成了另一张")
+        # 重建树期间"单动作服装展开即选中"不能触发级联，也不许把展开态洗掉
+        self.assertTrue(_find_role(app, "翠").controls[1].visible,
+                        "换主题把已展开的角色收起了")
+        self.assertTrue(_find_outfit(app, "翠", "私服").controls[1].visible,
+                        "换主题把已展开的服装收起了")
+        self.assertEqual(app.part_idx, kept_idx, "换主题后选中的差分帧被重置")
+        self.assertIs(app.composed_img, snapshot, "换主题重新读盘重算了（应复用缓存）")
+        self.assertEqual(len(app.thumb_list.controls), len(app.part_imgs),
+                         "换主题后差分条没重建")
+        for name in ("base_image", "result_image"):
+            src = getattr(app, name).src
+            self.assertTrue(isinstance(src, str) and src.startswith("data:image/"),
+                            f"换主题后 {name}.src 丢了，预览区会空")
+        self.assertFalse(app.save_btn.disabled)
+        self.assertFalse(app.batch_btn.disabled)
+        self.assertEqual(app.file_chip.content.value, Path(app.input_file).name,
+                         "标题栏文件名胶囊必须从当前状态推导")
+        # 重建树后的选中态也要在新树上原样点亮（不是刷废弃控件）
+        row = support.find_action_row(app, kept_sel)
+        self.assertEqual(row.hl.bgcolor, app.ink["sel"])
 
-    # 载入入口只留一套（角色库标题栏的两个图标）。空状态再摆一排按钮既是
-    # 重复控件，实心 accent 大色块也和白卡片打架。
-    from flet.controls.material.button import Button as _Button
-    empty_btns = [c for c in _walk(app.empty_hint) if isinstance(c, _Button)]
-    assert not empty_btns, f"空状态里还有 {len(empty_btns)} 个重复的载入按钮"
-    solid = [c for c in nodes if isinstance(c, _Button)
-             and c.style is not None and c.style.bgcolor == app.ink["accent"]]
-    assert not solid, f"还有实心 accent 大按钮: {[c.data for c in solid]}"
+    @_need_dropzone
+    async def test_rebuild_resets_drop_state(self):
+        """换主题会整棵重建，拖放画布也在其中；状态不归零的话下一次拖入不再亮。"""
+        app = self.app
+        app._on_drop_resize(_Resize(300, 700))
+        app._drag_entered()
+        self.assertTrue(app._drop_canvas.visible)
+        await app._toggle_theme(None)
+        self.assertFalse(app._drop_canvas.visible,
+                         "换主题后画布还亮着——它会吃掉面板里所有的点击")
+        app._drag_entered()
+        self.assertTrue(app._drop_canvas.visible, "拖放态残留导致下一次拖入没有反馈")
+        app._drag_exited()
 
-    # 展开到动作层并选中，跑完 底图 → 差分 → 合成 全链路
-    def role_column(i=0):
-        """载入那一轮的角色套在动画外壳（错峰入场）里，取下层 tile 先剥壳。"""
-        c = app.tree_list.controls[i]
-        return c.content if isinstance(c, ft.Container) else c
 
-    role_col = role_column()
-    role_header, role_body = role_col.controls[0], role_col.controls[1]
-    role_header.on_click(None)
-    outfit_col = role_body.controls[0]
-    outfit_header, outfit_body = outfit_col.controls[0], outfit_col.controls[1]
-    outfit_header.on_click(None)
-    assert outfit_body.controls, "动作层为空"
-    await asyncio.sleep(0.4)  # 等后台缩略图解码回推
+# ── 无表情差分 → 直接导出底图 ─────────────────────────────────────────────
+class NoDiffBaseOnlyTest(RealFletUiTest):
+    async def _select_nodiff(self):
+        await self.load()
+        self.toggle(self.app, ("role", "翠"))
+        self.toggle(self.app, ("outfit", "翠/私服"))
+        await self.app._select_action(self.info(self.app, "CHR_翠_无_私服"))
 
-    action_tile = outfit_body.controls[0]
-    info = next(i for i in app.file_infos
-                if i["filename"] == "CHR_翠_基_私服")
+    async def test_mirror_and_export_names(self):
+        """只让看不让导出的状态是不完整的：没有差分变体时结果面板要镜像
+        当前底图帧，保存/批量导出都退到底图本身。"""
+        from fvpapp.theme import PART_HINT_EMPTY
+        await self._select_nodiff()
+        app = self.app
+        self.assertTrue(app.base_only, "没有差分时应进入「直接导出底图」模式")
+        self.assertEqual(app.part_imgs, [])
+        self.assertIsNone(app.composed_img)
+        self.assertEqual(app.part_hint_text.value, PART_HINT_EMPTY)
+        self.assertFalse(app.result_hint.visible)
+        self.assertFalse(app.save_btn.disabled)
+        self.assertFalse(app.batch_btn.disabled)
+        mirrored = app.result_image.src
+        self.assertTrue(mirrored.startswith("data:image/"))
+        self.assertEqual(mirrored, app.base_image.src, "右栏镜像的不是当前底图帧")
 
-    # 层级：第三级必须比第二级更深，且带一条导轨线，否则"服装/动作"看着像同级
-    from FVPTachieComposerFlet import INDENT_ACTION, INDENT_OUTFIT
-    assert INDENT_ACTION > INDENT_OUTFIT, "动作层缩进必须大于服装层"
-    assert action_tile.margin.left == INDENT_ACTION
-    assert outfit_header.content_padding.left == INDENT_OUTFIT
-    assert action_tile.border.left.width == 1, "动作层缺少导轨线"
-    hl = action_tile.content
-    assert hl.animate is not None, "动作选中态必须有过渡，不能只是闪一下变色"
+        app._next_frame(None)   # 换帧要跟手：所见即所导
+        self.assertEqual(app.base_idx, 1)
+        self.assertNotEqual(app.result_image.src, mirrored, "翻帧后右栏还停在上一帧")
+        self.assertEqual(app.result_image.src, app.base_image.src)
+        self.assertIn("底图（无表情差分）", app.result_meta.value)
 
-    await app._select_action(info)
-    assert app.base_imgs, "底图未加载"
-    assert app.part_imgs, "差分部件未加载"
-    assert app.composed_img is not None, "合成结果为空"
-    # 结果面板头不重复底图尺寸：同尺寸时只留偏移，否则左右两个面板头会显示同一个 583×989
-    assert "×" in app.base_meta.value, app.base_meta.value
-    assert "×" not in app.result_meta.value, app.result_meta.value
-    assert app.result_meta.value.startswith("偏移"), app.result_meta.value
-    assert app.thumb_list.visible, "缩略图条未显示"
-    # 选中态由 filename 决定，不是"点了哪个控件"——所以断言要按文件名找回那一行
-    sel = next(e for e in app._action_rows if e["filename"] == info["filename"])
-    assert sel["hl"].bgcolor == app.ink["sel"], "选中行没有高亮底色"
-    assert sel["hl"].border.left.color == app.ink["accent"], "选中行没有左侧标记条"
-    assert sel["hl"].content.title.weight == ft.FontWeight.W_700, "选中行标题没有加粗"
+        picked_names = []
+        batch_dir = self.tmp / "batch"
+        batch_dir.mkdir()
 
-    # 选中态互斥：换选后上一行必须整体复原（底色/标记条/字重），不能两行同时亮
-    other = next((e for e in app._action_rows
-                  if e["filename"] != info["filename"]), None)
-    if other is not None:
-        info2 = next(i for i in app.file_infos if i["filename"] == other["filename"])
-        await app._select_action(info2)
-        assert other["hl"].bgcolor == app.ink["sel"], "新选中的行没有亮起"
-        assert sel["hl"].bgcolor == "#00000000", "上一行的选中态没被清掉"
-        assert sel["hl"].content.title.weight == ft.FontWeight.W_400, "上一行标题仍是加粗"
-        await app._select_action(info)  # 换回来，后面的用例继续用这一张
-    # 图像源必须是字符串 data URI：src 给 bytes 只在构造时有效，
-    # 之后 `img.src = bytes` 不会被重新编码，客户端当成路径解析 → 预览区空白。
-    for name in ("base_image", "result_image"):
-        src = getattr(app, name).src
-        assert isinstance(src, str) and src.startswith("data:image/"), \
-            f"{name}.src 不是 data URI，更新后不会显示: {type(src)}"
-    tile_src = app.thumb_list.controls[0].content.src
-    assert isinstance(tile_src, str), "差分缩略图 src 必须是字符串"
+        async def fake_save(dialog_title=None, file_name=None,
+                            initial_directory=None, **kw):
+            picked_names.append(file_name)
+            return str(self.tmp / file_name)
 
-    # 换主题必须保留现场：展开的角色/服装、选中的差分、底图与合成预览
-    app._pick_part(min(2, len(app.part_imgs) - 1))
-    kept_idx = app.part_idx
+        async def fake_dir(dialog_title=None, initial_directory=None, **kw):
+            return str(batch_dir)
 
-    # 差分角标只做编号：选中与否都不能变蓝，否则 28 格里有一格在抢画面。
-    badges = {t.badge.bgcolor for t in app.thumb_list.controls}
-    assert badges == {app.ink["badge_bg"]}, f"角标颜色被选中态带跑了: {badges}"
-    picked = app.thumb_list.controls[kept_idx]
-    assert picked.border.top.color == app.ink["accent"], "选中的差分没有描边提示"
-    assert picked.animate is not None, "差分切换应有过渡"
-    # 注意：不要用 animate_size/animate_position=False 去治"拉伸时闪烁"——
-    # Flet 0.86 下给 Container 显式设这两个 False 会让整块内容不渲染（真机截图里
-    # 动作行和差分条变成纯灰矩形）。这条只是把坑记在这里。
-    assert picked.animate_size is None and picked.animate_position is None, \
-        "animate_size/position 必须保持默认，显式 False 会导致不渲染"
+        app.file_picker.save_file = fake_save
+        app.file_picker.get_directory_path = fake_dir
+        try:
+            await app._save_current(None)
+            self.assertEqual(picked_names, ["CHR_翠_无_私服_base_001.png"],
+                             "底图导出命名不对")
+            self.assertTrue((self.tmp / picked_names[0]).exists(), "底图没真正写盘")
+            await app._batch_export(None)
+            self.assertEqual(sorted(p.name for p in batch_dir.glob("*.png")),
+                             [f"CHR_翠_无_私服_base_{i:03d}.png" for i in range(3)],
+                             "无差分批量导出没有铺平底图全部帧")
+        finally:
+            del app.file_picker.save_file
+            del app.file_picker.get_directory_path
 
-    snapshot = app.composed_img
-    kept_sel = app.selected_filename
-    kept_base_src = app.base_image.src
-    await app._toggle_theme(None)
-    assert app.is_dark is True
-    # 重建树时"单动作服装展开即选中"不能触发，否则底图会被悄悄换成别的
-    assert app.selected_filename == kept_sel, "换主题后选中的动作变了"
-    assert app.base_image.src == kept_base_src, "换主题后底图被换成了另一张"
-    assert role_column().controls[1].visible is True, "换主题把已展开的角色收起了"
-    assert role_column().controls[1].controls[0].controls[1].visible is True, \
-        "换主题把已展开的服装收起了"
-    assert app.part_idx == kept_idx, "换主题后选中的差分帧被重置"
-    assert app.composed_img is snapshot, "换主题重新读盘重算了（应复用缓存）"
-    assert len(app.thumb_list.controls) == len(app.part_imgs), "换主题后差分条没重建"
-    for name in ("base_image", "result_image"):
-        src = getattr(app, name).src
-        assert isinstance(src, str) and src.startswith("data:image/"), \
-            f"换主题后 {name}.src 丢了，预览区会空"
-    assert app.save_btn.disabled is False and app.batch_btn.disabled is False, \
-        "换主题后导出按钮被禁用"
-    # 标题栏的文件名胶囊随主题重建，初值必须从 input_file 推导，
-    # 否则切一次主题就显示"未载入文件"，看着像整个状态被清空。
-    assert app.file_chip.content.value == Path(app.input_file).name, \
-        "换主题后标题栏文件名胶囊丢了"
-    # 换主题会整棵重建，拖放画布也在其中。状态不跟着归零的话，
-    # 下一次 enter 会因为"目标态已经等于当前态"而直接早退——面板再也不亮。
-    app._drop_hint_shown = True
-    app._drop_armed = True
-    await app._toggle_theme(None)
-    assert app._drop_hint_shown is False and app._drop_armed is False, \
-        "换主题后拖放态残留，下一次拖入不会有反馈"
-    assert app._drop_canvas is not None and app._drop_canvas.visible is False, \
-        "换主题后画布还亮着——它会吃掉面板里所有的点击"
+    async def test_theme_rebuild_keeps_base_only(self):
+        await self._select_nodiff()
+        app = self.app
+        app._next_frame(None)
+        kept_base_src = app.base_image.src
+        await app._toggle_theme(None)
+        self.assertTrue(app.base_only, "换主题把「直接导出底图」模式弄丢了")
+        self.assertEqual(app.base_idx, 1, "换主题后底图帧号被重置")
+        self.assertEqual(app.base_image.src, kept_base_src)
+        self.assertEqual(app.result_image.src, app.base_image.src, "换主题后右栏没跟住底图")
+        self.assertFalse(app.save_btn.disabled)
+        self.assertFalse(app.batch_btn.disabled)
 
-    # 拖放反馈贴在角色库面板自己身上：画布必须是贴面板四边的定位子节点，
-    # 否则画出来的虚线框和面板描边错开一圈，就又是"给应用贴了个取景框"。
-    app._on_drop_resize(_CanvasSize(300, 700))
-    app._drag_entered()
-    canvas = app._drop_canvas
-    assert app._drop_armed is True and canvas.visible is True, "拖入后面板没进入拖放态"
-    assert (canvas.top, canvas.left, canvas.right, canvas.bottom) == (0, 0, 0, 0), \
-        "画布没贴满面板，虚线框会缩在描边里面一圈"
-    assert len(canvas.shapes) == 5, "画布不止 底纹/辉光边/虚线边/光斑拖尾/光斑核心 五层"
-    wash = canvas.shapes[0]
-    assert wash.paint.style == ft.PaintingStyle.FILL, "底纹不是填充层"
-    assert wash.paint.color.startswith("#") and len(wash.paint.color) == 9, \
-        f"底纹颜色不是 #AARRGGBB: {wash.paint.color}"
-    dash = canvas.shapes[2]
-    assert dash.paint.stroke_dash_pattern, "落点边框不是虚线"
-    assert app._hint_title.value == "松手即载入", "拖入时空状态文案没换"
 
-    # 淡入：进度逐帧推到 1 后停住（静止是默认，动是点缀）
-    app._drop_gen += 1                  # 掐掉自发排队的计时链，下面手工逐帧推
-    for _ in range(12):                 # DROP_IN_FRAMES=6，多推几帧看过冲和停表
-        app._tick_drop(app._drop_gen)
-        if app._drop_a >= 1.0:
-            break
-    assert app._drop_a == 1.0 and app._drop_dir == 0, "淡入没走到终点或没停下"
+# ── 拖放反馈（画在角色库面板的画布上）─────────────────────────────────────
+class DropFeedbackTest(RealFletUiTest):
+    def setUp(self):
+        super().setUp()
+        self.app._on_drop_resize(_Resize(300, 700))
 
-    # 行进光斑：tick 一次，光斑必须沿面板边挪动（停留态唯一的动效）
-    before = (canvas.shapes[4].elements[0].x, canvas.shapes[4].elements[0].y)
-    app._tick_drop(app._drop_gen)
-    after = (canvas.shapes[4].elements[0].x, canvas.shapes[4].elements[0].y)
-    assert after != before, "光斑没跟着 tick 行进"
-    assert app._drop_dist > 0
+    def _dash_color(self):
+        # shapes 每次重绘都是新对象，必须现取，不能握住旧引用比
+        return self.app._drop_canvas.shapes[2].paint.color
 
-    # 拒绝态：边框变红、落点旁边就地改红字，不再跑到窗口底部弹横幅
-    app._reject_drop()
-    err = "#FF" + app.ink["err_frame"].lstrip("#").upper()
-    assert canvas.shapes[2].paint.color == err, f"拒绝时虚线框没变红: {canvas.shapes[2].paint.color}"
-    assert app._hint_title.value == "拖进来的不是资源", "拒绝时空状态文案没改"
-    assert app._snack_overlay not in app.page.overlay, "拒绝不该弹底部横幅（视线就在落点上）"
-    await asyncio.sleep(0.5)           # 红停 160ms + 淡出 120ms 后才收回
-    assert canvas.visible is False, "拒绝后画布没收回，会继续吃掉面板里的点击"
-    assert app._hint_title.value == "尚未加载文件", "拒绝退场后文案没还原"
+    @_need_dropzone
+    def test_enter_paints_frame(self):
+        app = self.app
+        app._drag_entered()
+        canvas = app._drop_canvas
+        self.assertTrue(canvas.visible, "拖入后面板没进入拖放态")
+        self.assertEqual((canvas.top, canvas.left, canvas.right, canvas.bottom),
+                         (0, 0, 0, 0),
+                         "画布必须贴满面板，否则虚线框缩在描边里一圈")
+        self.assertEqual(len(canvas.shapes), 5,
+                         "画布应是 底纹/辉光边/虚线边/光斑拖尾/光斑核心 五层")
+        wash = canvas.shapes[0]
+        self.assertEqual(wash.paint.style, ft.PaintingStyle.FILL)
+        self.assertRegex(wash.paint.color, r"^#[0-9A-F]{8}$",
+                         f"底纹颜色不是 #AARRGGBB: {wash.paint.color}")
+        self.assertTrue(canvas.shapes[2].paint.stroke_dash_pattern, "落点边框不是虚线")
+        self.assertEqual(app._hint_title.value, "松手即载入")
+        app._drag_exited()
 
-    # 载入着再拖入：提示必须上场——它在 Stack 下层，不给树让位就永远看不见
-    app._drag_entered()
-    assert app.empty_hint.visible is True and app.tree_list.visible is False, \
-        "已载入文件后拖入，提示被树盖住（没让位）"
-    assert app._hint_title.value == "松手即载入"
-    app._drag_exited()
-    assert app.tree_list.visible is True and app.empty_hint.visible is False, \
-        "拖放退出后旧树没回来"
+    @_need_dropzone
+    def test_fade_in_then_streak_crawls(self):
+        """淡入：进度逐帧推到全亮后停住；行进光斑：tick 一次必须沿框边挪动。"""
+        app = self.app
+        app._drag_entered()
+        app._drop_gen += 1          # 掐掉自发排队的计时链，下面手工逐帧推
+        gen = app._drop_gen
+        for _ in range(12):         # DROP_IN_FRAMES=6，多推几帧看过冲和停表
+            app._tick_drop(gen)
+            if self._dash_color().startswith("#FF"):
+                break
+        self.assertTrue(self._dash_color().startswith("#FF"), "淡入没走到全亮")
+        head_before = (app._drop_canvas.shapes[4].elements[0].x,
+                       app._drop_canvas.shapes[4].elements[0].y)
+        app._tick_drop(gen)
+        head_after = (app._drop_canvas.shapes[4].elements[0].x,
+                      app._drop_canvas.shapes[4].elements[0].y)
+        self.assertNotEqual(head_after, head_before, "光斑没跟着 tick 沿框边行进")
 
-    # 松手即清场：解析在后台跑，这期间旧树必须先撤，提示当场接上，
-    # 不能让用户对着一动不动的旧树干等（初始态同理，不能空窗）。
-    class _DropFile:
-        def __init__(self, p):
-            self.path, self.name = p, Path(p).name
+    @_need_dropzone
+    async def test_reject_shows_red_then_fades(self):
+        """拖进来的东西不认：边框变红停 160ms 再淡出，报错就地发生不弹底部横幅。"""
+        app = self.app
+        app._drag_entered()          # 真实路径：先拖进来才谈松手，画布得先在册
+        canvas = app._drop_canvas
+        self.assertTrue(canvas.visible, "进入拖放态后画布没亮，后面的观察全是空的")
+        app._reject_drop()
+        err = "#FF" + app.ink["err_frame"].lstrip("#").upper()
+        self.assertEqual(canvas.shapes[2].paint.color, err, "拒绝时虚线框没变红")
+        self.assertEqual(app._hint_title.value, "拖进来的不是资源")
+        self.assertNotIn(app._snack_overlay, self.page.overlay,
+                         "拒绝不该弹底部横幅（视线就在落点上）")
+        # 不收回的画布会吃掉面板里的点击
+        await support.pump_until(lambda: canvas.visible is False,
+                                 timeout=3.0, what="拒绝态淡出收回")
+        self.assertEqual(app._hint_title.value, "尚未加载文件")
 
-    class _DropEvt:
-        def __init__(self, ps):
-            self.files = [_DropFile(p) for p in ps]
+    @_need_dropzone
+    async def test_hint_stage_swaps_with_tree(self):
+        """载入着再拖入：提示必须让树上位——它在 Stack 下层，不让位就永远看不见。"""
+        await self.load()
+        app = self.app
+        app._drag_entered()
+        self.assertTrue(app.empty_hint.visible)
+        self.assertFalse(app.tree_list.visible)
+        self.assertEqual(app._hint_title.value, "松手即载入")
+        app._drag_exited()
+        self.assertTrue(app.tree_list.visible, "拖放退出后旧树没回来")
+        self.assertFalse(app.empty_hint.visible)
 
-    real_load = app._load_bin
-    seen = {}
 
-    async def hold(path):
-        seen["tree"] = app.tree_list.visible
-        seen["controls"] = len(app.tree_list.controls)
-        seen["hint"] = (app.empty_hint.visible, app._hint_title.value)
-        await asyncio.Event().wait()   # 一直挂着，由测试收场
+# ── 松手载入：快门清场与失败还原 ──────────────────────────────────────────
+class DropLoadTest(RealFletUiTest):
+    async def test_release_clears_before_parse(self):
+        """松手即清场：解析在后台跑，这期间旧树必须先撤、"正在解析"当场接上，
+        不能让用户对着一动不动的旧树干等。"""
+        await self.load()
+        app = self.app
+        seen = {}
 
-    app._load_bin = hold
-    try:
-        task = asyncio.create_task(app._on_dropped(_DropEvt([bin_a])))
-        await asyncio.sleep(0.05)
-        assert seen.get("controls") == 0 and seen.get("tree") is False, \
-            "松手后旧树还挂着——要先清场再解析"
-        assert seen.get("hint") == (True, "正在解析…"), \
-            "松手后没有当场反馈，这就是那个空窗期"
+        async def hold(path):
+            seen["controls"] = len(app.tree_list.controls)
+            seen["visible"] = app.tree_list.visible
+            seen["hint"] = (app.empty_hint.visible, app._hint_title.value)
+            await asyncio.Event().wait()   # 一直挂着，由测试收场
+
+        app._load_bin = hold
+        self.addCleanup(delattr, app, "_load_bin")
+        task = asyncio.create_task(app._on_dropped(_DropEvt([str(self.fixture)])))
+        await support.pump_until(lambda: seen, what="松手清场")
+        self.assertEqual(seen["controls"], 0, "松手后旧树还挂着——要先清场再解析")
+        self.assertIs(seen["visible"], False)
+        self.assertEqual(seen["hint"], (True, "正在解析…"), "松手后没有当场反馈")
         task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
-    finally:
-        app._load_bin = real_load
 
-    # 解析失败：旧树原样回来，载入状态/状态栏都不能被坏文件冲掉
-    broken = str(tmp / "broken.bin")
-    Path(broken).write_bytes(b"not a bin")
-    prev_status = app.status_text.value
-    await app._on_dropped(_DropEvt([broken]))
-    assert app.input_file == str(tmp), "坏文件把载入状态冲掉了"
-    assert app.tree_list.controls and app.tree_list.visible is True, \
-        "解析失败后旧树没回来"
-    assert app.empty_hint.visible is False, "解析失败后空态提示冒出来了"
-    assert app.status_text.value == prev_status, \
-        f"状态栏卡在 {app.status_text.value!r}，没回到解析前"
-    assert app._hint_title.value == "尚未加载文件", "失败退场后提示文字没复位"
+    async def test_failed_drop_restores_old_tree(self):
+        """解析失败：旧数据没动过，旧树要原样回来，状态栏不能被坏文件冲掉。"""
+        await self.load()
+        app = self.app
+        prev_status = app.status_text.value
+        broken = self.tmp / "broken.bin"
+        broken.write_bytes(b"not a bin")
+        await app._on_dropped(_DropEvt([str(broken)]))
+        self.assertEqual(app.input_file, str(self.fixture), "坏文件把载入状态冲掉了")
+        self.assertTrue(app.tree_list.controls and app.tree_list.visible,
+                        "解析失败后旧树没回来")
+        self.assertFalse(app.empty_hint.visible, "解析失败后空态提示冒出来了")
+        self.assertEqual(app.status_text.value, prev_status,
+                         f"状态栏卡在 {app.status_text.value!r}，没回到解析前")
+        self.assertEqual(app._hint_title.value, "尚未加载文件")
 
-    # 提示横幅：居中下方的小卡片，从底部浮起；外层只定位不吞点击。
-    # 成功提示要自己淡出消失，报错才留着手动关。
-    app._snack("已载出: demo.bin")
-    holder = app._snack_overlay.controls[0]
-    assert holder.content is app._snack_toast, "横幅不是单个小卡片（又铺成整宽了）"
-    assert holder.alignment is not None and holder.left == 0 and holder.right == 0, \
-        "横幅没在窗口底部居中"
-    assert getattr(holder, "bgcolor", None) is None, "定位层有底色会吞掉整条横带的点击"
-    assert app._snack_toast.opacity == 0.0, "横幅初始态没留动画起点"
-    await asyncio.sleep(0.05)
-    assert app._snack_toast.opacity == 1.0 and app._snack_toast.offset == ft.Offset(0, 0), \
-        "横幅没走到显示最终态"
-    await asyncio.sleep(2.4)           # 2s 自动消除 + 淡出
-    assert app._snack_overlay not in app.page.overlay, "成功横幅没有自动消失"
 
-    # 过程反馈：代数不符（解析早就完了）不弹；还在途中才弹，而且绝不自退。
-    app._parsing_gen = 7
-    app._show_parsing_busy(8, "x.bin")
-    assert app._busy_seq is None and not app.page.overlay, "快路径也被弹了横幅"
-    assert app.parse_progress.visible is False, "没到揭示时刻就把进度条亮出来了"
-    app._show_parsing_busy(7, "x.bin")
-    assert app._busy_seq == app._snack_seq, "慢路径没弹\"正在解析\""
-    # 进度条和这条提示同一时刻上场，此刻还不知道总数 → 不定态
-    assert app.parse_progress.visible is True and app.parse_progress.value is None, \
-        "\"正在解析\"弹了但进度条没跟上"
-    await asyncio.sleep(2.4)
-    assert app._snack_overlay in app.page.overlay, "busy 卡片不该自己消失"
-    app._dismiss_snack(app._busy_seq)
-    await asyncio.sleep(0.3)
-    assert app._snack_overlay not in app.page.overlay
-    app._end_parse_feedback()
-    assert app.parse_progress.visible is False, "解析收尾后进度条没收回去"
+# ── 提示横幅与帮助对话框 ──────────────────────────────────────────────────
+class SnackTest(RealFletUiTest):
+    async def test_ok_snack_lifecycle(self):
+        """居中下方浮起的小卡片：定位层不吞点击，成功横幅到点自退。"""
+        app = self.app
+        app._snack("已载出: demo.bin")
+        holder = app._snack_overlay.controls[0]
+        self.assertIs(holder.content, app._snack_toast,
+                      "横幅应是单个小卡片而不是整宽横幅")
+        self.assertEqual((holder.left, holder.right), (0, 0))
+        self.assertIsNotNone(holder.alignment, "横幅要在窗口底部居中")
+        self.assertIsNone(holder.bgcolor, "定位层有底色会吞掉整条横带的点击")
+        self.assertEqual(app._snack_toast.opacity, 0.0, "初始态没给动画起点")
+        await support.pump_until(
+            lambda: app._snack_toast.opacity == 1.0
+            and app._snack_toast.offset == ft.Offset(0, 0), what="横幅浮起到位")
+        await support.pump_until(
+            lambda: app._snack_overlay not in app.page.overlay,
+            timeout=5.0, what="成功横幅自动消失")
 
-    # 方向键：列表项/按钮点过之后会持有焦点，e.control 不为空是常态而不是"在打字"，
-    # 拿它当"焦点被占用"判断会把 ←/→ 全吞掉，帧切换直接失效。
-    class _Key:
-        def __init__(self, key, control=None):
-            self.key = key
-            self.control = control
-            self.ctrl = False
+    async def test_error_snack_only_yields_to_its_own_seq(self):
+        app = self.app
+        seq = app._snack("报错横幅", error=True)
+        await support.pump_until(lambda: app._snack_toast.opacity == 1.0)
+        app._dismiss_snack(seq - 1)
+        self.assertIn(app._snack_overlay, app.page.overlay,
+                      "错误横幅不该被别的序号消掉")
+        app._dismiss_snack(seq)
+        await support.pump_until(lambda: app._snack_overlay not in app.page.overlay,
+                                 timeout=3.0, what="手动关闭后错误横幅移除")
 
-    if len(app.base_imgs) > 1:
+    def test_help_dialog(self):
+        self.app._help(None)
+        self.assertTrue(self.page.dialogs, "帮助对话框未弹出")
+        self.assertIsNotNone(self.page.dialogs[0].content, "帮助内容为空")
+        self.page.pop_dialog()
+        self.assertEqual(self.page.dialogs, [])
+
+
+# ── 解析过程反馈：慢路径才有横幅与进度条 ──────────────────────────────────
+class ParseFeedbackTest(RealFletUiTest):
+    async def test_busy_card_only_for_still_running_parse(self):
+        app = self.app
+        app._show_parsing_busy(999, "x.bin")   # 上一轮解析的迟到触发
+        self.assertIsNone(app._busy_seq)
+        self.assertEqual(self.page.overlay, [], "快路径不该被弹横幅")
+        self.assertFalse(app.parse_progress.visible, "没到揭示时刻就把进度条亮出来了")
+
+        app._parsing_gen = 7                   # 场景：7 这一代还在途中
+        app._show_parsing_busy(7, "x.bin")
+        self.assertEqual(app._busy_seq, app._snack_seq, "慢路径没弹\"正在解析\"")
+        # 进度条和这条横幅同一时刻上场；此刻还不知道总数 → 不定态
+        self.assertTrue(app.parse_progress.visible)
+        self.assertIsNone(app.parse_progress.value)
+        self.assertTrue(app._snack_is_showing(app._busy_seq))
+        await asyncio.sleep(0.3)
+        self.assertIn(app._snack_overlay, self.page.overlay, "busy 卡片不该自己消失")
+        app._dismiss_snack(app._busy_seq)
+        await support.pump_until(lambda: app._snack_overlay not in self.page.overlay,
+                                 timeout=3.0)
+        app._end_parse_feedback()
+        self.assertFalse(app.parse_progress.visible, "解析收尾后进度条没收回去")
+
+    def test_progress_frames_drive_status_bar(self):
+        """没到揭示时刻不画、total=0 是"还不知道总数"（不定态，不能写 0/0）、
+        过期代号的迟到帧不许再改状态栏。"""
+        app = self.app
+        app._parsing_gen, app._parse_shown = 21, False
+        app._show_parse_progress(21, 5, 400, "读文件头")
+        self.assertFalse(app.parse_progress.visible, "还没到揭示时刻就把进度条画出去了")
+        app._parse_shown = True
+        app._show_parse_progress(21, 5, 400, "读文件头")
+        self.assertEqual(app.parse_progress.value, 5 / 400)
+        self.assertEqual(app.status_meta.value, "读文件头 5/400")
+        app._show_parse_progress(21, 30, 0, "扫描目录")
+        self.assertIsNone(app.parse_progress.value, "total=0 该是不定态，不该给个具体比例")
+        self.assertEqual(app.status_meta.value, "扫描目录 30 个")
+        app._show_parse_progress(22, 399, 400, "读文件头")   # 上一轮解析的迟到帧
+        self.assertEqual(app.status_meta.value, "扫描目录 30 个", "过期代号的帧还在改状态栏")
+        app._end_parse_feedback()
+        self.assertFalse(app.parse_progress.visible)
+        self.assertIsNone(app.parse_progress.value, "收尾没清干净")
+
+
+# ── 键盘：焦点在列表项上时快捷键仍然生效 ──────────────────────────────────
+class KeyboardNavTest(RealFletUiTest):
+    async def _load_multiframe(self):
+        await self.load()
+        await self.select(self.app, "CHR_翠_无_私服")   # 多帧底图才有帧可翻
+        self.assertGreater(len(self.app.base_imgs), 1)
+
+    async def test_arrows_work_while_control_holds_focus(self):
+        """列表项/按钮点过之后会持有焦点，e.control 不为空是常态而不是"在打字"，
+        拿它当"焦点被占用"判断会把 ←/→ 全吞掉。"""
+        await self._load_multiframe()
+        app = self.app
         before = app.base_idx
         await app._on_keyboard(_Key("Right", control=object()))
-        assert app.base_idx != before, "控件持有焦点时方向键切不了帧"
+        self.assertNotEqual(app.base_idx, before, "控件持有焦点时方向键切不了帧")
         await app._on_keyboard(_Key("Left", control=object()))
-        assert app.base_idx == before, "往回切没恢复"
+        self.assertEqual(app.base_idx, before, "往回切没恢复")
 
-    assert app.is_dark is False and app.composed_img is snapshot
+    async def test_escape_pops_dialog(self):
+        self.app._help(None)
+        await self.app._on_keyboard(_Key("Escape"))
+        self.assertEqual(self.page.dialogs, [])
 
-    # 导入 / 导出各自记目录：选完导出目录后，再开 bin 不能被带去导出那边
-    seen = {}
+    async def test_zero_resets_both_viewers(self):
+        await self._load_multiframe()
+        self.app._reset_zoom(None)
+        await support.pump_until(
+            lambda: any(m == "reset" for m, _a in self.page.session.calls),
+            what="复位缩放真正下发")
 
-    async def fake_pick(**kw):
-        seen["import"] = kw.get("initial_directory")
-        return None
-
-    async def fake_save(**kw):
-        seen["export"] = kw.get("initial_directory")
-        return str(tmp / "export" / "one.png")
-
-    app.file_picker.pick_files = fake_pick
-    app.file_picker.save_file = fake_save
-    (tmp / "export").mkdir(exist_ok=True)
-    await app._open_bin(None)
-    await app._save_current(None)
-    assert seen["import"] == str(tmp), f"导入对话框初始目录不对: {seen['import']}"
-    assert seen["export"] is None, f"导出对话框被导入目录污染: {seen['export']}"
-    assert app.export_dir == str(tmp / "export"), app.export_dir
-    assert app.import_dir == str(tmp), "导出动作改写了导入记忆目录"
-    seen.clear()
-    await app._open_bin(None)
-    assert seen["import"] == str(tmp), "导出之后导入对话框的初始目录被带跑"
-
-    # ── 窗口记忆 ─────────────────────────────────────────────
-    # 拖动和缩放都不走关闭流程：只存"退出时"会漏掉整个「拖过一遍再关」的情况，
-    # 所以尺寸/位置靠窗口事件记录。这里验的就是事件确实挂上了、并且会落盘。
-    import fvpapp.settings as st
-
-    # 目录记忆要跨重启：退出时落盘成 dialogs 段（打包态只有 CLOSE 事件来得及，_close 也写）
-    app._write_dialog_dirs()
-    assert st.dialog_dirs() == {"import": str(tmp), "export": str(tmp / "export")}, \
-        f"对话框目录没落盘: {st.dialog_dirs()}"
-
-    class _WinEvt:
-        def __init__(self, t):
-            self.type = t
-
-    assert callable(page.window.on_event), "窗口事件没挂上，尺寸位置变化不会被记录"
-    page.window.width, page.window.height = 1500, 900
-    page.window.left, page.window.top = 210, 130
-    page.window.on_event(_WinEvt(ft.WindowEventType.RESIZED))
-    await asyncio.sleep(st.SAVE_DELAY_S + 0.2)      # 等节流那一档落地
-    saved = st.window_prefs()
-    assert (saved.get("width"), saved.get("height")) == (1500, 900), f"缩放后没写盘: {saved}"
-    assert (saved.get("left"), saved.get("top")) == (210, 130), f"拖动后没写盘: {saved}"
-
-    # 最大化只改标记：这会儿的宽高是整个显示器的框，存下来下次会还原成铺满的浮窗
-    page.window.on_event(_WinEvt(ft.WindowEventType.MAXIMIZE))
-    await asyncio.sleep(st.SAVE_DELAY_S + 0.2)
-    saved = st.window_prefs()
-    assert saved.get("maximized") is True, f"最大化状态没记住: {saved}"
-    assert (saved.get("width"), saved.get("left")) == (1500, 210), \
-        f"最大化把上次的几何冲掉了: {saved}"
-
-    # 换主题整树重建，窗口偏好与事件不能丢
-    await app._toggle_theme(None)
-    assert callable(page.window.on_event), "换主题后窗口事件掉了"
-    assert st.window_prefs().get("maximized") is True, "换主题把窗口记忆洗掉了"
-    await app._toggle_theme(None)
-
-    # 帧导航 / 部件切换 / 缩放复位
-    if len(app.base_imgs) > 1:
-        app._next_frame(None)
-        app._prev_frame(None)
-    app._pick_part(min(2, len(app.part_imgs) - 1))
-    app._reset_zoom(None)
-    await asyncio.sleep(0.1)
-    assert any(m == "reset" for m, _a in page.session.calls), "复位缩放未真正下发"
-
-    app._snack("冒烟横幅")
-    assert len(page.overlay) == 1, "横幅未挂载"
-    app._dismiss_snack(app._snack_seq)
-    await asyncio.sleep(0.3)           # 淡出走完才摘掉，不再瞬间消失
-    assert not page.overlay, "横幅未移除"
-    app._snack("报错横幅", error=True)
-    app._dismiss_snack(-1)
-    await asyncio.sleep(0.3)
-    assert len(page.overlay) == 1, "错误横幅不应被别的序号消掉"
-    app._dismiss_snack(app._snack_seq)
-    await asyncio.sleep(0.3)
-    assert not page.overlay, "手动关闭后错误横幅未移除"
-
-    app._help(None)
-    assert page.dialogs, "帮助对话框未弹出"
-    dialog = page.dialogs[0]
-    assert dialog.content is not None, "帮助内容为空"
-    page.pop_dialog()
-
-    # 键盘事件入口（不抛异常即可，具体分派依赖真实 key）
-    if app.page.on_keyboard_event is not None:
+    async def test_real_key_events_do_not_crash(self):
         for key in ("Left", "Right", "Escape", "0", "l"):
             ev = ft.KeyboardEvent(name=key, data="", control=None, key=key,
                                   shift=False, ctrl=False, alt=False, meta=False)
-            await app._on_keyboard(ev)
+            await self.app._on_keyboard(ev)
 
-    # argv 自动载入要一直可用（拖到 exe 图标那条通道）。打包态能走到这里
-    # 全靠 client\main.dart 的 FVP-PATCH：flet 0.86.5 原生客户端会把位置参数
-    # 当成 developer mode 的 page URL，嵌入 Python 根本不启动。
-    page2 = FakePage()
-    old_argv, sys.argv = sys.argv, ["prog", str(tmp)]
-    try:
-        app2 = await app_main(page2)
-    finally:
-        sys.argv = old_argv
-    assert app2.input_file == str(tmp), "argv 自动载入失效了"
-    assert page2.added, "argv 启动路径未建树"
-    assert app2.export_dir == str(tmp / "export"), "重启后导出目录没接上"
-    assert app2.import_dir == str(tmp), "重启后导入目录没接上"
 
-    # ── 无表情差分 → 直接导出底图 ──────────────────────────────
-    # 只让看不让导出的状态是不完整的：没有 _表情 变体（或载入的不是立绘）时，
-    # 结果面板要镜像当前底图帧，保存/批量导出都退到底图本身。
-    from FVPTachieComposerFlet import PART_HINT_EMPTY
-    nodiff = next(i for i in app.file_infos if i["filename"] == "CHR_翠_无_私服")
-    await app._select_action(nodiff)
-    assert app.base_only is True, "没有差分时应进入「直接导出底图」模式"
-    assert app.part_imgs == [] and app.composed_img is None, "无差分模式不该留下合成结果"
-    assert app.part_hint_text.value == PART_HINT_EMPTY, "左栏没说明会导出底图"
-    assert app.result_hint.visible is False, "底图模式下结果面板还是占位图"
-    assert app.save_btn.disabled is False and app.batch_btn.disabled is False, \
-        "无差分模式下导出按钮被禁用（只能看不能导）"
-    mirrored = app.result_image.src
-    assert isinstance(mirrored, str) and mirrored.startswith("data:image/"), \
-        "底图模式右栏没镜像成 data URI"
-    assert mirrored == app.base_image.src, "右栏镜像的不是当前底图帧——看到的和导出的对不上"
+# ── 对话框目录记忆：导入/导出各自记各自的 ─────────────────────────────────
+class DialogDirMemoryTest(RealFletUiTest):
+    async def _prepare(self):
+        await self.load()
+        self.toggle(self.app, ("role", "翠"))
+        self.toggle(self.app, ("outfit", "翠/私服"))
+        await self.select(self.app, "CHR_翠_基_私服")
+        (self.tmp / "export").mkdir()
 
-    # 换帧要跟手：所见即所导
-    app._next_frame(None)
-    assert app.base_idx == 1
-    assert app.result_image.src != mirrored, "翻帧后右栏还停在上一帧"
-    assert app.result_image.src == app.base_image.src, "翻帧后右栏没跟着底图走"
-    assert "底图（无表情差分）" in app.result_meta.value
+    async def test_import_and_export_dirs_stay_separate(self):
+        """选完导出目录后，再开 bin 不能被带去导出那边。"""
+        await self._prepare()
+        app = self.app
+        seen = {}
 
-    # 保存命名走 _base_ 且用当前底图帧号。
-    # 注意要挂在实例上：上面「导入/导出记目录」那一步已经把 save_file 换成了
-    # 实例属性，类级别的补丁会被它挡住。
-    picked_names = []
-    batch_dir = tmp / "batch"
-    batch_dir.mkdir(exist_ok=True)
-
-    async def fake_base_save(dialog_title=None, file_name=None,
-                             initial_directory=None, **kw):
-        picked_names.append(file_name)
-        return str(tmp / file_name)
-
-    async def fake_base_dir(dialog_title=None, initial_directory=None, **kw):
-        return str(batch_dir)
-
-    app.file_picker.save_file = fake_base_save
-    app.file_picker.get_directory_path = fake_base_dir
-    try:
-        await app._save_current(None)
-        assert picked_names == ["CHR_翠_无_私服_base_001.png"], \
-            f"底图导出命名不对: {picked_names}"
-        assert (tmp / picked_names[0]).exists(), "底图没真正写盘"
-
-        await app._batch_export(None)
-        assert sorted(p.name for p in batch_dir.glob("*.png")) == \
-            [f"CHR_翠_无_私服_base_{i:03d}.png" for i in range(3)], \
-            "无差分批量导出没有铺平底图全部帧"
-    finally:
-        del app.file_picker.save_file
-        del app.file_picker.get_directory_path
-
-    # 换主题后底图模式必须原样回来，按钮不能重新变灰
-    kept_base_src = app.base_image.src
-    await app._toggle_theme(None)
-    assert app.base_only is True, "换主题把「直接导出底图」模式弄丢了"
-    assert app.base_idx == 1, "换主题后底图帧号被重置"
-    assert app.base_image.src == kept_base_src
-    assert app.result_image.src == app.base_image.src, "换主题后右栏没跟住底图"
-    assert app.save_btn.disabled is False and app.batch_btn.disabled is False, \
-        "换主题后底图模式的导出按钮又灰了"
-
-    # 载出：卸载后必须回到"刚打开时"的空状态，且能再次载入（回初始态的回归防线）
-    await app._unload_bin(None)
-    assert app.input_file is None, "载出后 input_file 未清空"
-    assert app.file_infos == [] and app.hierarchy == {}, "载出后解析状态未清空"
-    assert app.selected_info is None and app.selected_filename is None, "载出后选中态未清空"
-    assert app.base_imgs == [] and app.part_imgs == [] and app.composed_img is None, \
-        "载出后预览状态未清空"
-    assert app.base_idx == 0 and app.part_idx == 0, "载出后帧号未复位"
-    assert app.tree_list.visible is False and not app.tree_list.controls, "载出后树还挂着"
-    assert app.empty_hint.visible is True, "载出后空状态提示没恢复（回不到初始态）"
-    assert app.file_chip.content.value == "未载入文件", "载出后标题栏文件名胶囊没复位"
-    assert app.unload_btn.visible is False, "载出后载出按钮还在显示"
-    assert app.save_btn.disabled is True and app.batch_btn.disabled is True, \
-        "载出后导出按钮没被禁用"
-    assert app.role_thumb_cache == {}, "载出后缩略图缓存没清"
-    assert app.status_text.value == "就绪", f"载出后状态栏没复位: {app.status_text.value}"
-    # 再载入要能照常建树、载出按钮回来
-    await app._load_bin(str(tmp))
-    assert app.input_file == str(tmp) and app.tree_list.visible, "载出后无法再次载入"
-    assert app.empty_hint.visible is False and app.unload_btn.visible is True
-
-    # 角色逐条错峰浮入：起步全是透明的外壳，链子把每条推到终点。
-    # 载入的确认长在内容自己身上，不再另起一层提示。
-    from FVPTachieComposerFlet import STAGGER_MS
-    assert len(app._tree_wraps) == len(app.hierarchy), "错峰外壳数量对不上角色数"
-    assert all(w.opacity == 0.0 for w in app._tree_wraps), "错峰起步没给动画留起点"
-    await asyncio.sleep(len(app._tree_wraps) * STAGGER_MS + 0.3)
-    assert all(w.opacity == 1.0 and w.offset == ft.Offset(0, 0)
-               for w in app._tree_wraps), "错峰没把每条角色都浮到位"
-    # 中途又拖进来：剩下的必须直接落到终点，不能留半透明的行
-    app._stagger_i = 0
-    for w in app._tree_wraps:
-        w.opacity = 0.0
-    app._drop_armed = True
-    app._stagger_step()
-    assert all(w.opacity == 1.0 for w in app._tree_wraps), "拖入打断错峰时留下了半透明的角色"
-    app._drop_armed = False
-
-    # ── 缓存：换资源不清、不串、切回命中（6.7）────────────────
-    # 键里带资源指纹（路径 + 大小 + mtime）：换资源时不清缓存，同名动作各取各的，
-    # 切回上一份资源还能命中。用"文件名一模一样、画面不同"的两份资源验不串图。
-    from fvpapp import cache as _cache
-
-    def _role_thumb_src(a, role):
-        w = a.role_thumb_cache.get(role)
-        if w is None:
+        async def fake_pick(**kw):
+            seen["import"] = kw.get("initial_directory")
             return None
-        return getattr(w, "src", None) or getattr(getattr(w, "content", None), "src", None)
 
-    def _strip_srcs(a):
-        return [getattr(c.content, "src", None) for c in a.thumb_list.controls]
+        async def fake_save(**kw):
+            seen["export"] = kw.get("initial_directory")
+            return str(self.tmp / "export" / "one.png")
 
-    def _expand_all(a):
-        for role in sorted(a.hierarchy):
-            a._tree_toggles[("role", role)][1](None)
-        for role in sorted(a.hierarchy):
-            for outfit in sorted(a.hierarchy[role]):
-                a._tree_toggles[("outfit", f"{role}/{outfit}")][1](None)
+        app.file_picker.pick_files = fake_pick
+        app.file_picker.save_file = fake_save
+        try:
+            await app._open_bin(None)
+            await app._save_current(None)
+        finally:
+            del app.file_picker.pick_files
+            del app.file_picker.save_file
+        self.assertEqual(seen["import"], str(self.fixture), "导入对话框初始目录不对")
+        self.assertIsNone(seen["export"], "导出目录首次应为系统默认")
+        self.assertEqual(app.export_dir, str(self.tmp / "export"))
+        self.assertEqual(app.import_dir, str(self.fixture), "导出动作不该改写导入记忆目录")
 
-    decoded = []
-    real_read = app._read_first_frame
-    app._read_first_frame = lambda info, data=None, header=None: (
-        decoded.append(info["filename"]), real_read(info, data, header)
-    )[1]
-    try:
-        target = next(i for i in app.file_infos if i["filename"] == "CHR_翠_喜_私服")
-        fp_a = _cache.resource_fingerprint(target, str(tmp))
-        await app._select_action(target)
-        await asyncio.sleep(0.6)                       # 底图与差分条都在后台解
-        base_a, strip_a = app.base_image.src, _strip_srcs(app)
-        assert base_a.startswith("data:image/") and strip_a, "底图或差分条没出来"
-        role_a = _role_thumb_src(app, "翠")
-        assert _cache.images.get(_cache.image_key(fp_a, "base", "CHR_翠_喜_私服", 0)), \
-            "底图 data URI 没进缓存"
+        seen.clear()
+        app.file_picker.pick_files = fake_pick
+        try:
+            await app._open_bin(None)
+        finally:
+            del app.file_picker.pick_files
+        self.assertEqual(seen["import"], str(self.fixture), "导出之后导入初始目录被带跑")
 
-        # 角色/服装现在才展开：这些层的缩略图此前不该提前解码
-        _expand_all(app)
-        await asyncio.sleep(0.6)
-        first = len(decoded)
-        assert first > 0, "展开后一张缩略图都没解码，这条断言没走到路径"
+    async def test_dirs_persist_for_next_start(self):
+        """退出时落盘成 dialogs 段（打包态只有 CLOSE 事件来得及，_close 也写）。"""
+        await self._prepare()
+        app = self.app
+        app.export_dir = str(self.tmp / "export")
+        app._write_dialog_dirs()
+        self.assertEqual(st.dialog_dirs(),
+                         {"import": str(self.fixture), "export": str(self.tmp / "export")})
 
-        # 换主题会整棵重建树并恢复展开态：解过的不能再解一遍
-        await app._toggle_theme(None)
-        await asyncio.sleep(0.6)
-        assert len(decoded) == first, f"重建树又解码了 {len(decoded) - first} 张缩略图"
 
-        # 卡片上写的自测口径：整批收起再展开，第二次不重复解码
-        roles = sorted(app.hierarchy)
-        for role in roles:
-            app._tree_toggles[("role", role)][1](None)
-        for role in roles:
-            app._tree_toggles[("role", role)][1](None)
-        await asyncio.sleep(0.4)
-        assert len(decoded) == first, f"收起再展开又解码了 {len(decoded) - first} 张缩略图"
+# ── 窗口事件：拖动/缩放/最大化都要落盘 ────────────────────────────────────
+class WindowEventTest(RealFletUiTest):
+    async def test_resize_and_maximize_are_remembered(self):
+        """拖动和缩放都不走关闭流程：只存"退出时"会漏掉整个「拖过一遍再关」。"""
+        self.assertTrue(callable(self.page.window.on_event), "窗口事件没挂上")
+        w = self.page.window
+        w.width, w.height, w.left, w.top = 1500, 900, 210, 130
+        w.on_event(_WinEvt(ft.WindowEventType.RESIZED))
+        await support.pump_until(
+            lambda: st.window_prefs().get("width") == 1500
+            and st.window_prefs().get("left") == 210,
+            timeout=st.SAVE_DELAY_S + 3.0, what="缩放/拖动落盘")
 
-        # 换资源：同名不同画面。缓存不清（A 的条目还在），B 也不能拿到 A 的图
-        other = build_fixture(salt=90)
-        await app._load_bin(str(other))
-        await asyncio.sleep(0.6)
-        assert _role_thumb_src(app, "翠") is not None, "新资源的角色缩略图没出来"
-        assert _role_thumb_src(app, "翠") != role_a, "换资源后角色缩略图还是上一份的（同名串图）"
-        assert _cache.images.get(_cache.image_key(fp_a, "base", "CHR_翠_喜_私服", 0)) is not None, \
-            "换资源把上一份资源的缓存清了（应该留着等切回时命中）"
-        target_b = next(i for i in app.file_infos if i["filename"] == "CHR_翠_喜_私服")
-        assert _cache.resource_fingerprint(target_b, str(other)) != fp_a, "两份资源的指纹撞了"
-        await app._select_action(target_b)
-        await asyncio.sleep(0.6)
-        assert app.base_image.src != base_a, "换资源后同一动作的底图还是上一份的"
-        assert _strip_srcs(app) != strip_a, "换资源后差分条还是上一份的"
+        # 最大化只改标记：这会儿的宽高是整个显示器的框，不能把上次几何冲掉
+        w.on_event(_WinEvt(ft.WindowEventType.MAXIMIZE))
+        await support.pump_until(lambda: st.window_prefs().get("maximized") is True,
+                                 timeout=st.SAVE_DELAY_S + 3.0, what="最大化状态落盘")
+        saved = st.window_prefs()
+        self.assertEqual((saved.get("width"), saved.get("left")), (1500, 210),
+                         f"最大化把上次的几何冲掉了: {saved}")
+
+    async def test_theme_rebuild_keeps_window_state(self):
+        w = self.page.window
+        w.width, w.height = 1400, 850
+        w.on_event(_WinEvt(ft.WindowEventType.MAXIMIZE))
+        await support.pump_until(lambda: st.window_prefs().get("maximized") is True,
+                                 timeout=st.SAVE_DELAY_S + 3.0)
+        await self.app._toggle_theme(None)
+        self.assertTrue(callable(w.on_event), "换主题后窗口事件掉了")
+        self.assertIs(st.window_prefs().get("maximized"), True, "换主题把窗口记忆洗掉了")
+
+
+# ── argv 自动载入（拖到程序图标那条通道）──────────────────────────────────
+class ArgvLaunchTest(RealFletUiTest):
+    async def test_argv_autoloads_first_target(self):
+        """目录记忆要跨重启：启动时从 dialogs 段接上，再被实际载入覆盖导入侧。"""
+        exp = self.tmp / "exp"
+        exp.mkdir()
+        st.save_dialog_dirs(str(self.tmp), str(exp))
+        old_argv, sys.argv = sys.argv, ["prog", str(self.fixture)]
+        self.addCleanup(setattr, sys, "argv", old_argv)
+        page2 = self.new_page()
+        app2 = await app_main(page2)
+        self.assertEqual(app2.input_file, str(self.fixture), "argv 自动载入失效了")
+        self.assertTrue(page2.added, "argv 启动路径未建树")
+        self.assertEqual(app2.export_dir, str(exp), "重启后导出目录没接上")
+        self.assertEqual(app2.import_dir, str(self.fixture))
+
+    async def test_unknown_argv_still_says_something(self):
+        """拖了个不存在/不支持的东西进来也要吭一声：不能静默吞掉。"""
+        old_argv, sys.argv = sys.argv, ["prog", str(self.tmp / "gone.bin")]
+        self.addCleanup(setattr, sys, "argv", old_argv)
+        page2 = self.new_page()
+        app2 = await app_main(page2)
+        self.assertIsNotNone(app2)
+        await support.pump_until(lambda: bool(page2.overlay), what="无法打开的横幅挂上")
+
+
+# ── 载出 / 重载：回到初始状态的回归防线 ──────────────────────────────────
+class UnloadReloadTest(RealFletUiTest):
+    async def test_unload_returns_to_initial_state(self):
+        await self.load()
+        app = self.app
+        await app._unload_bin(None)
+        self.assertIsNone(app.input_file, "载出后 input_file 未清空")
+        self.assertEqual(app.file_infos, [])
+        self.assertEqual(app.hierarchy, {})
+        self.assertIsNone(app.selected_filename)
+        self.assertEqual(app.base_imgs, [])
+        self.assertEqual(app.base_idx, 0)
+        self.assertFalse(app.tree_list.visible, "载出后树还挂着")
+        self.assertEqual(app.tree_list.controls, [])
+        self.assertTrue(app.empty_hint.visible, "载出后空状态提示没恢复（回不到初始态）")
+        self.assertEqual(app.file_chip.content.value, "未载入文件")
+        self.assertFalse(app.unload_btn.visible, "没载东西时载出是死按钮")
+        self.assertTrue(app.save_btn.disabled)
+        self.assertTrue(app.batch_btn.disabled)
+        self.assertEqual(app.status_text.value, "就绪")
+        self.assertEqual(app.role_thumb_cache, {}, "载出后缩略图控件字典没清")
+
+        # 再载入要能照常建树、载出按钮回来
+        await self.load()
+        self.assertTrue(app.tree_list.visible, "载出后无法再次载入")
+        self.assertFalse(app.empty_hint.visible)
+        self.assertTrue(app.unload_btn.visible)
+
+    async def test_unload_is_idempotent(self):
+        await self.app._unload_bin(None)
+        await self.app._unload_bin(None)   # 第二次载出同样干净、不抛错
+        self.assertIsNone(self.app.input_file)
+        self.assertTrue(self.app.empty_hint.visible)
+
+    async def test_unload_during_parse_hides_progress(self):
+        """解析中途按下载出：进度条不能跟着带进初始态。"""
+        app = self.app
+        await self.load()            # 没载入东西时载出走早退，验不到复位那条路
+        app._parsing_gen = app._state_gen
+        app._parse_shown = True
+        app.parse_progress.visible = True
+        app.parse_progress.value = 0.5
+        await app._unload_bin(None)
+        self.assertFalse(app.parse_progress.visible)
+        self.assertIsNone(app.parse_progress.value)
+        self.assertEqual(app.status_text.value, "就绪")
+        self.assertEqual(app.status_meta.value, "")
+
+
+# ── 角色逐条错峰浮入 ──────────────────────────────────────────────────────
+class StaggerTest(RealFletUiTest):
+    async def test_roles_start_transparent_and_settle(self):
+        """载入的确认长在内容自己身上：起步全是透明的外壳，链子把每条推到终点。"""
+        app = self.app
+        ok = await app._load_bin(str(self.fixture))
+        self.assertTrue(ok)
+        # _load_bin 返回时错峰链只排上了计时器，第一帧还没推——起点必须可见
+        wraps = [c for c in app.tree_list.controls if isinstance(c, ft.Container)]
+        self.assertEqual(len(wraps), len(app.hierarchy))
+        self.assertTrue(all(w.opacity == 0.0 for w in wraps), "错峰起步没给动画留起点")
+        await support.pump_until(
+            lambda: all(w.opacity == 1.0 and w.offset == ft.Offset(0, 0) for w in wraps),
+            timeout=5.0, what="全部角色浮到位")
+
+    @_need_dropzone
+    async def test_drop_interrupt_settles_every_row(self):
+        """错峰中途又拖进来：剩下的必须直接落到终点，不能留半透明的行。"""
+        await self.load()
+        app = self.app
+        wraps = [c for c in app.tree_list.controls if isinstance(c, ft.Container)]
+        app._stagger_i = 0
+        for w in wraps:
+            w.opacity = 0.0
+        app._drag_entered()
+        app._stagger_step()
+        self.assertTrue(all(w.opacity == 1.0 for w in wraps),
+                        "拖入打断错峰时留下了半透明的角色")
+        app._drag_exited()
+
+
+# ── 缓存：换资源不串、切回命中、重解不发生 ───────────────────────────────
+class AbResourceCacheTest(RealFletUiTest):
+    def _watch_decodes(self):
+        """把首帧解码计数挂到实例上（树里三级缩略图都走这条）。"""
+        app = self.app
+        decoded = []
+        real_read = app._read_first_frame
+        app._read_first_frame = lambda info, data=None, header=None: (
+            decoded.append(info["filename"]), real_read(info, data, header))[1]
+        self.addCleanup(delattr, app, "_read_first_frame")
+        return decoded
+
+    async def test_same_names_do_not_collide_and_switchback_hits(self):
+        """键里带资源指纹（路径+大小+mtime）：换资源时不清缓存，同名动作
+        各取各的，切回上一份资源还能命中。"""
+        decoded = self._watch_decodes()
+        app = self.app
+        await self.load()
+        self.expand_all(app)
+        await support.pump_until(lambda: role_thumb_src(app, "翠"), what="角色缩略图上屏")
+        await self.select(app, "CHR_翠_喜_私服")
+        base_a, strip_a = app.base_image.src, strip_srcs(app)
+        role_a = role_thumb_src(app, "翠")
+
+        other = support.build_fixture(salt=90)   # 文件名一模一样、画面不同
+        self.addCleanup(shutil.rmtree, other, True)
+        await self.load(app, other)
+        await support.drain_thumb_pool()
+        self.assertIsNotNone(role_thumb_src(app, "翠"), "新资源的角色缩略图没出来")
+        self.assertNotEqual(role_thumb_src(app, "翠"), role_a,
+                            "换资源后角色缩略图还是上一份的（同名串图）")
+        await self.select(app, "CHR_翠_喜_私服")
+        self.assertNotEqual(app.base_image.src, base_a, "换资源后同一动作的底图还是上一份的")
+        self.assertNotEqual(strip_srcs(app), strip_a, "换资源后差分条还是上一份的")
 
         # 切回 A：缩略图与整帧都该命中缓存，不再解码
         n_back = len(decoded)
-        await app._load_bin(str(tmp))
-        await asyncio.sleep(0.4)
-        target_a2 = next(i for i in app.file_infos if i["filename"] == "CHR_翠_喜_私服")
-        await app._select_action(target_a2)
-        await asyncio.sleep(0.4)
-        assert app.base_image.src == base_a, "切回 A 后底图没命中缓存"
-        assert _strip_srcs(app) == strip_a, "切回 A 后差分条没命中缓存"
-        assert len(decoded) == n_back, f"切回 A 又解码了 {len(decoded) - n_back} 张缩略图"
-    finally:
-        app._read_first_frame = real_read
+        await self.load(app, self.fixture)
+        await support.drain_thumb_pool()
+        await self.select(app, "CHR_翠_喜_私服")
+        self.assertEqual(app.base_image.src, base_a, "切回 A 后底图没命中缓存")
+        self.assertEqual(strip_srcs(app), strip_a, "切回 A 后差分条没命中缓存")
+        self.assertEqual(len(decoded), n_back, f"切回 A 又解码了 {len(decoded) - n_back} 张")
 
-    expected_hier, expected_infos = set(app.hierarchy), len(app.file_infos)
-    await app._unload_bin(None)  # 幂等收尾：第二次载出同样干净
-    assert app.input_file is None and app.empty_hint.visible is True
-    assert app.role_thumb_cache == {}, "载出后缩略图控件字典没清"
-    assert _cache.images.get(_cache.image_key(fp_a, "base", "CHR_翠_喜_私服", 0)) is not None, \
-        "载出把可复用的缓存也清掉了（下次打开又要重算）"
+    async def test_rebuild_and_reexpand_redecode_nothing(self):
+        """换主题整树重建、整批收起再展开：解过的不能再解一遍。"""
+        decoded = self._watch_decodes()
+        app = self.app
+        await self.load()
+        self.expand_all(app)
+        await support.drain_thumb_pool()
+        first = len(decoded)
+        self.assertGreater(first, 0, "展开后一张缩略图都没解码，这条断言没走到路径")
 
-    import fvpapp.resources as _res
+        await app._toggle_theme(None)
+        await support.drain_thumb_pool()
+        self.assertEqual(len(decoded), first, f"重建树又解码了 {len(decoded) - first} 张")
 
-    # ── 6.1 解析索引跨会话命中 ─────────────────────────────────
-    # 同一份目录再载入（等价于下次开会话）不该重扫：索引缓存直接给出清单与层级。
-    parsed = []
-    real_scan0 = _res.parse_dir_infos
-    _res.parse_dir_infos = lambda path, progress=None: (
-        parsed.append(str(path)), real_scan0(path, progress)
-    )[1]
-    app_idx = ComposerApp(FakePage())
-    try:
-        await app_idx._load_bin(str(tmp))
-    finally:
-        _res.parse_dir_infos = real_scan0
-    assert parsed == [], f"索引已缓存却又重新解析了 {len(parsed)} 次"
-    assert set(app_idx.hierarchy) == expected_hier, "索引缓存回来的层级与首次不一致"
-    assert len(app_idx.file_infos) == expected_infos, "索引缓存回来的条目数与首次不一致"
+        for role in sorted(app.hierarchy):
+            state, tog = app._tree_toggles[("role", role)]
+            if state["open"]:
+                tog(None)
+        self.expand_all(app)
+        await support.drain_thumb_pool()
+        self.assertEqual(len(decoded), first,
+                         f"收起再展开又解码了 {len(decoded) - first} 张")
 
-    # ── 大资源载入的进度反馈 ───────────────────────────────────
-    # 小资源在进度条亮起来之前就解析完了，那条路全程安静；只有慢资源才把
-    # "正在解析"和进度条一起亮出来，状态栏右侧报阶段，收尾立刻收起。
 
-    big = Path(tempfile.mkdtemp(prefix="ui_smoke_big_"))
-    for i in range(400):
-        make_hzc(big / f"CHR_翠_动作{i:03d}_私服.hzc")
+class FrameCacheTest(RealFletUiTest):
+    async def test_switching_actions_does_not_redecode_frames(self):
+        """来回切动作不重解整帧：计数挂在真正干整包 zlib 的解码上。
+        用一份没被前面流程碰过的新资源——帧缓存跨实例共享，拿旧资源测
+        会直接命中，计数永远是 0。"""
+        import fvpapp.resources as res
+        fixt = support.build_fixture(salt=77)
+        self.addCleanup(shutil.rmtree, fixt, True)
+        await self.load(target=fixt)
+        calls = []
+        real_list = res.hzc_data_to_pil_list
+        patcher = mock.patch.object(
+            res, "hzc_data_to_pil_list",
+            side_effect=lambda data, header: (calls.append(1), real_list(data, header))[1])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        app = self.app
+        first = self.info(app, "CHR_翠_基_私服")
+        second = self.info(app, "CHR_翠_喜_私服")
+        await app._select_action(first)
+        n_first = len(calls)
+        await app._select_action(second)
+        n_second = len(calls)
+        await app._select_action(first)
+        self.assertGreaterEqual(n_first, 2, f"第一次选动作只解了 {n_first} 次，没走到整帧解码")
+        self.assertGreater(n_second, n_first, "换动作没有解新动作")
+        self.assertEqual(len(calls), n_second,
+                         f"切回已看过的动作又整帧解码了 {len(calls) - n_second} 次")
 
-    raw, frames = [], []
-    real_scan, real_show = _res.parse_dir_infos, app._show_parse_progress
 
-    def counting_scan(path, progress=None):
-        def inner(done, total, stage):
-            raw.append((done, total, stage))
-            progress(done, total, stage)
-        return real_scan(path, progress=inner)
+class CrossSessionThumbTest(RealFletUiTest):
+    async def test_new_app_hits_disk_without_decoding(self):
+        """换一个 App 实例、同一份资源、同一个缓存目录（等价于下次开会话）：
+        树里三级缩略图都应直接命中磁盘，首帧解码一次都不该再走。
+        内存缓存先清掉——否则验的是内存而不是磁盘。"""
+        await self.load()
+        self.expand_all(self.app)
+        await support.drain_thumb_pool()
+        support.reset_cache_singletons()
 
-    def spy(gen, done, total, stage):
-        frames.append((done, total, stage, app.parse_progress.visible))
-        real_show(gen, done, total, stage)
-
-    _res.parse_dir_infos = counting_scan
-    app._show_parse_progress = spy
-    old_delay = _res.BUSY_DELAY
-    _res.BUSY_DELAY = 0            # 400 个文件在小机器上也可能秒完，门槛降到 0 才保证走到慢路径
-    try:
-        await app._load_bin(str(big))
-    finally:
-        _res.BUSY_DELAY = old_delay
-        _res.parse_dir_infos = real_scan
-        del app._show_parse_progress
-
-    stages = {s for _, _, s in raw}
-    assert "扫描目录" in stages and "读文件头" in stages, f"阶段不全: {stages}"
-    assert raw[-1][0] == raw[-1][1] != 0, f"最后一帧没报满: {raw[-1]}"
-    head = [(d, t) for d, t, s in raw if s == "读文件头"]
-    assert all(b[0] >= a[0] for a, b in zip(head, head[1:])), "读文件头的计数倒着走了"
-    assert len({t for _, t in head}) == 1, "同一阶段里 total 会变，进度条会来回跳"
-    # 节流：四百次回调只该换来个位数帧——逐条刷会把事件循环淹了
-    assert len(raw) >= 400 and len(frames) < 60, \
-        f"引擎报了 {len(raw)} 次、UI 收到 {len(frames)} 帧，节流没生效"
-    assert any(f[3] for f in frames), "慢资源从头到尾没亮过进度条"
-    assert app.parse_progress.visible is False and app.parse_progress.value is None, \
-        "解析完了进度条还挂着（残影）"
-    assert app.status_meta.value == f"1 角色 · {len(app.file_infos)} 图像", \
-        f"状态栏停在解析文案: {app.status_meta.value}"
-
-    # UI 线程那一半不用起线程也能验：没到揭示时刻不画、代号不符自弃、
-    # total=0 是"还不知道总数"（不定态），文案不能写成 0/0。
-    app._parsing_gen, app._parse_shown = 21, False
-    app._show_parse_progress(21, 5, 400, "读文件头")
-    assert app.parse_progress.visible is False, "还没到揭示时刻就把进度条画出去了"
-    app._parse_shown = True
-    app._show_parse_progress(21, 5, 400, "读文件头")
-    assert app.parse_progress.value == 5 / 400, app.parse_progress.value
-    assert app.status_meta.value == "读文件头 5/400", app.status_meta.value
-    app._show_parse_progress(21, 30, 0, "扫描目录")
-    assert app.parse_progress.value is None, "total=0 该是不定态，不该给个具体比例"
-    assert app.status_meta.value == "扫描目录 30 个", app.status_meta.value
-    app._show_parse_progress(22, 399, 400, "读文件头")      # 上一轮解析的迟到帧
-    assert app.status_meta.value == "扫描目录 30 个", "过期代号的帧还在改状态栏"
-    app._end_parse_feedback()
-    assert (app._parsing_gen, app._parse_shown) == (None, False), "收尾没把解析代号作废"
-    assert app.parse_progress.visible is False and app.parse_progress.value is None, \
-        "收尾没清干净"
-
-    # ── 6.6 跨会话磁盘命中（树缩略图）─────────────────────────
-    # 换一个 App 实例、同一份资源、同一个 FVP_CACHE_DIR：树里三级缩略图
-    # 都应直接命中磁盘，_read_first_frame 一次都不该再走。
-    app2 = ComposerApp(FakePage())
-    decoded2 = []
-    real_read2 = app2._read_first_frame
-    app2._read_first_frame = lambda info, data=None, header=None: (
-        decoded2.append(info["filename"]), real_read2(info, data, header)
-    )[1]
-    try:
-        await app2._load_bin(str(tmp))
+        app2 = self.new_app()
+        decoded2 = []
+        real_read = app2._read_first_frame
+        app2._read_first_frame = lambda info, data=None, header=None: (
+            decoded2.append(info["filename"]), real_read(info, data, header))[1]
+        await app2._load_bin(str(self.fixture))
         for role in sorted(app2.hierarchy):
-            app2._tree_toggles[("role", role)][1](None)
+            state, tog = app2._tree_toggles[("role", role)]
+            if not state["open"]:
+                tog(None)
         for role in sorted(app2.hierarchy):
             for outfit in sorted(app2.hierarchy[role]):
-                app2._tree_toggles[("outfit", f"{role}/{outfit}")][1](None)
-        await asyncio.sleep(1.0)
-        assert decoded2 == [], \
-            f"跨会话没命中磁盘缓存，又解码了 {len(decoded2)} 张: {decoded2[:5]}"
-    finally:
-        app2._read_first_frame = real_read2
-
-    # ── 卡片 2.4：来回切动作不重解整帧 ─────────────────────────
-    # 计数挂在真正干整包 zlib 的 hzc_data_to_pil_list 上（不是树里的首帧解码）。
-    # 用一份没被前面流程碰过的新资源：帧缓存本身跨实例共享，拿旧资源测
-    # 会直接命中，计数永远是 0。
-    fixt3 = build_fixture(salt=77)
-    app3 = ComposerApp(FakePage())
-    await app3._load_bin(str(fixt3))
-    await asyncio.sleep(0.2)
-    calls = []
-    real_list = _res.hzc_data_to_pil_list
-
-    def counting_list(data, header):
-        calls.append(1)
-        return real_list(data, header)
-
-    _res.hzc_data_to_pil_list = counting_list
-    try:
-        first = next(i for i in app3.file_infos if i["filename"] == "CHR_翠_基_私服")
-        second = next(i for i in app3.file_infos if i["filename"] == "CHR_翠_喜_私服")
-        await app3._select_action(first)
-        await asyncio.sleep(0.4)
-        n_first = len(calls)
-        await app3._select_action(second)
-        await asyncio.sleep(0.4)
-        n_second = len(calls)
-        await app3._select_action(first)
-        await asyncio.sleep(0.4)
-        assert n_first >= 2, f"第一次选动作只解了 {n_first} 次，没走到整帧解码"
-        assert n_second > n_first, "换动作没有解新动作"
-        assert len(calls) == n_second, \
-            f"切回已看过的动作又整帧解码了 {len(calls) - n_second} 次"
-    finally:
-        _res.hzc_data_to_pil_list = real_list
-
-    # 解析中途按下载出：进度条不能跟着带进初始态
-    app._parsing_gen = app._state_gen
-    app.parse_progress.visible = True
-    await app._unload_bin(None)
-    assert app.parse_progress.visible is False and app.parse_progress.value is None, \
-        "载出把亮着的进度条带进了初始态"
-    assert app.status_text.value == "就绪" and app.status_meta.value == ""
-
-    # 批量导出的状态栏控件：静止时都藏着，导出中「取消」与进度条一起亮，
-    # 收尾三个路口（成功/失败/取消）都不许留残影。真正的导出流程在
-    # tests/test_export_progress.py 里逐项验，这里只验装机与收起。
-    assert app.export_cancel_btn.visible is False, "静止时「取消」不该露脸"
-    assert app.status_fail_action.visible is False, "没有失败项时不该出现「查看失败项」"
-    assert app.export_cancel_btn.on_click is not None, "「取消」没接上 _cancel_export"
-    assert app.status_fail_action.on_click is not None, "「查看失败项」没接上清单"
-    gen = app._export_begin(4)
-    assert app.parse_progress.visible is True and app.export_cancel_btn.visible is True
-    assert app.status_meta.value == "导出 0/4", app.status_meta.value
-    app._show_export_progress(gen, 2, 4)
-    assert abs(app.parse_progress.value - 0.5) < 1e-6, app.parse_progress.value
-    assert app.status_meta.value == "导出 2/4", app.status_meta.value
-    app._finish_export(gen, 4, [], False, str(tmp))
-    assert app.parse_progress.visible is False and app.export_cancel_btn.visible is False, \
-        "导出收尾没收起进度条/取消"
-    assert "已导出 4 张" in app.status_text.value, app.status_text.value
-    # 作废后的迟到帧不许再把进度条点亮
-    app._show_export_progress(gen, 3, 4)
-    assert app.parse_progress.visible is False, "过期导出帧又把进度条画回去了"
-
-    print("UI_SMOKE_OK")
+                state, tog = app2._tree_toggles[("outfit", f"{role}/{outfit}")]
+                if not state["open"]:
+                    tog(None)
+        await support.drain_thumb_pool()
+        self.assertEqual(decoded2, [],
+                         f"跨会话没命中磁盘缓存，又解码了 {len(decoded2)} 张: {decoded2[:5]}")
 
 
-asyncio.run(run())
+class IndexCacheTest(RealFletUiTest):
+    def _watch_parse(self):
+        import fvpapp.resources as res
+        calls = []
+        real = res.parse_dir_infos
+        res.parse_dir_infos = lambda path, progress=None: (
+            calls.append(str(path)), real(path, progress=progress))[1]
+        self.addCleanup(setattr, res, "parse_dir_infos", real)
+        return calls
+
+    async def test_reload_reuses_index_and_invalidates_on_change(self):
+        d = self.tmp / "idx"
+        d.mkdir()
+        support.make_hzc(d / "CHR_翠_基_私服.hzc")
+        await self.load(target=d)
+        calls = self._watch_parse()
+
+        app2 = self.new_app()
+        await app2._load_bin(str(d))
+        self.assertEqual(calls, [], "索引已缓存却又重新解析了")
+        self.assertEqual(set(app2.hierarchy), set(self.app.hierarchy),
+                         "索引缓存回来的层级与首次不一致")
+        self.assertEqual(len(app2.file_infos), len(self.app.file_infos))
+
+        # 改一个文件（指纹变）→ 必须重新解析，不能吃旧索引
+        support.make_hzc(d / "CHR_翠_喜_私服.hzc")
+        calls.clear()
+        app3 = self.new_app()
+        await app3._load_bin(str(d))
+        self.assertEqual(calls, [str(d)], "目录变更后索引没失效")
+
+
+# ── 大资源载入的进度反馈 ──────────────────────────────────────────────────
+class BigFixtureProgressTest(RealFletUiTest):
+    async def test_slow_parse_throttles_and_reports_stages(self):
+        """小资源在进度条亮起来之前就解析完了，那条路全程安静；只有慢资源才把
+        "正在解析"和进度条一起亮出来，且四百次回调只换来个位数帧。"""
+        import fvpapp.resources as res
+        big = support.build_large_fixture(400)
+        self.addCleanup(shutil.rmtree, big, True)
+        raw, frames = [], []
+        real_scan = res.parse_dir_infos
+
+        def counting_scan(path, progress=None):
+            def inner(done, total, stage):
+                raw.append((done, total, stage))
+                progress(done, total, stage)
+            return real_scan(path, progress=inner)
+
+        res.parse_dir_infos = counting_scan
+        self.addCleanup(setattr, res, "parse_dir_infos", real_scan)
+        real_show = self.app._show_parse_progress
+
+        def spy(gen, done, total, stage):
+            frames.append((done, total, stage, self.app.parse_progress.visible))
+            real_show(gen, done, total, stage)
+
+        self.app._show_parse_progress = spy
+        self.addCleanup(delattr, self.app, "_show_parse_progress")
+        with mock.patch.object(res, "BUSY_DELAY", 0):   # 门槛降到 0 才保证走到慢路径
+            ok = await self.app._load_bin(str(big))
+        self.assertTrue(ok)
+
+        stages = {s for _d, _t, s in raw}
+        self.assertIn("扫描目录", stages)
+        self.assertIn("读文件头", stages)
+        self.assertEqual(raw[-1][0], raw[-1][1], f"最后一帧没报满: {raw[-1]}")
+        self.assertNotEqual(raw[-1][0], 0)
+        head = [(d, t) for d, t, s in raw if s == "读文件头"]
+        self.assertTrue(all(b[0] >= a[0] for a, b in zip(head, head[1:])),
+                        "读文件头的计数倒着走了")
+        self.assertEqual(len({t for _d, t in head}), 1,
+                         "同一阶段里 total 会变，进度条会来回跳")
+        self.assertGreaterEqual(len(raw), 400)
+        self.assertLess(len(frames), 60,
+                        f"引擎报了 {len(raw)} 次、UI 收到 {len(frames)} 帧，节流没生效")
+        self.assertTrue(any(f[3] for f in frames), "慢资源从头到尾没亮过进度条")
+        self.assertFalse(self.app.parse_progress.visible)
+        self.assertIsNone(self.app.parse_progress.value, "解析完了进度条还挂着（残影）")
+        self.assertEqual(self.app.status_meta.value,
+                         f"1 角色 · {len(self.app.file_infos)} 图像",
+                         f"状态栏停在解析文案: {self.app.status_meta.value}")
+
+
+# ── 批量导出的状态栏控件 ──────────────────────────────────────────────────
+class ExportControlsTest(RealFletUiTest):
+    """静止时都藏着，导出中「取消」与进度条一起亮，收尾不许留残影。
+    真正的导出流程在 tests/test_export_progress.py 里逐项验，这里只验装机与收起。"""
+
+    def test_idle_hides_all_actions(self):
+        self.assertFalse(self.app.export_cancel_btn.visible, "静止时「取消」不该露脸")
+        self.assertFalse(self.app.status_fail_action.visible,
+                         "没有失败项时不该出现「查看失败项」")
+        self.assertIsNotNone(self.app.export_cancel_btn.on_click, "「取消」没接上 _cancel_export")
+        self.assertIsNotNone(self.app.status_fail_action.on_click, "「查看失败项」没接上清单")
+
+    def test_begin_update_finish_lifecycle(self):
+        app = self.app
+        gen = app._export_begin(4)
+        self.assertTrue(app.parse_progress.visible)
+        self.assertTrue(app.export_cancel_btn.visible)
+        self.assertEqual(app.status_meta.value, "导出 0/4")
+        app._show_export_progress(gen, 2, 4)
+        self.assertAlmostEqual(app.parse_progress.value, 0.5)
+        self.assertEqual(app.status_meta.value, "导出 2/4")
+        app._finish_export(gen, 4, [], False, str(self.tmp))
+        self.assertFalse(app.parse_progress.visible)
+        self.assertFalse(app.export_cancel_btn.visible, "导出收尾没收起进度条/取消")
+        self.assertIn("已导出 4 张", app.status_text.value)
+        # 作废后的迟到帧不许再把进度条点亮
+        app._show_export_progress(gen, 3, 4)
+        self.assertFalse(app.parse_progress.visible, "过期导出帧又把进度条画回去了")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

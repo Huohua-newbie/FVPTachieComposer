@@ -1,279 +1,315 @@
 """无头回归：批量导出的进度、取消、失败清单与「只重试失败项」。
 
-轻量 stub 顶掉 flet，PIL 用真的（要真的写 PNG），直接驱动 ExportMixin：
-python tests/test_export_progress.py
+轻量假 flet 顶掉界面，PIL 用真的（要真的写 PNG），直接驱动 ExportMixin。
+每个用例独立临时目录；等待一律用谓词轮询，不用固定 sleep：
+
+    python tests/test_export_progress.py -v
+    cd tests && python -m unittest test_export_progress.ExportCancelTest -v
 """
-import asyncio
-import sys
-import tempfile
+
+from __future__ import annotations
+
 import threading
-import types
+import unittest
 from pathlib import Path
+from unittest import mock
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+try:
+    from . import support
+except ImportError:  # 直接 python tests/test_export_progress.py
+    import support
 
-
-# ---------- Fake flet（只提供属性，不渲染） ----------
-class _Any:
-    def __init__(self, *a, **k):
-        self._args = a
-        self._kwargs = dict(k)
-        self.controls = []
-
-    def __call__(self, *a, **k):
-        return _Any(*a, **k)
-
-    def __getattr__(self, name):
-        if name.startswith("__"):
-            raise AttributeError(name)
-        if name in self._kwargs:
-            return self._kwargs[name]
-        return _Any()
-
-    def update(self):
-        return None
-
-
-class FakePage(_Any):
-    def __init__(self):
-        super().__init__()
-        self.overlay = []
-        self.services = None
-        self.window = _Any()
-        self.dialogs = []
-
-    def show_dialog(self, dlg):
-        self.dialogs.append(dlg)
-
-    def pop_dialog(self):
-        if self.dialogs:
-            self.dialogs.pop()
-        return None
-
-
-class _FtModule(types.ModuleType):
-    def __getattr__(self, name):
-        if name.startswith("__"):
-            raise AttributeError(name)
-        return _Any()
-
-
-_flet = _FtModule("flet")
-_canvas = _FtModule("flet.canvas")
-_flet.canvas = _canvas
-sys.modules["flet"] = _flet
-sys.modules["flet.canvas"] = _canvas
+support.install_fake_flet()
 
 from PIL import Image  # noqa: E402
 
 import fvpapp.export as export_mod  # noqa: E402
 from FVPTachieComposerFlet import ComposerApp  # noqa: E402
 
-# 进度节流在真机上是为了别把事件循环淹了；测试里要看到每一帧，关掉。
+# 节流在真机上是为了别把事件循环淹了；测试里要看到每一帧，关掉。
 export_mod.PROGRESS_PUSH_S = 0.0
 
-fails = []
+FILENAME = "CHR_T_基_私服"
 
 
-def check(name, ok):
-    print(("PASS " if ok else "FAIL ") + name)
-    if not ok:
-        fails.append(name)
+class ExportTestBase(support.AsyncEnvTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.out = self.tmp / "out"
+        self.out.mkdir()
+
+    def make_app(self, frames: int = 12, base_only: bool = False, target=None):
+        page = support.FakePage()
+        app = ComposerApp(page)
+        app._chime = lambda: None  # 测试里别真响
+        app.selected_info = {"filename": FILENAME}
+        app.selected_filename = FILENAME
+        images = [Image.new("RGBA", (8, 8), (i * 7 % 256, 40, 90, 255))
+                  for i in range(frames)]
+        app.base_imgs = list(images) if base_only else [Image.new("RGBA", (8, 8), (10, 20, 30, 255))]
+        app.part_imgs = images
+        app.part_info = {"offset_x": 0, "offset_y": 0}
+        app.base_only = base_only
+        app.export_dir = None
+
+        directory = target if target is not None else self.out
+
+        async def pick(**_kwargs):
+            return str(directory)
+
+        app.file_picker.get_directory_path = pick
+        app._loop = __import__("asyncio").get_running_loop()
+        return app
+
+    @staticmethod
+    def spy_progress(app, sink, on_frame=None):
+        def spy(gen, done, total):
+            sink.append((gen, done, total))
+            app._orig_show_export_progress(gen, done, total)
+            if on_frame is not None:
+                on_frame(done, total)
+
+        app._orig_show_export_progress = app._show_export_progress
+        app._show_export_progress = spy
+        return spy
+
+    def png_files(self, folder: Path):
+        return sorted(p.name for p in folder.glob("*.png") if p.is_file())
+
+    async def wait_status(self, app, needle: str, timeout: float = 5.0):
+        await support.pump_until(lambda: needle in app.status_text.value,
+                                 timeout=timeout, what=f"状态栏出现 {needle!r}")
+
+    async def wait_progress_full(self, frames, total: int, timeout: float = 5.0):
+        await support.pump_until(
+            lambda: bool(frames) and frames[-1][1:] == (total, total),
+            timeout=timeout, what=f"进度报满 {total}")
 
 
-def new_app(tmp, frames, base_only=False):
-    page = FakePage()
-    app = ComposerApp(page)
-    app.selected_info = {"filename": "CHR_T_基_私服"}
-    app.selected_filename = "CHR_T_基_私服"
-    app.base_imgs = [Image.new("RGBA", (8, 8), (10, 20, 30, 255))]
-    app.part_imgs = [Image.new("RGBA", (8, 8), (i * 7 % 256, 40, 90, 255))
-                     for i in range(frames)]
-    app.part_info = {"offset_x": 0, "offset_y": 0}
-    app.base_only = base_only
-    app.export_dir = None
+class ExportProgressTest(ExportTestBase):
+    async def test_writes_all_frames_and_reports_full_progress(self):
+        app = self.make_app(12)
+        frames = []
+        self.spy_progress(app, frames)
 
-    async def fake_dir(dialog_title=None, initial_directory=None, **kw):
-        return str(tmp)
+        await app._batch_export(None)
+        await self.wait_progress_full(frames, 12)
 
-    app.file_picker.get_directory_path = fake_dir
-    app._loop = asyncio.get_running_loop()
-    return app
+        names = self.png_files(self.out)
+        self.assertEqual(len(names), 12)
+        self.assertEqual(names, [f"{FILENAME}_diff_{i:03d}.png" for i in range(12)])
+        self.assertEqual([f[1] for f in frames], list(range(1, 13)))
+        self.assertTrue(all(b[1] >= a[1] for a, b in zip(frames, frames[1:])))
+        self.assertEqual(frames[-1][1], 12)
 
+        with Image.open(self.out / names[0]) as img:
+            self.assertEqual(img.size, (8, 8))
+            self.assertEqual(img.mode, "RGBA")
 
-def spy_progress(app, sink, on_frame=None):
-    real = app._show_export_progress
+        self.assertIn("已导出 12 张", app.status_text.value)
+        self.assertFalse(app.parse_progress.visible)
+        self.assertIsNone(app.parse_progress.value)
+        self.assertFalse(app.export_cancel_btn.visible)
+        self.assertFalse(app.status_fail_action.visible)
 
-    def spy(gen, done, total):
-        sink.append((gen, done, total))
-        real(gen, done, total)
-        if on_frame is not None:
-            on_frame(done, total)
+    async def test_progress_and_cancel_visible_while_exporting(self):
+        app = self.make_app(6)
+        seen = {}
 
-    app._show_export_progress = spy
-    return real
+        def on_frame(done, total):
+            if done == 1 and not seen:
+                seen["bar"] = app.parse_progress.visible
+                seen["cancel"] = app.export_cancel_btn.visible
+                seen["text"] = app.status_text.value
+                seen["meta"] = app.status_meta.value
 
+        self.spy_progress(app, [], on_frame)
+        await app._batch_export(None)
+        await self.wait_status(app, "已导出 6 张")
 
-async def main():
-    root = Path(tempfile.mkdtemp(prefix="export_prog_"))
+        self.assertEqual(seen, {"bar": True, "cancel": True,
+                                "text": "正在批量导出…", "meta": "导出 1/6"})
 
-    # ── 1. 成功路径：逐张进度、末帧报满、收尾全部收起 ───────────────────
-    out = root / "ok"
-    out.mkdir()
-    app = new_app(out, 12)
-    frames = []
-    spy_progress(app, frames)
-    await app._batch_export(None)
-    await asyncio.sleep(0.05)
+    async def test_zero_jobs_finishes_cleanly(self):
+        app = self.make_app(0)
+        frames = []
+        self.spy_progress(app, frames)
+        ctx = {"dir": str(self.out), "fname": FILENAME,
+               "base": Image.new("RGBA", (8, 8)), "ox": 0, "oy": 0, "base_only": False}
 
-    names = sorted(p.name for p in out.glob("*.png"))
-    check("12 帧全部写盘", len(names) == 12 and names[0].endswith("_diff_000.png"))
-    check("进度单调递增", all(b[1] >= a[1] for a, b in zip(frames, frames[1:])))
-    check("末次进度报满", bool(frames) and frames[-1][1] == frames[-1][2] == 12)
-    check("成功后状态栏报张数", "已导出 12 张" in app.status_text.value)
-    check("成功后进度条收起", app.parse_progress.visible is False
-          and app.parse_progress.value is None)
-    check("成功后「取消」收起", app.export_cancel_btn.visible is False)
-    check("成功时没有失败项按钮", app.status_fail_action.visible is False)
+        await app._run_export([], ctx)
 
-    # 进度条与取消按钮在导出途中确实是亮的：再跑一次，在回调里看
-    mid = {}
-    out2 = root / "mid"
-    out2.mkdir()
-    app2 = new_app(out2, 6)
+        self.assertEqual(frames, [])
+        self.assertEqual(self.png_files(self.out), [])
+        self.assertIn("已导出 0 张", app.status_text.value)
+        self.assertFalse(app.parse_progress.visible)
+        self.assertIsNone(app.parse_progress.value)
+        self.assertFalse(app.export_cancel_btn.visible)
 
-    def look(done, total):
-        if done == 1 and not mid:
-            mid["bar"] = app2.parse_progress.visible
-            mid["cancel"] = app2.export_cancel_btn.visible
-            mid["text"] = app2.status_text.value
-
-    spy_progress(app2, [], look)
-    await app2._batch_export(None)
-    await asyncio.sleep(0.05)
-    check("导出途中进度条亮着", mid.get("bar") is True)
-    check("导出途中「取消」可见", mid.get("cancel") is True)
-    check("导出途中状态栏写「正在批量导出」", mid.get("text") == "正在批量导出…")
-
-    # ── 2. 取消：停下后不再新增文件，已写出的保留 ───────────────────────
-    out3 = root / "cancel"
-    out3.mkdir()
-    app3 = new_app(out3, 40)
-    cancelled_at = {}
-
-    def cancel_after_first(done, total):
-        if done >= 1 and not cancelled_at:
-            cancelled_at["done"] = done
-            app3._cancel_export()
-
-    spy_progress(app3, [], cancel_after_first)
-    await app3._batch_export(None)
-    await asyncio.sleep(0.1)
-    written = len([p for p in out3.glob("*.png") if p.is_file()])
-    check("取消后写出的少于总数", 0 < written < 40)
-    check("取消后状态栏说已取消", "已取消导出" in app3.status_text.value)
-    check("取消后报的张数与磁盘一致", f"已写出 {written} 张" in app3.status_text.value)
-    check("取消后进度条收起", app3.parse_progress.visible is False)
-    check("取消后「取消」按钮收起", app3.export_cancel_btn.visible is False)
-    check("取消后取消位已复位", app3._export_cancel is None)
-    check("取消保留已写出的文件（没删）", written > 0)
-
-    # ── 3. 失败清单：文件名与原因都留得住 ───────────────────────────────
-    out4 = root / "fail"
-    out4.mkdir()
-    app4 = new_app(out4, 6)
-    # 拿一个同名目录占住第 3 张的落点，写盘必然抛 IsADirectoryError
-    (out4 / "CHR_T_基_私服_diff_003.png").mkdir()
-    await app4._batch_export(None)
-    await asyncio.sleep(0.05)
-    check("失败只影响那一张，其余照常写盘",
-          len([p for p in out4.glob("*.png") if p.is_file()]) == 5)
-    check("失败状态栏报总数", "5 张成功" in app4.status_text.value
-          and "1 张失败" in app4.status_text.value)
-    check("失败清单记了文件名与原因",
-          len(app4._export_failed) == 1
-          and app4._export_failed[0][2] == "CHR_T_基_私服_diff_003.png"
-          and "Error" in app4._export_failed[0][3])
-    check("失败后右侧出现「查看失败项」", app4.status_fail_action.visible is True)
-
-    # ── 4. 只重试失败项：成功的不重写，失败项补上 ───────────────────────
-    (out4 / "CHR_T_基_私服_diff_003.png").rmdir()
-    retried = []
-    spy_progress(app4, retried)
-    await app4._retry_failed(None)
-    await asyncio.sleep(0.05)
-    check("重试后失败项补齐", (out4 / "CHR_T_基_私服_diff_003.png").is_file())
-    check("重试只跑一张（没有重写其余 5 张）",
-          bool(retried) and retried[-1][1] == retried[-1][2] == 1)
-    check("重试成功后清单清空", app4._export_failed == []
-          and app4.status_fail_action.visible is False)
-    check("重试成功后状态栏报张数", "已导出 1 张" in app4.status_text.value)
-
-    # ── 5. 过期代数：作废后的回调不许再改状态栏 ─────────────────────────
-    stale_gen = retried[-1][0]
-    before_text = app4.status_text.value
-    before_meta = app4.status_meta.value
-    app4._show_export_progress(stale_gen, 3, 9)
-    check("过期进度帧不动状态栏",
-          app4.status_text.value == before_text and app4.status_meta.value == before_meta)
-    check("过期帧也不会把进度条重新点亮", app4.parse_progress.visible is False)
-
-    # ── 6. 换资源即中止：取消位置起、反馈收起、代数作废 ─────────────────
-    app5 = new_app(root / "abort", 8)
-    gen_before = app5._export_gen
-    app5._export_cancel = threading.Event()
-    app5._export_shown = True
-    app5.parse_progress.visible = True
-    app5.parse_progress.value = 0.4
-    app5.export_cancel_btn.visible = True
-    app5._abort_export()
-    check("中止会置起取消位", app5._export_cancel is None)
-    check("中止会作废代数", app5._export_gen != gen_before)
-    check("中止收起进度条与取消按钮",
-          app5.parse_progress.visible is False and app5.export_cancel_btn.visible is False)
-    late_gen = gen_before + 1
-    app5._show_export_progress(late_gen, 4, 8)
-    check("中止后迟到的进度帧被丢弃", app5.parse_progress.visible is False)
-
-    # ── 7. 无差分模式：命名走 _base_，取消同样生效 ───────────────────────
-    out6 = root / "base_only"
-    out6.mkdir()
-    app6 = new_app(out6, 4, base_only=True)
-    # 无差分模式铺平的是底图自己的帧，不是差分帧
-    app6.base_imgs = [Image.new("RGBA", (8, 8), (i * 11 % 256, 70, 30, 255))
-                      for i in range(4)]
-    await app6._batch_export(None)
-    await asyncio.sleep(0.05)
-    names6 = sorted(p.name for p in out6.glob("*.png") if p.is_file())
-    check("无差分模式导出走 _base_ 命名",
-          names6 == [f"CHR_T_基_私服_base_{i:03d}.png" for i in range(4)])
-
-    # ── 8. 对话框开着时载出/换资源：这一批直接作废，不许抛异常 ──────────
-    out7 = root / "unload_during_dialog"
-    out7.mkdir()
-    app7 = new_app(out7, 6)
-
-    async def unload_in_dialog(dialog_title=None, initial_directory=None, **kw):
-        # 模拟用户在目录对话框开着时点「载出」：状态清空、代数作废
-        app7._abort_export()
-        app7.selected_info = None
-        app7._clear_previews()
-        return str(out7)
-
-    app7.file_picker.get_directory_path = unload_in_dialog
-    crashed = None
-    try:
-        await app7._batch_export(None)
-    except Exception as ex:
-        crashed = ex
-    check("对话框期间载出不抛异常", crashed is None)
-    check("对话框期间载出不写任何文件", list(out7.glob("*.png")) == [])
-
-    if fails:
-        print("\nFAILED:", fails)
-        sys.exit(f"EXPORT_PROGRESS_TEST_FAILED: {fails}")
-    print("EXPORT_PROGRESS_OK")
+    async def test_base_only_uses_base_naming(self):
+        app = self.make_app(4, base_only=True)
+        await app._batch_export(None)
+        await self.wait_status(app, "已导出 4 张")
+        self.assertEqual(self.png_files(self.out),
+                         [f"{FILENAME}_base_{i:03d}.png" for i in range(4)])
 
 
-asyncio.run(main())
+class ExportCancelTest(ExportTestBase):
+    async def test_cancel_stops_early_and_keeps_written_files(self):
+        app = self.make_app(40)
+        release = threading.Event()
+        cancel_seen = []
+        real_compose = export_mod.compose_preview
+        calls = []
+
+        def gated_compose(base, part, ox, oy):
+            calls.append(part)
+            if len(calls) >= 2:
+                # 让除第一张以外的写入卡到取消生效之后，结果才可预期
+                release.wait(5)
+            return real_compose(base, part, ox, oy)
+
+        def on_frame(done, total):
+            if done == 1 and not cancel_seen:
+                cancel_seen.append(True)
+                app._cancel_export()
+                release.set()
+
+        self.spy_progress(app, [], on_frame)
+        with mock.patch.object(export_mod, "compose_preview", side_effect=gated_compose):
+            await app._batch_export(None)
+        await self.wait_status(app, "已取消导出")
+
+        written = len(self.png_files(self.out))
+        self.assertGreater(written, 0, "第一张应该已经写出去")
+        self.assertLess(written, 40, "取消后不该继续写满")
+        self.assertIn(f"已写出 {written} 张", app.status_text.value)
+        self.assertTrue(cancel_seen)
+        self.assertFalse(app.parse_progress.visible)
+        self.assertIsNone(app.parse_progress.value)
+        self.assertFalse(app.export_cancel_btn.visible)
+
+        # 取消位必须复位：下一批还能完整导出
+        again = self.tmp / "again"
+        again.mkdir()
+
+        async def pick_again(**_kwargs):
+            return str(again)
+
+        app.file_picker.get_directory_path = pick_again
+        app.part_imgs = app.part_imgs[:3]
+        await app._batch_export(None)
+        await self.wait_status(app, "已导出 3 张")
+        self.assertEqual(len(self.png_files(again)), 3)
+
+        # 结束之后再点取消不应改状态栏（没有活动批次）
+        before = app.status_text.value
+        app._cancel_export()
+        self.assertEqual(app.status_text.value, before)
+
+    async def test_cancel_without_active_batch_is_noop(self):
+        app = self.make_app(2)
+        app.status_text.value = "空闲"
+        app._cancel_export()
+        self.assertEqual(app.status_text.value, "空闲")
+
+
+class ExportFailureTest(ExportTestBase):
+    async def test_one_failure_does_not_stop_others_and_can_be_retried(self):
+        app = self.make_app(6)
+        blocked = self.out / f"{FILENAME}_diff_003.png"
+        blocked.mkdir()  # 同名目录占位，写盘必然失败
+
+        await app._batch_export(None)
+        await self.wait_status(app, "1 张失败")
+
+        self.assertEqual(len(self.png_files(self.out)), 5)
+        self.assertIn("5 张成功", app.status_text.value)
+        self.assertIn("1 张失败", app.status_text.value)
+        self.assertTrue(app.status_fail_action.visible)
+
+        # 失败清单对话框：标题与逐条「文件名 — 原因」
+        app._show_export_failures()
+        self.assertEqual(len(app.page.dialogs), 1)
+        dialog = app.page.dialogs[-1]
+        self.assertEqual(dialog.title.value, "导出失败 1 张")
+        lines = [ctrl.value for ctrl in dialog.content._args[0]]
+        self.assertEqual(len(lines), 1)
+        self.assertIn(f"{FILENAME}_diff_003.png", lines[0])
+        self.assertIn("Error", lines[0])
+
+        # 重试只补失败项：把一张成功文件改成标记内容，重试后应原样保留
+        marker = self.out / f"{FILENAME}_diff_000.png"
+        marker.write_bytes(b"marker")
+        blocked.rmdir()
+        frames = []
+        self.spy_progress(app, frames)
+        await app._retry_failed(None)
+        await self.wait_status(app, "已导出 1 张")
+
+        self.assertTrue(blocked.is_file())
+        self.assertEqual(marker.read_bytes(), b"marker", "成功项不该被重写")
+        self.assertEqual([f[1:] for f in frames], [(1, 1)])
+        self.assertFalse(app.status_fail_action.visible)
+
+    async def test_unwritable_target_fails_every_frame_without_crashing(self):
+        blocked = self.tmp / "target_is_a_file"
+        blocked.write_bytes(b"x")
+        app = self.make_app(6, target=blocked)
+
+        await app._batch_export(None)
+        await self.wait_status(app, "6 张失败")
+
+        self.assertIn("0 张成功", app.status_text.value)
+        self.assertEqual(list(self.tmp.glob("*.png")), [])
+        self.assertTrue(app.status_fail_action.visible)
+
+        app._show_export_failures()
+        dialog = app.page.dialogs[-1]
+        self.assertEqual(dialog.title.value, "导出失败 6 张")
+        self.assertEqual(len(dialog.content._args[0]), 6)
+
+
+class ExportStaleTest(ExportTestBase):
+    async def test_stale_progress_frame_is_ignored(self):
+        app = self.make_app(2)
+        frames = []
+        self.spy_progress(app, frames)
+        await app._batch_export(None)
+        await self.wait_progress_full(frames, 2)
+
+        stale_gen = frames[-1][0]
+        before_text = app.status_text.value
+        before_meta = app.status_meta.value
+        app._show_export_progress(stale_gen, 1, 9)
+
+        self.assertEqual(app.status_text.value, before_text)
+        self.assertEqual(app.status_meta.value, before_meta)
+        self.assertFalse(app.parse_progress.visible)
+
+    async def test_unload_during_directory_dialog_aborts_without_writing(self):
+        app = self.make_app(6)
+        gen_before = app._export_gen
+
+        async def unload_in_dialog(**_kwargs):
+            # 模拟用户在目录对话框开着时点「载出」：状态清空、代数作废
+            app._abort_export()
+            app.selected_info = None
+            app._clear_previews()
+            return str(self.out)
+
+        app.file_picker.get_directory_path = unload_in_dialog
+        await app._batch_export(None)
+
+        self.assertEqual(self.png_files(self.out), [])
+        self.assertFalse(app.parse_progress.visible)
+        self.assertFalse(app.export_cancel_btn.visible)
+
+        before = app.status_text.value
+        app._show_export_progress(gen_before + 1, 3, 6)
+        self.assertEqual(app.status_text.value, before)
+        self.assertFalse(app.parse_progress.visible)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

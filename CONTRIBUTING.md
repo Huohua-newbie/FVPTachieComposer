@@ -102,19 +102,12 @@ py -3.13 FVPTachieComposerFlet.py
 ### 4. 跑一次自检
 
 ```bash
-python tests/test_ui_smoke.py
-python tests/test_thumb_threading.py
-python tests/test_parse_progress.py
-python tests/test_window_memory.py
-python tests/test_dialog_dirs.py
-python tests/test_feishu_sync.py
-python tests/test_feishu_watch.py
-python tests/test_crashlog.py
-python .github/selfcheck.py
+python tests/run_all.py   # 或按 TESTING.md「无头自检」逐个跑
 ```
 
 全绿才继续（清单以 [`TESTING.md`](TESTING.md) 的「无头自检」为准，加测试只在那儿补一行）。
-`test_ui_smoke.py` 要先给一个客户端环境：`FLET_PLATFORM=windows python tests/test_ui_smoke.py`。
+`run_all.py` 每个文件起独立子进程，Windows 上会自动给 UI 冒烟补 `FLET_PLATFORM=windows`；
+缺 flet/Pillow 时 `test_ui_smoke.py` 是失败不是跳过，所以全套要在打包机上跑。
 
 ---
 

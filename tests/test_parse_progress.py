@@ -7,162 +7,297 @@
 - 末次必须正好报满（否则进度条永远差一格）
 - 目录扫描在数清总数之前，`total` 报 0 表示"还不知道"，界面据此走不确定态
 
-纯内核，不需要 flet：python tests/test_parse_progress.py
+外加损坏输入的错误路径：截断的头 / 表 / 文件名区、无效相对偏移、越界绝对
+偏移、坏 zlib、帧数超出实际数据、Shift-JIS 非法文件名。
+
+纯内核，不需要 flet：
+    python tests/test_parse_progress.py -v
+    cd tests && python -m unittest test_parse_progress.BinProgressTest -v
 """
+
+from __future__ import annotations
+
 import struct
-import sys
-import tempfile
-import zlib
-from pathlib import Path
+import unittest
 
-for _s in (sys.stdout, sys.stderr):
-    try:
-        _s.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+try:
+    from . import support
+except ImportError:  # 直接 python tests/test_parse_progress.py
+    import support
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
-
-from fvpapp.engine import (  # noqa: E402
+from fvpapp.engine import (
+    hzc_data_to_pil_list,
+    hzc_decode_first_frame,
     parse_bin_info,
     parse_bin_info_extended,
     parse_dir_infos,
+    parse_hzc_header_from_bytes,
 )
 
-fails = []
+HEADER_KEYS = {"image_type", "width", "height", "offset_x", "offset_y", "frame_count"}
+BIN_KEYS = {"filename", "offset", "size", "type"} | HEADER_KEYS
 
 
-def check(name, ok, extra=""):
-    print(("PASS " if ok else "FAIL ") + name + (("  <- " + extra) if (extra and not ok) else ""))
-    if not ok:
-        fails.append(name)
+def collect(fn, *args, **kwargs):
+    points = []
+    result = fn(*args, progress=lambda d, t, s: points.append((d, t, s)), **kwargs)
+    return result, points
 
 
-def make_hzc_bytes(image_type=1, w=8, h=8, frames=1):
-    head = bytearray(44)
-    head[0:4] = b"hzc1"
-    struct.pack_into("<H", head, 18, image_type)
-    struct.pack_into("<H", head, 20, w)
-    struct.pack_into("<H", head, 22, h)
-    struct.pack_into("<I", head, 32, frames)
-    bpp = 3 if image_type == 0 else 4
-    body = bytes((i % 251) * 7 % 256 for i in range(w * h * bpp))
-    return bytes(head) + zlib.compress(body)
-
-
-def build_bin(path, names):
-    """写一个最小但合法的 .bin：文件表 + 文件名区 + 每条一个 HZC。
-
-    条目偏移是绝对偏移，文件名偏移是相对文件名区起点的，两个别搞混。
-    """
-    payloads = [make_hzc_bytes() for _ in names]
-    names_blob = b""
-    rel = []
-    for n in names:
-        rel.append(len(names_blob))
-        names_blob += n.encode("shift-jis") + b"\x00"
-    x, y = len(names), len(names_blob)
-    data_start = 8 + 12 * x + y
-    out = bytearray(struct.pack("<II", x, y))
-    abs_off = data_start
-    for i, p in enumerate(payloads):
-        out += struct.pack("<III", rel[i], abs_off, len(p))
-        abs_off += len(p)
-    out += names_blob
-    for p in payloads:
-        out += p
-    path.write_bytes(bytes(out))
-    return data_start
-
-
-def collect(fn, *a, **kw):
-    pts = []
-    r = fn(*a, progress=lambda d, t, s: pts.append((d, t, s)), **kw)
-    return r, pts
-
-
-def monotone(pts):
+def monotone(points):
     """前一个数不许比后一个大：进度只准往前走。"""
-    return all(p[0] <= q[0] for p, q in zip(pts, pts[1:]))
+    return all(p[0] <= q[0] for p, q in zip(points, points[1:]))
 
 
-_tmp = Path(tempfile.mkdtemp(prefix="fvp_progress_"))
+def raw_bin(x: int, y: int, entries, names_blob: bytes = b"", payload: bytes = b"") -> bytes:
+    """按 .bin 布局拼字节：头(文件数, 名称区长度) + 表 + 名称区 + 数据区。"""
+    out = bytearray(struct.pack("<II", x, y))
+    for rel, abs_offset, size in entries:
+        out += struct.pack("<III", rel, abs_offset, size)
+    out += names_blob + payload
+    return bytes(out)
 
-# ── .bin ──────────────────────────────────────────────────────
-names = [f"CHR_翠_{'喜基'[i % 2]}_私服{i}" for i in range(12)]
-bin_path = _tmp / "graph.bin"
-build_bin(bin_path, names)
 
-plain = parse_bin_info_extended(bin_path)
-infos, pts = collect(parse_bin_info_extended, bin_path)
-check("bin：传不传 progress 结果逐字段一样", plain == infos, f"{len(plain)} vs {len(infos)}")
-check("bin：条目数对得上", len(infos) == len(names), str(len(infos)))
+class BinTestBase(support.EnvTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.names = [f"CHR_翠_{'喜基'[i % 2]}_私服{i}" for i in range(12)]
+        self.bin_path = self.tmp / "graph.bin"
+        self.data_start = support.build_bin(self.bin_path, self.names)
 
-stages = [s for _, _, s in pts]
-check("bin：阶段齐全", {"读文件表", "读文件名", "识别类型", "读图像头"} <= set(stages), str(stages[:4]))
-check("bin：先报索引再报逐条", stages[0] == "读文件表" and stages[1] == "读文件名", str(stages[:2]))
-n = len(names)
-check("bin：total 恒为两段条目数之和", all(t == 2 * n for _, t, _ in pts), str({t for _, t, _ in pts}))
-check("bin：done 只往前走", monotone(pts), str([p[0] for p in pts[:6]]))
-check("bin：末次正好报满", pts[-1][0] == 2 * n, str(pts[-1]))
-check("bin：回调次数 = 2 次索引 + 2 轮逐条", len(pts) == 2 * n + 2, str(len(pts)))
-check("bin：识别类型与读图像头各占一半",
-      sum(1 for _, _, s in pts if s == "识别类型") == n and sum(1 for _, _, s in pts if s == "读图像头") == n)
+    def write_raw(self, name: str, data: bytes):
+        path = self.tmp / name
+        path.write_bytes(data)
+        return path
 
-# parse_bin_info 单独调用（不补头部）也要能自己报进度
-_, pts2 = collect(parse_bin_info, bin_path)
-check("parse_bin_info 自己也能报：total = 条目数", all(t == n for _, t, _ in pts2), str({t for _, t, _ in pts2}))
-check("parse_bin_info 自己也能报：末次报满", pts2[-1][0] == n, str(pts2[-1]))
 
-# ── 目录 ──────────────────────────────────────────────────────
-d = _tmp / "loose"
-d.mkdir()
-for i in range(12):
-    (d / f"CHR_翠_喜_私服{i}.hzc").write_bytes(make_hzc_bytes())
-(d / "readme.txt").write_bytes(b"not an image")
-(d / "voice.ogg").write_bytes(b"OggS" + b"\0" * 40)
+class BinProgressTest(BinTestBase):
+    def test_progress_does_not_change_result(self):
+        plain = parse_bin_info_extended(self.bin_path)
+        with_progress, _ = collect(parse_bin_info_extended, self.bin_path)
+        self.assertEqual(plain, with_progress)
 
-plain_dir = parse_dir_infos(d)
-infos_d, pts_d = collect(parse_dir_infos, d)
-check("目录：传不传 progress 结果逐字段一样", plain_dir == infos_d, f"{len(plain_dir)} vs {len(infos_d)}")
-check("目录：非 hzc 文件不进结果", len(infos_d) == 12, str(len(infos_d)))
-total_files = 14  # 12 张图 + txt + ogg：读文件头阶段要逐个看，所以总数是 14
-check("目录：读文件头按全部文件计数",
-      all(t == total_files for _, t, s in pts_d if s == "读文件头"), str({t for _, t, s in pts_d if s == "读文件头"}))
-check("目录：末次正好报满", pts_d[-1] == (total_files, total_files, "读文件头"), str(pts_d[-1]))
-check("目录：done 只往前走", monotone(pts_d), str([p[0] for p in pts_d]))
-check("目录：文件不多时不报扫描阶段", "扫描目录" not in [s for _, _, s in pts_d])
+        self.assertEqual([info["filename"] for info in with_progress], self.names)
+        for info in with_progress:
+            self.assertEqual(set(info), BIN_KEYS)
+            self.assertEqual(info["type"], "hzc")
+            self.assertEqual((info["width"], info["height"]), (8, 8))
+            self.assertEqual(info["frame_count"], 1)
 
-big = _tmp / "big"
-big.mkdir()
-for i in range(450):
-    (big / f"CHR_真紅_喜_制服{i}.hzc").write_bytes(make_hzc_bytes())
-_, pts_b = collect(parse_dir_infos, big)
-scan = [(dd, tt) for dd, tt, s in pts_b if s == "扫描目录"]
-check("大目录：扫描阶段每 200 个报一次", len(scan) == 2, str(len(scan)))
-check("大目录：扫描阶段 total 报 0（还不知道总数）", all(tt == 0 for _, tt in scan), str(scan))
-check("大目录：扫描计数在往前走", [dd for dd, _ in scan] == [200, 400], str(scan))
-check("大目录：扫完转入读文件头且报满",
-      pts_b[-1] == (450, 450, "读文件头"), str(pts_b[-1]))
+        payload_size = len(support.make_hzc_bytes())
+        expected_offsets = [self.data_start + i * payload_size for i in range(len(self.names))]
+        self.assertEqual([info["offset"] for info in with_progress], expected_offsets)
+        self.assertEqual({info["size"] for info in with_progress}, {payload_size})
 
-# ── 边界 ──────────────────────────────────────────────────────
-empty = _tmp / "empty"
-empty.mkdir()
-_, pts_e = collect(parse_dir_infos, empty)
-check("空目录：不抛且报一个 (0,0) 点", pts_e == [(0, 0, "读文件头")], str(pts_e))
-check("空目录：结果为空列表", parse_dir_infos(empty) == [])
+    def test_stage_sequence_and_totals(self):
+        infos, points = collect(parse_bin_info_extended, self.bin_path)
+        n = len(infos)
+        stages = [s for _, _, s in points]
+        self.assertEqual(stages[:2], ["读文件表", "读文件名"])
+        self.assertLessEqual({"读文件表", "读文件名", "识别类型", "读图像头"}, set(stages))
 
-only_dirs = _tmp / "onlydirs"
-(only_dirs / "a" / "b").mkdir(parents=True)
-check("只有子目录：不抛", parse_dir_infos(only_dirs) == [])
+        self.assertEqual({t for _, t, _ in points}, {2 * n})
+        self.assertTrue(monotone(points), [p[0] for p in points[:6]])
+        self.assertEqual(points[-1][0], 2 * n)
+        self.assertEqual(len(points), 2 * n + 2)
+        self.assertEqual(sum(1 for _, _, s in points if s == "识别类型"), n)
+        self.assertEqual(sum(1 for _, _, s in points if s == "读图像头"), n)
 
-bad_bin = _tmp / "bad.bin"
-bad_bin.write_bytes(b"\x00\x00\x00\x00\x00\x00\x00\x00")  # x=0, y=0
-infos_z, pts_z = collect(parse_bin_info_extended, bad_bin)
-check("空 bin：total 报 0 而不是除零崩溃", infos_z == [] and pts_z[-1][1] == 0, str(pts_z[-1]))
+    def test_parse_bin_info_reports_its_own_progress(self):
+        infos, points = collect(parse_bin_info, self.bin_path)
+        n = len(infos)
+        self.assertEqual({t for _, t, _ in points}, {n})
+        self.assertEqual(points[-1][0], n)
+        self.assertTrue(monotone(points))
 
-if fails:
-    print("\nFAILED:", fails)
-    sys.exit(f"PARSE_PROGRESS_TEST_FAILED: {fails}")
-print("PARSE_PROGRESS_OK")
+    def test_empty_bin_reports_zero_total(self):
+        infos, points = collect(parse_bin_info_extended, self.write_raw("empty.bin", b"\0" * 8))
+        self.assertEqual(infos, [])
+        self.assertEqual(points[-1][1], 0)
+
+
+class BinErrorTest(BinTestBase):
+    def test_truncated_header_raises(self):
+        path = self.write_raw("short-header.bin", b"\x01\x02\x03")
+        with self.assertRaisesRegex(ValueError, "文件头不完整"):
+            parse_bin_info(path)
+
+    def test_truncated_entry_table_raises(self):
+        # 声明 2 条，只给 1 条
+        data = raw_bin(2, 0, [(0, 0, 0)])
+        path = self.write_raw("short-table.bin", data)
+        with self.assertRaisesRegex(ValueError, "文件信息表不完整"):
+            parse_bin_info(path)
+
+    def test_truncated_name_area_raises(self):
+        # 声明名称区 10 字节，实际只有 2 字节
+        data = raw_bin(1, 10, [(0, 0, 0)], b"ab")
+        path = self.write_raw("short-names.bin", data)
+        with self.assertRaisesRegex(ValueError, "文件名区域长度不符"):
+            parse_bin_info(path)
+
+    def test_invalid_relative_name_offset_raises(self):
+        data = raw_bin(1, 4, [(4, 0, 0)], b"a\0b\0")
+        path = self.write_raw("bad-rel.bin", data)
+        with self.assertRaisesRegex(ValueError, "无效的文件名偏移"):
+            parse_bin_info(path)
+
+    def test_absolute_offset_past_eof_degrades_to_bin_type(self):
+        data = raw_bin(1, 2, [(0, 9999, 10)], b"a\0")
+        path = self.write_raw("past-eof.bin", data)
+
+        infos = parse_bin_info(path)
+        self.assertEqual(len(infos), 1)
+        self.assertEqual(infos[0]["type"], "bin")
+
+        extended = parse_bin_info_extended(path)
+        self.assertEqual(extended[0]["type"], "bin")
+        self.assertIsNone(extended[0]["image_type"])
+        self.assertEqual(extended[0]["frame_count"], 1)
+
+    def test_invalid_shift_jis_name_uses_replacement(self):
+        data = raw_bin(1, 2, [(0, 0, 0)], b"\xff\x00")
+        path = self.write_raw("bad-name.bin", data)
+        infos = parse_bin_info(path)
+        self.assertEqual(len(infos), 1)
+        self.assertEqual(infos[0]["filename"], "\ufffd")
+        self.assertEqual(infos[0]["type"], "bin")
+
+
+class DirProgressTest(support.EnvTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.folder = self.tmp / "loose"
+        self.folder.mkdir()
+        for i in range(12):
+            (self.folder / f"CHR_翠_喜_私服{i}.hzc").write_bytes(support.make_hzc_bytes())
+        (self.folder / "readme.txt").write_bytes(b"not an image")
+        (self.folder / "voice.ogg").write_bytes(b"OggS" + b"\0" * 40)
+
+    def test_progress_does_not_change_result(self):
+        plain = parse_dir_infos(self.folder)
+        with_progress, _ = collect(parse_dir_infos, self.folder)
+        self.assertEqual(plain, with_progress)
+        self.assertEqual(len(with_progress), 12)
+
+        for info in with_progress:
+            self.assertEqual(set(info), BIN_KEYS | {"path"})
+            self.assertEqual(info["type"], "hzc")
+            self.assertEqual(info["offset"], 0)
+            self.assertIn(info["filename"], {f"CHR_翠_喜_私服{i}" for i in range(12)})
+
+    def test_header_stage_counts_all_files(self):
+        _, points = collect(parse_dir_infos, self.folder)
+        total_files = 14  # 12 张图 + txt + ogg：读文件头阶段要逐个看
+        header = [p for p in points if p[2] == "读文件头"]
+        self.assertEqual({t for _, t, _ in header}, {total_files})
+        self.assertEqual(points[-1], (total_files, total_files, "读文件头"))
+        self.assertTrue(monotone(header))
+        self.assertNotIn("扫描目录", [s for _, _, s in points])
+
+    def test_hzc_magic_beats_suffix(self):
+        weird = self.tmp / "magic"
+        weird.mkdir()
+        (weird / "noext.dat").write_bytes(support.make_hzc_bytes())
+        (weird / "fake.hzc").write_bytes(b"not hzc at all" + b"\0" * 44)
+        infos = parse_dir_infos(weird)
+        by_name = {info["filename"]: info for info in infos}
+        self.assertEqual(set(by_name), {"noext", "fake"})
+        self.assertEqual(by_name["noext"]["image_type"], 1)
+        self.assertIsNone(by_name["fake"]["image_type"])
+
+    def test_empty_dir_reports_one_point(self):
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        infos, points = collect(parse_dir_infos, empty)
+        self.assertEqual(infos, [])
+        self.assertEqual(points, [(0, 0, "读文件头")])
+
+    def test_only_subdirs_still_empty(self):
+        only_dirs = self.tmp / "onlydirs"
+        (only_dirs / "a" / "b").mkdir(parents=True)
+        self.assertEqual(parse_dir_infos(only_dirs), [])
+
+    def test_scan_pages_at_every_200_files(self):
+        pages = self.tmp / "pages"
+        pages.mkdir()
+        hzc = support.make_hzc_bytes()
+        for i in range(200):
+            (pages / f"CHR_翠_喜_私服{i}.hzc").write_bytes(hzc)
+
+        infos, points = collect(parse_dir_infos, pages)
+        scan = [p for p in points if p[2] == "扫描目录"]
+        self.assertEqual(scan, [(200, 0, "扫描目录")], "扫描阶段只在整批 200 时报一次")
+        self.assertEqual(points[-1], (200, 200, "读文件头"))
+        self.assertEqual(len(infos), 200)
+
+        # 201 个：仍然只在 200 报一次，末次报满 201
+        (pages / "CHR_翠_喜_私服_extra.hzc").write_bytes(hzc)
+        infos, points = collect(parse_dir_infos, pages)
+        scan = [p for p in points if p[2] == "扫描目录"]
+        self.assertEqual(scan, [(200, 0, "扫描目录")])
+        self.assertEqual(points[-1], (201, 201, "读文件头"))
+        self.assertEqual(len(infos), 201)
+
+
+class HzcErrorTest(support.EnvTestCase):
+    def header(self, raw: bytes) -> dict:
+        info = parse_hzc_header_from_bytes(raw[:44])
+        self.assertIsNotNone(info)
+        return info
+
+    def test_bad_zlib_returns_empty_list_and_none(self):
+        raw = bytearray(support.make_hzc_bytes())
+        raw[44:] = b"not zlib at all"
+        header = self.header(raw)
+        self.assertEqual(hzc_data_to_pil_list(bytes(raw), header), [])
+        self.assertIsNone(hzc_decode_first_frame(bytes(raw), header))
+
+    def test_header_shorter_than_44_bytes(self):
+        raw = support.make_hzc_bytes()
+        header = self.header(raw)
+        self.assertEqual(hzc_data_to_pil_list(raw[:43], header), [])
+        self.assertIsNone(hzc_decode_first_frame(raw[:43], header))
+        self.assertIsNone(parse_hzc_header_from_bytes(raw[:43]))
+
+    def test_non_hzc_magic_rejected(self):
+        raw = b"NOPE" + b"\0" * 60
+        self.assertIsNone(parse_hzc_header_from_bytes(raw))
+
+    def test_frame_count_beyond_payload_yields_partial_frames(self):
+        raw = bytearray(support.make_hzc_bytes(image_type=2, frames=1))
+        struct.pack_into("<I", raw, 32, 3)  # 头里声称 3 帧，数据只有 1 帧
+        header = self.header(raw)
+        self.assertEqual(header["frame_count"], 3)
+        frames = hzc_data_to_pil_list(bytes(raw), header)
+        self.assertEqual(len(frames), 1, "数据不够时只返回能完整解出的帧")
+        first = hzc_decode_first_frame(bytes(raw), header)
+        self.assertEqual(first.tobytes(), frames[0].tobytes())
+
+    def test_zero_frame_count_returns_no_frames(self):
+        raw = bytearray(support.make_hzc_bytes(image_type=2, frames=0))
+        header = self.header(raw)
+        self.assertEqual(header["frame_count"], 0)
+        self.assertEqual(hzc_data_to_pil_list(bytes(raw), header), [])
+
+    def test_first_frame_matches_full_decode_for_each_type(self):
+        for image_type in (0, 1, 2):
+            with self.subTest(image_type=image_type):
+                raw = support.make_hzc_bytes(image_type=image_type, frames=1)
+                header = self.header(raw)
+                full = hzc_data_to_pil_list(raw, header)
+                self.assertEqual(len(full), 1)
+                first = hzc_decode_first_frame(raw, header)
+                self.assertIsNotNone(first)
+                self.assertEqual(first.tobytes(), full[0].tobytes())
+
+    def test_zero_size_header_returns_none_for_first_frame(self):
+        raw = bytearray(support.make_hzc_bytes())
+        struct.pack_into("<H", raw, 20, 0)  # width = 0
+        header = parse_hzc_header_from_bytes(bytes(raw[:44]))
+        self.assertEqual(header["width"], 0)
+        self.assertIsNone(hzc_decode_first_frame(bytes(raw), header))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

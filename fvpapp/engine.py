@@ -43,7 +43,8 @@ def hzc_decode_first_frame(hzc_data: bytes, header_info: dict) -> Image.Image | 
 	image_type = header_info.get('image_type')
 	if not width or not height:
 		return None
-	bpf = width * height * 4
+	bpp = 3 if image_type == 0 else 4
+	bpf = width * height * bpp
 	d = zlib.decompressobj()
 	try:
 		head = d.decompress(hzc_data[44:], bpf)
@@ -60,9 +61,8 @@ def hzc_decode_first_frame(hzc_data: bytes, header_info: dict) -> Image.Image | 
 		frame = transform_bytes_bytearray(head[:bpf])
 		return Image.frombytes('RGBA', (width, height), frame)
 	if image_type == 0:
-		need = width * height * 3
-		img = Image.frombytes('RGB', (width, height), head[:need])
-		r, g, b = img.split()
+		img = Image.frombytes('RGB', (width, height), head[:bpf])
+		b, g, r = img.split()
 		return Image.merge("RGB", (r, g, b))
 	img = Image.frombytes('RGBA', (width, height), head[:bpf])
 	b, g, r, a = img.split()

@@ -18,8 +18,15 @@ python tests/test_crashlog.py          # 日志落盘：目录解析、轮转、
 python .github/selfcheck.py            # 解析与差分合成的纯逻辑（不碰 flet）
 ```
 
+> 一把梭：`python tests/run_all.py`——每个文件起独立子进程逐个跑，末尾汇总，
+> 有任何文件未过就非零退出。假 flet 与真 flet 共用全局状态、**不能同进程混跑**，
+> 所以别自己拼 `python -m unittest discover` 把 10 个文件塞进一个进程。
+>
 > `test_ui_smoke.py` 要能验证拖放那条链，跑之前给一个客户端环境：
-> `FLET_PLATFORM=windows python tests/test_ui_smoke.py`（打包态同理，见 `tests/DEV.md`）。
+> `FLET_PLATFORM=windows python tests/test_ui_smoke.py`（打包态同理，`run_all.py`
+> 在 Windows 上会自动补这个变量）。它缺 flet/Pillow 时是**失败**（导入即报错、非零
+> 退出），不是跳过——请在装好 flet 的 Windows Python（`py -3.13`）上跑全套。
+> 想单跑一个类/用例：`cd tests && python -m unittest test_ui_smoke.DropFeedbackTest -v`。
 
 ## 启动与外观
 

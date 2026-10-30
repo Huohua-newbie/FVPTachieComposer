@@ -1,144 +1,184 @@
 """对话框目录记忆（跨重启）的回归测试。
 
-对应「记住上次的文件夹」：
-- 打开 / 保存对话框各记各的，互不污染
-- 写进 settings.json 后，重新构造 App 能读回来（跨重启保留）
-- 上次的目录被删掉 / 换成文件 / 字段类型不对 → 当作没设过，不抛异常
-- 写目录时不能顺带清掉窗口等其它设置段
+每个用例一份独立的 settings.json；目录存在性、类型错误、段落保留、原子写
+都在用例内自证，不依赖开发机上的真实目录。
 
-纯逻辑，不需要 flet：python tests/test_dialog_dirs.py
+    python tests/test_dialog_dirs.py -v
+    cd tests && python -m unittest test_dialog_dirs.DialogDirsTest -v
 """
+
+from __future__ import annotations
+
 import json
-import os
-import sys
-import tempfile
-from pathlib import Path
+import threading
+import unittest
 
-for _s in (sys.stdout, sys.stderr):
-    try:
-        _s.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
-
-_tmp = Path(tempfile.mkdtemp(prefix="fvp_dialog_dirs_"))
-os.environ["FVP_SETTINGS_PATH"] = str(_tmp / "settings.json")
+try:
+    from . import support
+except ImportError:  # 直接 python tests/test_dialog_dirs.py
+    import support
 
 import fvpapp.settings as st  # noqa: E402
 
-fails = []
 
+class DialogDirsTest(support.EnvTestCase):
+    def setUp(self) -> None:  # noqa: N802
+        super().setUp()
+        self.path = st.settings_path()
+        self.assertEqual(self.path, self.tmp / "settings.json")
+        self.import_dir = self.tmp / "import_here"
+        self.export_dir = self.tmp / "export_here"
+        self.import_dir.mkdir()
+        self.export_dir.mkdir()
 
-def check(name, ok):
-    print(("PASS " if ok else "FAIL ") + name)
-    if not ok:
-        fails.append(name)
+    # ── 小工具 ────────────────────────────────────────────────
+    def wipe(self) -> None:
+        for p in (self.path, self.path.with_name(self.path.name + ".tmp")):
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
+    def write_raw(self, data: bytes | str) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(data, bytes):
+            self.path.write_bytes(data)
+        else:
+            self.path.write_text(data, encoding="utf-8")
 
-def path():
-    return st.settings_path()
+    def write_json(self, data) -> None:
+        self.write_raw(json.dumps(data, ensure_ascii=False))
 
+    def raw(self) -> dict:
+        return json.loads(self.path.read_text(encoding="utf-8"))
 
-def wipe():
-    for p in (path(), path().with_name(path().name + ".tmp")):
-        try:
-            p.unlink()
-        except OSError:
-            pass
+    def save(self, import_dir=None, export_dir=None) -> None:
+        st.save_dialog_dirs(str(import_dir) if import_dir is not None else None,
+                            str(export_dir) if export_dir is not None else None)
 
+    # ── 读取容错 ──────────────────────────────────────────────
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(st.dialog_dirs(), {})
 
-def read_raw():
-    return json.loads(path().read_text(encoding="utf-8"))
+    def test_corrupt_files_return_empty(self):
+        for bad in (b"", b"{", b"[1,2,3]", b'{"dialogs": 7}',
+                    b'{"dialogs": [1]}', b"\xff\xfe\x00broken"):
+            with self.subTest(payload=bad[:16]):
+                self.wipe()
+                self.write_raw(bad)
+                self.assertEqual(st.dialog_dirs(), {})
 
+    def test_non_string_fields_are_filtered(self):
+        self.write_json({"dialogs": {"import": 123, "export": ["x"],
+                                     "other": str(self.import_dir)}})
+        self.assertEqual(st.dialog_dirs(), {})
 
-IMPORT_DIR = _tmp / "import_here"
-EXPORT_DIR = _tmp / "export_here"
-IMPORT_DIR.mkdir()
-EXPORT_DIR.mkdir()
+    def test_unknown_dialog_keys_ignored(self):
+        self.write_json({"dialogs": {"import": str(self.import_dir),
+                                     "last": str(self.export_dir)}})
+        self.assertEqual(st.dialog_dirs(), {"import": str(self.import_dir)})
 
-# ── 没存过 / 文件坏掉：回空，不抛 ─────────────────────────────────────────
-wipe()
-check("没有设置文件时不记任何目录", st.dialog_dirs() == {})
+    # ── 存取 ──────────────────────────────────────────────────
+    def test_round_trip_keeps_each_direction_separate(self):
+        self.save(self.import_dir, self.export_dir)
+        self.assertEqual(st.dialog_dirs(), {"import": str(self.import_dir),
+                                            "export": str(self.export_dir)})
+        self.assertIsInstance(self.raw()["dialogs"], dict)
 
-for bad in (b"", b"{", b"[1,2,3]", b'{"dialogs": 7}', b'{"dialogs": [1]}',
-            b"\xff\xfe\x00broken"):
-    wipe()
-    path().write_bytes(bad)
-    try:
+    def test_only_one_direction(self):
+        self.save(self.import_dir, None)
+        self.assertEqual(st.dialog_dirs(), {"import": str(self.import_dir)})
+        self.assertIsNone(self.raw()["dialogs"]["export"])
+
+    def test_both_none_writes_null_and_reads_empty(self):
+        self.save(None, None)
+        self.assertEqual(st.dialog_dirs(), {})
+        self.assertEqual(self.raw()["dialogs"],
+                         {"import": None, "export": None})
+
+    def test_empty_string_is_treated_as_unset(self):
+        st.save_dialog_dirs("", "")
+        self.assertEqual(st.dialog_dirs(), {})
+        self.assertEqual(self.raw()["dialogs"],
+                         {"import": None, "export": None})
+
+    def test_tilde_is_expanded_for_validation_but_stored_verbatim(self):
+        home = self.tmp / "home"
+        (home / "d").mkdir(parents=True)
+        self.sandbox.set(HOME=home, USERPROFILE=home)
+        st.save_dialog_dirs("~/d", None)
+        self.assertEqual(st.dialog_dirs(), {"import": "~/d"})
+
+    # ── 目录存在性校验 ────────────────────────────────────────
+    def test_deleted_directory_filtered_but_sibling_kept(self):
+        gone = self.tmp / "gone_dir"
+        gone.mkdir()
+        self.save(gone, self.export_dir)
+        gone.rmdir()
         got = st.dialog_dirs()
-        ok = got == {}
-    except Exception as exc:
-        ok, got = False, repr(exc)
-    check(f"坏文件 {bad[:16]!r} 只回空不抛异常", ok)
+        self.assertNotIn("import", got)
+        self.assertEqual(got.get("export"), str(self.export_dir))
 
-# ── 存进去、再读出来：两个目录各归各的 ────────────────────────────────────
-wipe()
-st.save_dialog_dirs(str(IMPORT_DIR), str(EXPORT_DIR))
-got = st.dialog_dirs()
-check("导入目录能读回来", got.get("import") == str(IMPORT_DIR))
-check("导出目录能读回来", got.get("export") == str(EXPORT_DIR))
-check("写出来是 dialogs 段", isinstance(read_raw().get("dialogs"), dict))
+    def test_file_path_filtered(self):
+        not_a_dir = self.tmp / "a_file.txt"
+        not_a_dir.write_text("x", encoding="utf-8")
+        self.save(not_a_dir, self.export_dir)
+        self.assertNotIn("import", st.dialog_dirs())
 
-# 只设过一个：另一边不出现，不会把 None 当路径
-wipe()
-st.save_dialog_dirs(str(IMPORT_DIR), None)
-got = st.dialog_dirs()
-check("只设导入时导出不出现", got == {"import": str(IMPORT_DIR)})
+    # ── 写一段不能碰别的段 ────────────────────────────────────
+    def test_save_preserves_other_sections(self):
+        self.write_json({"window": {"width": 1300}, "theme": "dark",
+                         "other": [1, 2]})
+        self.save(self.import_dir, self.export_dir)
+        raw = self.raw()
+        self.assertEqual(raw["window"], {"width": 1300})
+        self.assertEqual(raw["theme"], "dark")
+        self.assertEqual(raw["other"], [1, 2])
 
-# ── 目录没了：当作没设过，让对话框回系统默认位置 ──────────────────────────
-wipe()
-gone = _tmp / "gone_dir"
-gone.mkdir()
-st.save_dialog_dirs(str(gone), str(EXPORT_DIR))
-gone.rmdir()
-got = st.dialog_dirs()
-check("被删掉的目录被过滤", "import" not in got)
-check("同一段里另一个仍有效", got.get("export") == str(EXPORT_DIR))
+    def test_window_save_preserves_dialogs(self):
+        self.save(self.import_dir, self.export_dir)
+        st.save_window({"width": 1400, "height": 800})
+        self.assertEqual(st.dialog_dirs().get("import"), str(self.import_dir))
 
-not_a_dir = _tmp / "a_file.txt"
-not_a_dir.write_text("x", encoding="utf-8")
-wipe()
-st.save_dialog_dirs(str(not_a_dir), str(EXPORT_DIR))
-check("路径是文件时被过滤", "import" not in st.dialog_dirs())
+    # ── 写盘契约 ──────────────────────────────────────────────
+    def test_atomic_write_leaves_no_tmp(self):
+        self.save(self.import_dir, self.export_dir)
+        self.assertEqual(list(self.tmp.glob("settings.json*.tmp")), [])
 
-wipe()
-path().write_text(json.dumps({"dialogs": {"import": 123, "export": ["x"],
-                                         "other": str(IMPORT_DIR)}}), encoding="utf-8")
-check("非字符串字段被过滤", st.dialog_dirs() == {})
+    def test_unwritable_dir_does_not_raise(self):
+        blocker = self.tmp / "notdir"
+        blocker.write_text("x", encoding="utf-8")
+        self.sandbox.set(FVP_SETTINGS_PATH=blocker / "settings.json")
+        self.save(self.import_dir, self.export_dir)  # 只记日志
+        self.assertEqual(st.load(), {})
+        self.assertEqual(st.dialog_dirs(), {})
 
-# ── 写一段不能碰别的段 ────────────────────────────────────────────────────
-wipe()
-path().write_text(json.dumps({"window": {"width": 1300}, "theme": "dark"}), encoding="utf-8")
-st.save_dialog_dirs(str(IMPORT_DIR), str(EXPORT_DIR))
-raw = read_raw()
-check("写目录时保留 window 段", raw.get("window") == {"width": 1300})
-check("写目录时保留 theme 段", raw.get("theme") == "dark")
+    def test_concurrent_saves_leave_valid_json(self):
+        """两个线程抢同一次写盘：os.replace 保证读者只能看到完整文件。
 
-# 反过来：写窗口不能把 dialogs 冲掉
-st.save_window({"width": 1400, "height": 800})
-check("写窗口时保留 dialogs 段", st.dialog_dirs().get("import") == str(IMPORT_DIR))
+        两侧 payload 等长，所以任何先后顺序读到的都是一份完整、成对的目录。
+        """
+        a, b = self.tmp / "a", self.tmp / "b"
+        a.mkdir()
+        b.mkdir()
+        barrier = threading.Barrier(2)
 
-# ── 写盘契约：不留半截文件；目录不可写也不抛 ──────────────────────────────
-wipe()
-st.save_dialog_dirs(str(IMPORT_DIR), str(EXPORT_DIR))
-check("写完后没有残留 .tmp", not path().with_name(path().name + ".tmp").exists())
+        def worker(d):
+            barrier.wait()
+            for _ in range(10):
+                st.save_dialog_dirs(str(d), str(d))
 
-blocker = _tmp / "notdir"
-blocker.write_text("x", encoding="utf-8")
-os.environ["FVP_SETTINGS_PATH"] = str(blocker / "settings.json")
-try:
-    st.save_dialog_dirs(str(IMPORT_DIR), str(EXPORT_DIR))
-    ok = True
-except Exception as exc:
-    ok = False
-    print("  抛了:", repr(exc))
-check("目录不可写时 save 不抛异常", ok)
-check("目录不可写时读回空", st.dialog_dirs() == {})
-os.environ["FVP_SETTINGS_PATH"] = str(_tmp / "settings.json")
+        threads = [threading.Thread(target=worker, args=(d,)) for d in (a, b)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
-if fails:
-    print("\nFAILED:", fails)
-    sys.exit(f"DIALOG_DIRS_TEST_FAILED: {fails}")
-print("DIALOG_DIRS_OK")
+        got = st.dialog_dirs()
+        self.assertIn((got.get("import"), got.get("export")),
+                      {(str(a), str(a)), (str(b), str(b))})
+        self.assertEqual(list(self.tmp.glob("settings.json*.tmp")), [])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -1,338 +1,390 @@
-"""无头回归测试：缩略图后台解码完成后，替换+刷新必须发生在 UI（事件循环）线程。
+"""缩略图后台解码流水线：解码在 worker、替换+刷新必须回到 UI 线程。
 
-用轻量 stub 替代 flet/PIL/tkinter，驱动真实 ComposerApp 代码：
-_load_bin → _render_tree → 线程池解码 → loop 回调推送 → toggle 展开。
-Linux 下可直接运行：python3 tests/test_thumb_threading.py
+假 flet 顶掉界面，Pillow 用真的——磁盘里的缩略图要能被 `Image.open` 读出来，
+否则「写进去的是不是一张 PNG」永远验不到。等条件一律用谓词轮询，不排固定 sleep。
+
+    python tests/test_thumb_threading.py -v
+    cd tests && python -m unittest test_thumb_threading.ThumbThreadTest -v
 """
+
+from __future__ import annotations
+
 import asyncio
 import io
-import os
-import struct
 import sys
-import tempfile
 import threading
-import types
-import zlib
-from pathlib import Path
+import unittest
+from unittest import mock
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+try:
+    from . import support
+except ImportError:  # 直接 python tests/test_thumb_threading.py
+    import support
 
-# 缓存目录指到临时目录：既别弄脏用户的应用缓存，也别让上一次运行留下的
-# 命中掩盖本测试要验的"后台解码 → UI 线程推送"这条路径。
-os.environ["FVP_CACHE_DIR"] = tempfile.mkdtemp(prefix="thumb_thread_cache_")
+support.install_fake_flet()
 
-MAIN_IDENT = threading.get_ident()
+from PIL import Image  # noqa: E402
 
-# ---------- Fake PIL ----------
-class FakeImage:
-    class Resampling:
-        LANCZOS = 1
-        NEAREST = 0
-
-    def __init__(self, size=(8, 8), mode="RGBA"):
-        self.size = tuple(size)
-        self.mode = mode
-
-    @classmethod
-    def frombytes(cls, mode, size, data):
-        need = size[0] * size[1] * (3 if mode == "RGB" else 4)
-        assert len(data) >= need, (len(data), need)
-        return cls(size, mode)
-
-    @classmethod
-    def merge(cls, mode, bands):
-        first = list(bands)[0]
-        return cls(getattr(first, "size", (8, 8)), mode)
-
-    @classmethod
-    def new(cls, mode, size, color=None):
-        return cls(size, mode)
-
-    def putpixel(self, xy, value):
-        return None
-
-    @staticmethod
-    def alpha_composite(a, b):
-        return FakeImage(getattr(a, "size", (8, 8)))
-
-    def split(self):
-        n = 3 if self.mode == "RGB" else 4
-        return tuple(FakeImage(self.size) for _ in range(n))
-
-    def convert(self, mode):
-        return FakeImage(self.size, mode)
-
-    def copy(self):
-        return FakeImage(self.size, self.mode)
-
-    def crop(self, box):
-        w = max(1, box[2] - box[0])
-        h = max(1, box[3] - box[1])
-        return FakeImage((w, h), self.mode)
-
-    def paste(self, img, box):
-        return None
-
-    def resize(self, size, *a, **k):
-        return FakeImage(tuple(size), self.mode)
-
-    def save(self, buf, fmt=None):
-        buf.write(b"FAKEPNG" + bytes(64))
-
-    def tobytes(self):
-        return b"\0" * (self.size[0] * self.size[1] * 4)
-
-    def getpixel(self, xy):
-        return (1, 2, 3, 255)
-
-
-pil_mod = types.ModuleType("PIL")
-pil_mod.Image = FakeImage
-sys.modules["PIL"] = pil_mod
-
-# ---------- Fake flet ----------
-class _Any:
-    def __init__(self, *a, **k):
-        self._args = a
-        self._kwargs = dict(k)
-        self.controls = []
-        self.update_threads = []
-
-    def __call__(self, *a, **k):
-        return _Any(*a, **k)
-
-    def __getattr__(self, name):
-        if name.startswith("__"):
-            raise AttributeError(name)
-        # 先返回构造时传入的值，贴近真实控件“读取属性即设定值”的语义
-        if name in self._kwargs:
-            return self._kwargs[name]
-        return _Any()
-
-    def update(self):
-        self.update_threads.append(threading.get_ident())
-
-
-class FakePage(_Any):
-    def __init__(self):
-        super().__init__()
-        self.overlay = []
-        self.services = None
-        self.window = _Any()
-
-
-class _FtModule(types.ModuleType):
-    def __getattr__(self, name):
-        if name.startswith("__"):
-            raise AttributeError(name)
-        return _Any()
-
-
-_flet = _FtModule("flet")
-# Canvas/Path 在真实 flet 里属于 flet.canvas 子模块；flet 被换成单文件 stub 后
-# 它不再是"包"，得手工把子模块塞进 sys.modules 并绑到父模块属性上，
-# 否则应用侧 `import flet.canvas as fc` 直接 ModuleNotFoundError。
-_canvas = _FtModule("flet.canvas")
-_flet.canvas = _canvas
-sys.modules["flet"] = _flet
-sys.modules["flet.canvas"] = _canvas
-
-from FVPTachieComposerFlet import ComposerApp
+import fvpapp.resources as resources_mod  # noqa: E402
+from fvpapp import cache  # noqa: E402
+from FVPTachieComposerFlet import ComposerApp, _is_expr  # noqa: E402
 from FVPTachieComposerFlet import main as app_main  # noqa: E402
 
 
-def make_hzc(path, image_type=1, w=8, h=8, frames=1):
-    head = bytearray(44)
-    head[0:4] = b"hzc1"
-    struct.pack_into("<H", head, 18, image_type)
-    struct.pack_into("<H", head, 20, w)
-    struct.pack_into("<H", head, 22, h)
-    struct.pack_into("<I", head, 32, frames)
-    bpp = 3 if image_type == 0 else 4
-    need = w * h * bpp * (frames if image_type == 2 else 1)
-    path.write_bytes(bytes(head) + zlib.compress(bytes((i * 7) % 256 for i in range(need))))
+# ── 假 flet 控件树导航 ────────────────────────────────────────────────────
+def _role_column(wrap):
+    """载入那一轮角色外面套了错峰动画的 Container 壳，剥壳取里层 Column。"""
+    args = getattr(wrap, "_args", ())
+    return args[0] if args else wrap
 
 
-def build_fixture():
-    tmp = Path(tempfile.mkdtemp(prefix="thumb_test_"))
-    for outfit in ("私服", "制服"):
-        for action in ("基", "喜"):
-            make_hzc(tmp / f"CHR_R_{action}_{outfit}.hzc")
-            make_hzc(tmp / f"CHR_R_{action}_{outfit}_表情.hzc", image_type=2, frames=2)
-    return tmp
-
-
-def role_column(wrap):
-    """载入那一轮每个角色外面套了错峰动画的 Container 壳，这里取下层角色 Column。"""
-    first = wrap._args[0] if wrap._args else None
-    return first if isinstance(first, _Any) else wrap
-
-
-def find_tiles(app):
-    """返回 [(role_header, role_body, role_toggle), ...] 与 outfit/action 结构。"""
-    roles = []
+def role_tiles(app):
+    """[(role, header, body, toggle)]，保持树里的顺序。"""
+    tiles = []
     for wrap in app.tree_list.controls:
-        role_col = role_column(wrap)
-        header, body = role_col._args[0]
-        roles.append((header, body, header._kwargs["on_click"]))
-    return roles
+        header, body = _role_column(wrap)._args[0]
+        tiles.append((header._kwargs["title"].value, header, body, header._kwargs["on_click"]))
+    return tiles
 
 
-def swapped_src(leading):
-    """占位容器是否已被替换为带 src 的 Image（读实例属性，而非构造 kwargs）。"""
-    w = leading.__dict__.get("content")
-    return w is not None and w._kwargs.get("src") is not None
+def outfit_tiles(role_body):
+    tiles = []
+    for col in role_body.controls:
+        header, body = col._args[0]
+        tiles.append((header._kwargs["title"].value, header, body, header._kwargs["on_click"]))
+    return tiles
 
 
-async def main():
-    page = FakePage()
-    app = ComposerApp(page)
-    assert app._loop is None
-
-    tmp = build_fixture()
-    await app._load_bin(str(tmp))
-    assert app._loop is asyncio.get_running_loop(), "loop 未捕获"
-
-    # 等待后台解码 + loop 回调全部落地
-    await asyncio.sleep(2.5)
-
-    roles = find_tiles(app)
-    assert len(roles) == 1, f"role 数={len(roles)}"
-    header, body, toggle = roles[0]
-
-    # 1) 角色缩略图：无任何点击即应完成替换，且 update 发生在 loop 线程
-    thumb = header._kwargs["leading"]
-    assert swapped_src(thumb), "角色缩略图未替换（需点击才出现=旧 bug）"
-    assert thumb.update_threads, "角色缩略图从未 update"
-    assert all(t == MAIN_IDENT for t in thumb.update_threads), \
-        f"update 不在 UI 线程: {set(thumb.update_threads)} vs main {MAIN_IDENT}"
-
-    # 2) 展开角色：服装头缩略图当场排队，完成后同样走 loop 线程推送
-    toggle(_Any())
-    assert body.visible is True
-    await asyncio.sleep(2.0)
-    outfit_thumb_ok = 0
-    for outfit_col in body.controls:
-        oheader, _obody = outfit_col._args[0]
-        t = oheader._kwargs["leading"]
-        if swapped_src(t):
-            outfit_thumb_ok += 1
-            assert all(x == MAIN_IDENT for x in t.update_threads), "服装缩略图 update 不在 UI 线程"
-    assert outfit_thumb_ok == 2, f"服装头缩略图仅 {outfit_thumb_ok}/2 完成"
-
-    # 3) 展开服装：动作缩略图同样机制
-    first_outfit = body.controls[0]
-    oheader, obody = first_outfit._args[0]
-    oheader._kwargs["on_click"](_Any())
-    await asyncio.sleep(2.0)
-    n_action = 0
-    for act in obody.controls:
-        # _action_tile 返回行容器：Container(导轨边线) → Container(高亮) → ListTile
-        aheader = act._kwargs["content"]._kwargs["content"]
-        t = aheader._kwargs["leading"]
-        if swapped_src(t):
-            n_action += 1
-            assert all(x == MAIN_IDENT for x in t.update_threads), "动作缩略图 update 不在 UI 线程"
-    assert n_action == 2, f"动作缩略图仅 {n_action}/2 完成"
-
-    # 4) 点击动作整链路（底图/差分/合成）在 stub 下无异常
-    act_row = obody.controls[0]
-    await app._select_action(first_outfit_info(app))
-    assert app.composed_img is not None, "合成结果为空"
-    assert any(e["filename"] == app.selected_filename for e in app._action_rows), \
-        "行登记表没跟上当前选中项"
-
-    # 5) 成功横幅 2 秒后自动消除（事件循环定时器）；失败横幅常驻
-    app._snack("ok-test")
-    assert len(page.overlay) == 1, "横幅未挂载"
-    await asyncio.sleep(1.0)
-    assert len(page.overlay) == 1, "成功横幅消除过早"
-    await asyncio.sleep(1.3)
-    assert len(page.overlay) == 0, "成功横幅未自动消除"
-    app._snack("err-test", error=True)
-    await asyncio.sleep(1.3)
-    assert len(page.overlay) == 1, "失败横幅不应自动消失"
-
-    # 6) 单选项级联自动选中：单服装角色展开→服装自动展开→单动作自动选中合成
-    page2 = FakePage()
-    app2 = ComposerApp(page2)
-    tmp2 = Path(tempfile.mkdtemp(prefix="auto_sel_"))
-    make_hzc(tmp2 / "CHR_S_基_私服.hzc")
-    make_hzc(tmp2 / "CHR_S_基_私服_表情.hzc", image_type=2, frames=2)
-    make_hzc(tmp2 / "CHR_T_基_私服.hzc")
-    make_hzc(tmp2 / "CHR_T_喜_私服.hzc")
-    await app2._load_bin(str(tmp2))
-    await asyncio.sleep(1.0)
-    r2 = find_tiles(app2)
-    assert len(r2) == 2, f"role 数={len(r2)}"
-    # 找到角色 S 的 tile（title 文本为 S）
-    s_entry = None
-    for header, body, tog in r2:
-        title = header._kwargs.get("title")
-        if getattr(title, "_args", None) and title._args and title._args[0] == "S":
-            s_entry = (header, body, tog)
-            break
-    assert s_entry is not None, "未找到角色 S"
-    sheader, sbody, stog = s_entry
-    assert sbody._kwargs.get("visible") is False
-    stog(_Any())
-    assert sbody.visible is True
-    s_outfit_col = sbody.controls[0]
-    soheader, sobody = s_outfit_col._args[0]
-    assert sobody.visible is True, "单服装未自动展开"
-    # 级联选中现在是异步任务（_spawn→_select_action→_load_base），等它跑完
-    await asyncio.sleep(0.5)
-    assert app2.composed_img is not None, "单动作未自动选中合成"
-    assert app2.selected_filename == "CHR_S_基_私服", app2.selected_filename
-    # 去重守卫：收起再展开不再重复加载，且已展开的子服装不被翻转关闭
-    before = app2.composed_img
-    stog(_Any())
-    stog(_Any())
-    assert app2.selected_filename == "CHR_S_基_私服"
-    assert app2.composed_img is before, "重复加载了已选项"
-    assert sobody.visible is True, "重展开时已开的服装被误关闭"
-
-    # 7) 命令行/拖到图标打开：argv 目录参数启动即自动载入；非法参数给报错横幅。
-    #    打包态这条依赖 client\main.dart 的 FVP-PATCH（原生客户端会把位置参数
-    #    当成 developer mode，嵌入 Python 不启动），别把入口的 argv 处理删了。
-    page3 = FakePage()
-    tmp3 = Path(tempfile.mkdtemp(prefix="argv_open_"))
-    make_hzc(tmp3 / "CHR_Q_基_私服.hzc")
-    old_argv, sys.argv = sys.argv, ["prog", str(tmp3)]
-    try:
-        app3 = await app_main(page3)
-    finally:
-        sys.argv = old_argv
-    assert app3.input_file == str(tmp3), app3.input_file
-    assert app3.hierarchy.get("Q"), "层级未建立"
-    page4 = FakePage()
-    old_argv, sys.argv = sys.argv, ["prog", str(tmp3 / "不存在.bin")]
-    try:
-        await app_main(page4)
-    finally:
-        sys.argv = old_argv
-    assert len(page4.overlay) == 1, "非法参数应弹报错横幅"
-    # 打包态形态：SeriousPython 把用户参数从 argv[0] 起放（没有脚本名），
-    # 实测拖到 exe 图标时 argv=['D:\\...\\graph_bs.bin']，这条也得载入。
-    page5 = FakePage()
-    old_argv, sys.argv = sys.argv, [str(tmp3)]
-    try:
-        app5 = await app_main(page5)
-    finally:
-        sys.argv = old_argv
-    assert app5.input_file == str(tmp3), "打包形态 argv[0] 未触发自动载入"
-
-    print("THUMB_THREADING_OK")
+def action_tiles(outfit_body):
+    """动作行是 Container(导轨边线) → Container(高亮) → ListTile。"""
+    tiles = []
+    for row in outfit_body.controls:
+        tile = row._kwargs["content"]._kwargs["content"]
+        tiles.append((tile._kwargs["title"].value, tile, tile._kwargs["on_click"]))
+    return tiles
 
 
-def first_outfit_info(app):
-    for outfit, infos in sorted(app.hierarchy["R"].items()):
-        for i in infos:
-            from FVPTachieComposerFlet import _is_expr
-            if not _is_expr(i["filename"]):
-                return i
-    raise AssertionError("no base info")
+def pushed_src(placeholder):
+    """占位容器是否已被 `_push_thumb` 换成带 src 的 Image（读实例属性）。"""
+    widget = placeholder.__dict__.get("content")
+    return None if widget is None else widget._kwargs.get("src")
 
 
-asyncio.run(main())
+class ThumbTestCase(support.AsyncEnvTestCase):
+    async def asyncSetUp(self):
+        self.main_ident = threading.get_ident()
+        # 记录每次真实解码发生在哪个线程；PNG 还是用真的，只是套一层观察
+        self.decodes: list[tuple[int, int]] = []
+        real_thumb_png = resources_mod._thumb_png
+
+        def record(img, size):
+            self.decodes.append((threading.get_ident(), size))
+            return real_thumb_png(img, size)
+
+        patcher = mock.patch.object(resources_mod, "_thumb_png", record)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        self.apps = []
+        self.app = self.new_app()
+
+    async def asyncTearDown(self):
+        # 线程池是模块级单例：不排干，上一用例的推送会落在下一用例的树上
+        for app in self.apps:
+            await support.drain_thumb_pool(app)
+
+    def new_app(self):
+        page = support.FakePage()
+        app = ComposerApp(page)
+        app._chime = lambda: None  # 测试里别真响
+        app._loop = asyncio.get_running_loop()
+        app.page_ref = page
+        self.apps.append(app)
+        return app
+
+    def make_fixture(self, roles=("R",), outfits=("私服", "制服"),
+                     actions=("基", "喜"), with_expr=True):
+        src = self.tmp / "src"
+        src.mkdir(exist_ok=True)
+        for role in roles:
+            for outfit in outfits:
+                for action in actions:
+                    support.make_hzc(src / f"CHR_{role}_{action}_{outfit}.hzc")
+                    if with_expr:
+                        support.make_hzc(src / f"CHR_{role}_{action}_{outfit}_表情.hzc",
+                                         image_type=2, frames=2)
+        return src
+
+    @staticmethod
+    async def wait_thumb(placeholder, what):
+        await support.pump_until(lambda: pushed_src(placeholder) is not None, what=what)
+
+    def disk_thumbs(self, app, size):
+        """按资源指纹把缩略图键算出来，从磁盘缓存读回 PNG。"""
+        out = []
+        for info in app.file_infos:
+            if _is_expr(info["filename"]):
+                continue
+            fp = cache.resource_fingerprint(info, app.input_file)
+            key = cache.thumb_key(fp, info["filename"], size)
+            png = cache.thumbs.read(key) if key is not None else None
+            if png:
+                out.append((info["filename"], png))
+        return out
+
+
+class ThumbThreadTest(ThumbTestCase):
+    async def test_role_thumbnail_decodes_on_worker_and_pushes_on_ui_thread(self):
+        src = self.make_fixture()
+        self.assertIs(await self.app._load_bin(str(src)), True)
+
+        (role, header, body, toggle), = role_tiles(self.app)
+        self.assertEqual(role, "R")
+        thumb = header._kwargs["leading"]
+        # 载入返回时推送还没跑：loop 回调要等我们让出事件循环
+        self.assertIsNone(pushed_src(thumb))
+
+        await self.wait_thumb(thumb, "角色缩略图")
+        self.assertTrue(pushed_src(thumb).startswith("data:image/png;base64,"))
+        self.assertTrue(thumb.update_threads)
+        self.assertEqual(set(thumb.update_threads), {self.main_ident}, "缩略图 update 不在 UI 线程")
+
+        role_decodes = [ident for ident, size in self.decodes if size == 40]
+        self.assertEqual(len(role_decodes), 1, self.decodes)
+        self.assertNotEqual(role_decodes[0], self.main_ident, "解码发生在 UI 线程了")
+
+    async def test_outfit_and_action_thumbnails_follow_same_pipeline(self):
+        src = self.make_fixture()
+        await self.app._load_bin(str(src))
+
+        (_, _, body, toggle), = role_tiles(self.app)
+        toggle(None)
+        outfits = outfit_tiles(body)
+        self.assertEqual({name for name, *_ in outfits}, {"私服", "制服"})
+        for name, oheader, _, _ in outfits:
+            thumb = oheader._kwargs["leading"]
+            await self.wait_thumb(thumb, f"服装 {name} 缩略图")
+            self.assertEqual(set(thumb.update_threads), {self.main_ident})
+
+        otoggle = outfits[0][3]
+        otoggle(None)
+        actions = action_tiles(outfits[0][2])
+        self.assertEqual(len(actions), 2)
+        for name, tile, _ in actions:
+            thumb = tile._kwargs["leading"]
+            await self.wait_thumb(thumb, f"动作 {name} 缩略图")
+            self.assertEqual(set(thumb.update_threads), {self.main_ident})
+
+        self.assertEqual(sorted(size for _, size in self.decodes), [26, 26, 30, 30, 40])
+        self.assertTrue(all(ident != self.main_ident for ident, _ in self.decodes))
+
+    async def test_disk_png_reused_by_new_app_without_decoding(self):
+        src = self.make_fixture()
+        await self.app._load_bin(str(src))
+        (_, header, _, _), = role_tiles(self.app)
+        await self.wait_thumb(header._kwargs["leading"], "角色缩略图")
+
+        pngs = self.disk_thumbs(self.app, 40)
+        self.assertEqual(len(pngs), 1, pngs)
+        with Image.open(io.BytesIO(pngs[0][1])) as img:
+            self.assertEqual(img.format, "PNG")
+            self.assertEqual(img.size, (8, 8))
+
+        decodes_before = len(self.decodes)
+        # 新实例 = 新的控件缓存；内存里的显示串也清掉，只留磁盘这一层
+        support.reset_cache_singletons()
+        app2 = self.new_app()
+        await app2._load_bin(str(src))
+        (_, header2, _, _), = role_tiles(app2)
+        await self.wait_thumb(header2._kwargs["leading"], "第二次载入的角色缩略图")
+
+        self.assertEqual(len(self.decodes), decodes_before, "磁盘已命中却还在解码")
+        self.assertEqual(len(self.disk_thumbs(app2, 40)), 1)
+
+    async def test_without_event_loop_push_happens_on_worker(self):
+        src = self.make_fixture(outfits=("私服",), actions=("基",))
+        await self.app._load_bin(str(src))
+        (_, header, _, _), = role_tiles(self.app)
+        await self.wait_thumb(header._kwargs["leading"], "角色缩略图")
+
+        # 没有事件循环（例如非 async 调用路径）时只能就地替换
+        self.app._loop = None
+        info = next(i for i in self.app.file_infos if not _is_expr(i["filename"]))
+        placeholder = support.FakeControl()
+        self.app._queue_thumb(placeholder, info, 31, "manual")
+
+        await support.pump_until(lambda: pushed_src(placeholder) is not None,
+                                 what="无 loop 时的直接推送")
+        worker = placeholder.update_threads[0]
+        self.assertNotEqual(worker, self.main_ident)
+        self.assertTrue(all(t == worker for t in placeholder.update_threads))
+        self.assertIn((worker, 31), self.decodes)
+
+    async def test_stale_decode_after_unload_never_touches_detached_placeholder(self):
+        src = self.make_fixture(outfits=("私服",), actions=("基",))
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        real = resources_mod.hzc_decode_first_frame
+
+        def gated(data, header):
+            started.set()
+            try:
+                release.wait(5)
+                return real(data, header)
+            finally:
+                finished.set()
+
+        with mock.patch.object(resources_mod, "hzc_decode_first_frame", gated):
+            await self.app._load_bin(str(src))
+            (_, header, _, _), = role_tiles(self.app)
+            thumb = header._kwargs["leading"]
+            await support.pump_until(started.is_set, what="缩略图解码开始")
+            await self.app._unload_bin()
+
+        release.set()
+        await support.pump_until(finished.is_set, what="被拦住的解码结束")
+        await support.drain_thumb_pool(self.app)
+
+        self.assertNotIn("content", thumb.__dict__, "载出后迟到的解码仍写进了旧控件")
+        self.assertEqual(thumb.update_threads, [])
+
+    async def test_stale_decode_during_second_parse_never_touches_placeholder(self):
+        """换资源有个 token 还没换的窗口：_load_bin 一进门就升 gen，而
+        _cache_token 要等新解析完、建树前才升。这期间回来的旧解码只有 deliver
+        里的 gen 守卫拦得住——token 检查在这个窗口里是放行错误结果的。"""
+        src = self.make_fixture(outfits=("私服",), actions=("基",))
+        src2 = self.tmp / "src2"
+        src2.mkdir()
+        support.make_hzc(src2 / "CHR_R2_基_私服.hzc")
+
+        started, release, finished = (threading.Event() for _ in range(3))
+        real = resources_mod.hzc_decode_first_frame
+        real_parse = resources_mod.parse_dir_infos
+        parse_started, parse_release = threading.Event(), threading.Event()
+
+        def gated(data, header):
+            started.set()
+            try:
+                release.wait(5)
+                return real(data, header)
+            finally:
+                finished.set()
+
+        def slow_parse(*a, **k):
+            parse_started.set()
+            parse_release.wait(5)
+            return real_parse(*a, **k)
+
+        with mock.patch.object(resources_mod, "hzc_decode_first_frame", gated):
+            await self.app._load_bin(str(src))
+            (_, header, _, _), = role_tiles(self.app)
+            thumb = header._kwargs["leading"]
+            await support.pump_until(started.is_set, what="角色缩略图解码开始")
+
+            # 只拦第二份的解析：第一份若也被拦，等到的就是它而不是窗口期
+            with mock.patch.object(resources_mod, "parse_dir_infos", slow_parse):
+                task = asyncio.create_task(self.app._load_bin(str(src2)))
+                # gen 已升、token 未升：旧解码此刻回来，deliver 的守卫是唯一防线
+                await support.pump_until(parse_started.is_set, what="第二份资源解析在途")
+                release.set()
+                await support.pump_until(finished.is_set, what="被拦住的解码结束")
+                await support.drain_thumb_pool(self.app)
+                parse_release.set()
+                await task
+
+        self.assertNotIn("content", thumb.__dict__,
+                         "解析窗口期里迟到的解码写进了旧占位控件")
+        self.assertEqual(thumb.update_threads, [])
+
+
+class AutoSelectTest(ThumbTestCase):
+    async def test_single_outfit_single_action_cascades_into_selection(self):
+        src = self.tmp / "auto"
+        src.mkdir()
+        support.make_hzc(src / "CHR_S_基_私服.hzc")
+        support.make_hzc(src / "CHR_S_基_私服_表情.hzc", image_type=2, frames=2)
+        support.make_hzc(src / "CHR_T_基_私服.hzc")
+        support.make_hzc(src / "CHR_T_喜_私服.hzc")
+        await self.app._load_bin(str(src))
+
+        tiles = {name: (header, body, toggle) for name, header, body, toggle in role_tiles(self.app)}
+        self.assertEqual(set(tiles), {"S", "T"})
+
+        _, sbody, stog = tiles["S"]
+        self.assertFalse(sbody.visible)
+        stog(None)
+        self.assertTrue(sbody.visible)
+        (_, soheader, sobody, _), = outfit_tiles(sbody)
+        self.assertTrue(sobody.visible, "单服装未自动展开")
+
+        # 级联选中是 _spawn 出来的任务，等它把底图/差分解完
+        await support.pump_until(lambda: self.app.composed_img is not None,
+                                 what="单动作自动选中合成")
+        self.assertEqual(self.app.selected_filename, "CHR_S_基_私服")
+
+        before = self.app.composed_img
+        stog(None)
+        stog(None)
+        self.assertEqual(self.app.selected_filename, "CHR_S_基_私服")
+        self.assertIs(self.app.composed_img, before, "重复加载了已选项")
+        self.assertTrue(sobody.visible, "重展开时已开的服装被误关闭")
+
+
+class ArgvTest(ThumbTestCase):
+    async def run_main(self, argv):
+        page = support.FakePage()
+        old, sys.argv = sys.argv, ["prog", *argv]
+        try:
+            app = await app_main(page)
+        finally:
+            sys.argv = old
+        if app is not None:
+            app._chime = lambda: None
+            self.apps.append(app)
+        return app, page
+
+    async def test_directory_argument_loads_on_startup(self):
+        src = self.make_fixture(roles=("Q",), outfits=("私服",), actions=("基",),
+                                with_expr=False)
+        app, _ = await self.run_main([str(src)])
+        self.assertEqual(app.input_file, str(src))
+        self.assertIn("Q", app.hierarchy)
+
+    async def test_packaged_argv_without_script_name_also_loads(self):
+        # 打包态 SeriousPython 把用户参数从 argv[0] 起放：拖到 exe 图标时没有脚本名
+        src = self.make_fixture(roles=("Q",), outfits=("私服",), actions=("基",),
+                                with_expr=False)
+        app, _ = await self.run_main([str(src)])
+        self.assertEqual(app.input_file, str(src))
+
+    async def test_missing_argument_shows_error_banner(self):
+        app, page = await self.run_main([str(self.tmp / "不存在.bin")])
+        self.assertIsNone(app.input_file)
+        self.assertEqual(len(page.overlay), 1, "非法参数应弹报错横幅")
+
+
+class SnackTest(ThumbTestCase):
+    async def test_success_snack_dismisses_and_error_snack_stays(self):
+        self.app._snack("成功", ttl=0.05)
+        self.assertEqual(len(self.app.page_ref.overlay), 1, "横幅未挂载")
+        await support.pump_until(lambda: not self.app.page_ref.overlay,
+                                 timeout=2, what="成功横幅自动消失")
+
+        seq = self.app._snack("失败", error=True)
+        # 负向检查：没有可等的观察点，只留一个短窗口证明它确实不消失
+        await asyncio.sleep(0.15)
+        self.assertEqual(len(self.app.page_ref.overlay), 1, "失败横幅不应自动消失")
+        self.assertTrue(self.app._snack_is_showing(seq))
+
+        self.app._dismiss_snack(seq)
+        await support.pump_until(lambda: not self.app.page_ref.overlay, what="手动关闭")
+
+    async def test_new_snack_replaces_previous_overlay(self):
+        self.app._snack("第一条", ttl=10)
+        self.app._snack("第二条", error=True)
+        self.assertEqual(len(self.app.page_ref.overlay), 1, "旧横幅没有摘掉")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
