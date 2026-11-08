@@ -929,11 +929,23 @@ class UiMixin:
         title = ft.Text(name, size=12, color=ink["text_dim"],
                         max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
         dot = ft.Container(width=6, height=6, border_radius=3, bgcolor="#00000000")
+        trailing = dot
+        alias = self.alias_images.get(info["filename"])
+        if alias:
+            # 资源包把同一张图挂到了别的服装名下（如私服里混进制服图）：
+            # 不是解析串图，是包本身错标。给一个复制图标 + 悬浮说明，图照常显示。
+            badge = ft.Icon(ft.Icons.CONTENT_COPY, size=13, color=ink["text_dim"])
+            trailing = ft.Row(
+                [ft.Container(content=badge,
+                              tooltip=_tip("与 " + "、".join(alias) +
+                                           " 同图，疑似资源包错标")),
+                 dot],
+                spacing=6, alignment=ft.MainAxisAlignment.END, tight=True)
 
         tile = ft.ListTile(
             leading=thumb_widget,
             title=title,
-            trailing=dot,
+            trailing=trailing,
             on_click=lambda e: self._spawn(self._select_action(info)),
             content_padding=ft.Padding.only(left=8, right=8, top=0, bottom=0),
             dense=True,

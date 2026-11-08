@@ -144,6 +144,17 @@ def parse_bin_info(input_file: str, progress: Callable[[int, int, str], None] | 
 			})
 		return file_infos
 
+def read_payload(info: dict, source) -> bytes:
+	"""取一条记录的原始字节：独立 .hzc 直接读，否则从 bin 里按偏移读。"""
+	src = info.get("path")
+	if src:
+		with open(src, 'rb') as f:
+			return f.read()
+	with open(source, 'rb') as f:
+		f.seek(info['offset'])
+		return f.read(info['size'])
+
+
 def parse_hzc_header_from_bytes(header_bytes: bytes) -> dict | None:
 	"""从44字节头部解析信息"""
 	if len(header_bytes) < 44:

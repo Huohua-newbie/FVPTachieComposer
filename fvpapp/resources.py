@@ -24,9 +24,11 @@ from .engine import (
     hzc_decode_first_frame,
     parse_bin_info_extended,
     parse_dir_infos,
+    read_payload,
 )
 
 from . import cache
+from .aliases import find_alias_images
 from .dropzone import DROPZONE_ON, _custom_client_available, _dropzone, _dropzone_on, pick_drop_path
 from .media import (
     _THUMB_POOL,
@@ -41,6 +43,7 @@ from .media import (
     _png_data_uri,
     _thumb_png,
 )
+from .naming import split_role_outfit
 from .theme import (
     ANIM_ROW,
     ANIM_VEIL,
@@ -167,21 +170,13 @@ class ResourceMixin:
             for info in infos:
                 if info["type"] != "hzc":
                     continue
-                parts = info["filename"].split("_")
-                if len(parts) >= 2 and parts[0] == "CHR":
-                    role = parts[1]
-                    outfit = parts[3] if len(parts) >= 4 else "默认"
-                    # Handle ru suffix for silhouette files
-                    if parts[-1].lower() == "ru":
-                        outfit = f"{outfit}_ru"
-                else:
-                    role = info["filename"]
-                    outfit = "默认"
+                role, outfit = split_role_outfit(info["filename"])
                 hier.setdefault(role, {}).setdefault(outfit, []).append(info)
-            return infos, hier
+            aliases = find_alias_images(hier, lambda info: read_payload(info, path))
+            return infos, hier, aliases
 
         try:
-            infos, hier = await asyncio.to_thread(work)
+            infos, hier, aliases = await asyncio.to_thread(work)
         except Exception as ex:
             self._end_parse_feedback()
             self.status_text.value = prev_status
@@ -202,6 +197,7 @@ class ResourceMixin:
         self.input_file = path
         self.file_infos = infos
         self.hierarchy = hier
+        self.alias_images = aliases
         self.selected_info = None
         self.selected_filename = None
         self._drop_image_caches()
@@ -243,6 +239,7 @@ class ResourceMixin:
         self.input_file = None
         self.file_infos = []
         self.hierarchy = {}
+        self.alias_images = {}
         self.selected_info = None
         self.selected_filename = None
         self.base_idx = 0
@@ -408,14 +405,7 @@ class ResourceMixin:
 
     def _read_hzc_bytes(self, info):
         """取一条记录的原始字节与解码头：独立 .hzc 直接读，否则从 bin 里按偏移读。"""
-        src = info.get("path")
-        if src:
-            with open(src, "rb") as f:
-                data = f.read()
-        else:
-            with open(self.input_file, "rb") as f:
-                f.seek(info["offset"])
-                data = f.read(info["size"])
+        data = read_payload(info, self.input_file)
         header = {
             "image_type": info.get("image_type", 0),
             "width": info.get("width", 0),

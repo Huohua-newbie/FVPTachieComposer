@@ -27,6 +27,17 @@ def _expr_suffixes() -> tuple[str, ...]:
 EXPR_SUFFIXES = _expr_suffixes()
 
 
+def split_role_outfit(filename: str) -> tuple[str, str]:
+    """按 `CHR_角色_动作_服装` 约定拆出角色与服装；不合约定的整名当角色。"""
+    parts = filename.split("_")
+    if len(parts) >= 2 and parts[0] == "CHR":
+        outfit = parts[3] if len(parts) >= 4 else "默认"
+        if parts[-1].lower() == "ru":
+            outfit = f"{outfit}_ru"
+        return parts[1], outfit
+    return filename, "默认"
+
+
 def _is_expr(filename: str) -> bool:
     """判断文件名是否为表情差分文件（编码无关）。"""
     return any(filename.endswith(s) for s in EXPR_SUFFIXES)

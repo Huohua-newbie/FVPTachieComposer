@@ -99,6 +99,7 @@ class ComposerApp(UiMixin, StateMixin, ResourceMixin, ExportMixin, DropFeedbackM
         self.input_file = None
         self.file_infos = []
         self.hierarchy = {}
+        self.alias_images = {}
         self.selected_info = None
         self.selected_filename = None
 

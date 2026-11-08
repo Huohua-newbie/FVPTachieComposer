@@ -9,6 +9,7 @@ python tests/test_ui_smoke.py          # 用真实 flet 搭整棵树，查控件
 python tests/test_thumb_threading.py   # 假 flet，查缩略图解码仍在后台线程、update 回 UI 线程
 python tests/test_cache.py             # 缓存子系统：指纹与键、索引编解码与自愈、内存/磁盘字节预算 LRU、单条超限、single-flight、关缓存
 python tests/test_parse_progress.py    # 解析进度协议：阶段齐全、计数单调、末次报满、传不传回调结果一致
+python tests/test_alias_images.py      # 跨服装同图标注：错标判定、同服装/同大小不同字节不误报、读盘失败不炸
 python tests/test_export_progress.py   # 批量导出：进度单调报满、取消不再写盘、失败清单、只重试失败项、过期帧不改状态栏、对话框期间载出即作废
 python tests/test_window_memory.py     # 窗口偏好：读不到回默认、坐标出界不还原、最大化不覆盖几何
 python tests/test_dialog_dirs.py       # 对话框目录记忆：跨重启读回、目录没了回默认、不冲掉其它段
@@ -51,6 +52,7 @@ python .github/selfcheck.py            # 解析与差分合成的纯逻辑（不
 - [ ] 解析失败（拖进一个坏 `.bin`）、或解析中途按「载出」：进度条当场收起，状态栏回到原位，不会留一条卡在半路的条
 - [ ] 三层树（角色→服装→动作）逐层展开，箭头右→下旋转动画正常，列表即时展开无卡顿
 - [ ] 载出后换另一份 `.bin`（或同一个角色名的另一份素材）：树里、底图、差分条显示的都是新资源的图，不残留上一份（同名动作串图）
+- [ ] 资源包把同一张图挂到两个服装名下（如 `graph_bs.bin` 的 `CHR_ハル_喜_私服`＝`制服`）：该动作行右侧出现复制图标，悬停说明同图对象；图照常显示、导出文件名不变
 
 ## 打开散装 HZC 文件夹
 
