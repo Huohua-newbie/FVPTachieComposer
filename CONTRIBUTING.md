@@ -1,75 +1,37 @@
-# 协作指南（2 人版）
+# 协作指南
 
-> 目标：让刚开始用 git 的人 20 分钟内跑通一次完整改动，并且永远不会把 `main` 弄坏。
-
-## 谁做什么
-
-| 角色 | 负责 | 改动怎么进 `main` |
-| --- | --- | --- |
-| **维护者**（项目作者） | 定方向、合并 PR、发版、仓库权限 | **直接 `git push`**（管理员可绕过保护） |
-| **协作者**（同学） | 在分支上改代码 / 文档 | **分支 + PR**，等维护者合并 |
-
-两人并行开发就是两条线：**维护者在 `main` 上直推，协作者在自己的分支上提 PR**。互不阻塞。
+> 项目目前由维护者一人开发。这份文档留着两件事：改动的硬规则，和以后有人加入时的上手路径。
 
 ## 硬规则
 
-对**协作者**：
+1. **推 `main` 前把无头自检跑绿**（`python tests/run_all.py`，清单在 [`TESTING.md`](TESTING.md)，
+   加测试只在那儿补一行，这里不数个数），一次推送只做一件事。
+2. **不要 `git push --force` 到 `main`**。
+3. **用户能感觉到的行为变了，同一个提交里改 `README.md`** —— 它是唯一的功能说明。
+4. **口径不清楚就问，别猜**；聊天里定下来的结论必须回写 `README.md`，否则等于没定。
 
-1. **不要直接往 `main` 推** —— 已开分支保护，推不上去。所有改动走「分支 + PR」。
-2. **PR 必须写清「怎么验证的」** —— 不能只写「改好了」。
-3. **口径以任务卡为准** —— 需要确认验收标准时直接看飞书任务卡；看板变动由维护者
-   负责通知，不用自己开轮询。
-4. **看板的表自己维护** —— 开工把任务卡改「进行中」，交评审改「待评审」，跑完用例改 `结果`。
-   群里的变更通知由 Base 自动化从这些字段发出，**不用另外发进度消息**。
-
-对**维护者**：
-
-3. **直推 `main` 前把无头自检跑绿**（清单在 [`TESTING.md`](TESTING.md)，加测试只在那儿补一行，这里不数个数），一次推送只做一件事。
-4. **不要 `git push --force` 到 `main`** —— 协作者的分支是从它长出来的。
-5. **同样维护看板** —— 状态、测试结果、变更行；通知是自动的，别手动刷群。
-
-其他都可以商量，这几条不商量。
+协作者加入后走「分支 + PR」，维护者合并；维护者自己直推 `main`。PR 必须写清「怎么验证的」。
 
 ## 文档在哪
 
 | 要什么 | 去哪 |
 | --- | --- |
 | 功能**现在**怎么工作（改代码前先读） | [`README.md`](README.md) —— **唯一的功能说明**，跟代码一起改 |
-| 功能该怎么设计、边界怎么定 | 飞书「FVP 功能讨论区」（话题群，一个功能一个话题） |
-| 每个改动**为什么**这么改、放弃了什么 | 飞书[协作表 · 变更](https://ecn4wyos4h4e.feishu.cn/base/XL78b251jaAtvksf3QMcNNCTn8g?table=tblVrPehcX05cU4e&view=vewTJLNm7t)（只记决策和用户能感觉到的变化，重构不记） |
-| 谁在做什么 | 飞书[协作表 · 任务](https://ecn4wyos4h4e.feishu.cn/base/XL78b251jaAtvksf3QMcNNCTn8g?table=tblKW2gbzH5nFNow&view=vewNjmSyHu) |
-
-**功能说明只有 README 一份**，没有第二个文档需要同步。讨论在飞书，但**聊天记录不算数** —— 定下来的结论必须回写 README，否则等于没定。
-
-## 需求变更先同步飞书，再继续写代码
-
-目标口径变了（验收标准、行为边界、测试期望），不要只在群里说一句：
-
-1. 写一份清单（模板 `feishu/change.example.json` → `feishu/changes/YYYY-MM-DD-短名.json`）
-2. `py -3.13 scripts/feishu_sync.py --manifest <清单> --dry-run` 看一遍
-3. 提交里带一行 `Feishu-Change: <清单路径>`，推送前钩子会自动改任务卡 / 测试表 / 变更表并通知群；同步失败会**拦下推送**
-
-每台机器先装一次钩子：`py -3.13 scripts/install_feishu_hook.py`。
-完整字段与应急开关见 [`feishu/README.md`](feishu/README.md)。
+| 每个改动**为什么**这么改 | 提交信息正文（写动机与取舍，diff 已经说明了「改了什么」） |
+| 怎么验证、人工冒烟清单 | [`TESTING.md`](TESTING.md) |
+| 怎么构建、怎么发版 | [`BUILD.md`](BUILD.md) / [`RELEASING.md`](RELEASING.md) |
 
 ## 什么算「做完了」
 
-看板上一张卡改「已完成」之前：
-
 1. 无头自检全绿（清单见 [`TESTING.md`](TESTING.md) 的「无头自检」）
-2. **变更日志加了一行**（只在下面两种情况之一）：
-   - 用户能感觉到的行为变了 → 要进 Release notes
-   - 有取舍，但没落成代码 → 比如「为什么不用某个方案」
-   - 字段只填 `改了什么` / `为什么` / `关联`（提交或 PR），`日期` 不填就是当天
-   - 重构、清理、依赖调整、修 typo **不记** —— 发版时 `git log v<上个版本>..HEAD --oneline` 一眼看全
-   - 判断标准：**三个月后，这件事能不能从 `git log` 里读出来？** 能 → 不写
-3. 用户能感觉到的行为变了 → `README.md` 对应小节也改了（同一个提交里改）
+2. 用户能感觉到的行为变了 → `README.md` 对应小节也改了（同一个提交里改）
+3. 提交信息说清「为什么」—— 三个月后回头看 `git log` 能读懂这次改动的动机
 
 只改代码不改文档 = 没做完。
 
 ---
 
-## 同学第一次上手（约 20 分钟）
+## 第一次上手（约 20 分钟）
 
 ### 1. 装环境
 
@@ -118,8 +80,8 @@ python tests/run_all.py   # 或按 TESTING.md「无头自检」逐个跑
 git switch main
 git pull
 
-# ② 开一条分支（名字带任务号，方便对上看板）
-git switch -c feat/t12-缩略图间距
+# ② 开一条分支（协作者用；维护者可以直推 main）
+git switch -c feat/缩略图间距
 
 # ③ 改代码，然后只提交你改的文件
 git status
@@ -127,24 +89,24 @@ git add FVPTachieComposerFlet.py
 git commit -m "feat: 缩略图间距 4px → 6px"
 
 # ④ 推上去
-git push -u origin feat/t12-缩略图间距
+git push -u origin feat/缩略图间距
 ```
 
-⑤ 终端会打印一个链接 → 打开 → 点 **Create pull request** → 把模板四项填完 → 群里 @维护者。
+⑤ 终端会打印一个链接 → 打开 → 点 **Create pull request** → 把模板填完 → 通知维护者。
 
 维护者用 **Squash and merge** 合并后，本地收尾：
 
 ```bash
 git switch main
 git pull
-git branch -d feat/t12-缩略图间距
+git branch -d feat/缩略图间距
 ```
 
 ---
 
 ## 提交信息怎么写
 
-格式：`类型: 一句话说清改了什么`
+格式：`类型(范围): 一句话说清为什么这么改`
 
 | 类型 | 用在 |
 | --- | --- |
@@ -153,6 +115,7 @@ git branch -d feat/t12-缩略图间距
 | `docs` | 只改文档 |
 | `style` | 只改格式 / 空白，不动逻辑 |
 | `perf` | 性能 |
+| `test` | 只加 / 改测试 |
 | `chore` | 依赖、构建、杂事 |
 
 中文写清楚即可。别写「更新」「修改」这种看不出内容的。
@@ -192,6 +155,6 @@ git switch fix/wip
 
 - 不要提交 `dist/`、`build/`、`.venv/`、截图、日志（`.gitignore` 挡了大部分，但别依赖它）
 - 不要 `git push --force`
-- 不要在飞书里贴代码片段当最终版 —— 代码只认 GitHub
-- 不要自己改版本号或发 Release（维护者负责，见 [`RELEASING.md`](RELEASING.md)）
+- 不要自己改版本号或发 Release（见 [`RELEASING.md`](RELEASING.md)）
+- 不要把 token、webhook、app secret 写进仓库或 GitHub Secrets
 - 不要把整个项目打包发给对方 —— 走 `git pull`

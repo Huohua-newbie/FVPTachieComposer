@@ -29,19 +29,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPTS = REPO / "scripts"
 
 # 必须在导入应用模块之前生效：否则 FVPTachieComposerFlet 会在仓库根建 logs/。
 os.environ["FVP_NO_FILE_LOG"] = "1"
 
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
-
-
-def ensure_scripts_on_path() -> None:
-    """飞书脚本不在包里，测试工具直接按路径导入。"""
-    if str(SCRIPTS) not in sys.path:
-        sys.path.insert(0, str(SCRIPTS))
 
 
 def configure_utf8_console() -> None:

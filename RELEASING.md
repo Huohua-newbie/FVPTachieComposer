@@ -24,11 +24,12 @@
 
 见 `BUILD.md` 的「发布动作」章节：`build + tag` → 建 Draft → `curl --http1.1` 传资产 → 放行并核对。
 
-发版前顺手做两件：
+发版前顺手做三件：
 
-1. **变更日志**：把「待发版」视图里这批（版本为空）填上这次版本号 —— 这一行就是 Release 说明的用户向内容
-2. **`git log v<上个版本>..HEAD --oneline`**：变更日志刻意不收重构与内部整理，扫一眼确认没有漏掉用户能感觉到的改动
-3. **README**：对着变更日志扫一遍，用户能感觉到的行为有没有漏改 README 的（README 是唯一的功能说明）
+1. **`git log v<上个版本>..HEAD --oneline`**：扫一遍，挑出用户能感觉到的改动写进 Release 说明
+   （模板见 [`.github/RELEASE_NOTES_TEMPLATE.md`](.github/RELEASE_NOTES_TEMPLATE.md)）；重构与内部整理不收
+2. **README**：对着这批提交扫一遍，用户能感觉到的行为有没有漏改 README 的（README 是唯一的功能说明）
+3. **无头自检**：`python tests/run_all.py` 全绿再打包
 
 ## 硬规则
 
